@@ -146,6 +146,10 @@ add_executable(cumetal_runtime_host_pointer_api_test
     runtime_host_pointer_api_test.cpp
 )
 
+add_executable(cumetal_binary_archive_cache_test
+    binary_archive_cache_test.cpp
+)
+
 add_executable(cumetal_runtime_stream_flags_test
     runtime_stream_flags_test.cpp
 )
@@ -429,6 +433,22 @@ add_executable(cumetal_runtime_atomic_test
 
 add_executable(cumetal_runtime_typed_atomic_family_test
     runtime_typed_atomic_family_test.cpp
+)
+
+add_executable(cumetal_runtime_ptx_wmma_test
+    runtime_ptx_wmma_test.cpp
+)
+
+add_executable(cumetal_runtime_ptx_mma_test
+    runtime_ptx_mma_test.cpp
+)
+
+add_executable(cumetal_runtime_ptx_ldmatrix_test
+    runtime_ptx_ldmatrix_test.cpp
+)
+
+add_executable(cumetal_runtime_ptx_device_heap_test
+    runtime_ptx_device_heap_test.cpp
 )
 
 add_executable(cumetal_runtime_atomic_shared_test
@@ -806,6 +826,16 @@ target_link_libraries(cumetal_runtime_host_pointer_api_test
         cumetal_runtime
 )
 
+target_link_libraries(cumetal_binary_archive_cache_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_include_directories(cumetal_binary_archive_cache_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/metal_backend
+)
+
 target_link_libraries(cumetal_runtime_stream_flags_test
     PRIVATE
         cumetal_runtime
@@ -1177,6 +1207,26 @@ target_link_libraries(cumetal_runtime_atomic_test
 )
 
 target_link_libraries(cumetal_runtime_typed_atomic_family_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_ptx_wmma_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_ptx_mma_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_ptx_ldmatrix_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_ptx_device_heap_test
     PRIVATE
         cumetal_runtime
 )
@@ -2092,6 +2142,34 @@ target_compile_options(cumetal_runtime_typed_atomic_family_test
         -Wpedantic
 )
 
+target_compile_options(cumetal_runtime_ptx_wmma_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_ptx_mma_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_ptx_ldmatrix_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_ptx_device_heap_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
 target_compile_options(cumetal_runtime_atomic_shared_test
     PRIVATE
         -Wall
@@ -2530,6 +2608,11 @@ set_tests_properties(functional_runtime_pageable_memcpy PROPERTIES SKIP_RETURN_C
 add_test(
     NAME functional_runtime_host_pointer_api
     COMMAND cumetal_runtime_host_pointer_api_test
+)
+
+add_test(
+    NAME functional_binary_archive_cache
+    COMMAND cumetal_binary_archive_cache_test
 )
 
 add_test(
@@ -4011,6 +4094,53 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 --backend=legacy
     )
     set_tests_properties(functional_wmma_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Raw PTX wmma m16n16k16 through the typed importer, launched from
+    # in-process MSL so the numeric gate does not need the offline
+    # Metal toolchain.
+    add_test(
+        NAME functional_ptx_wmma_numeric
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_wmma.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_wmma_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ptx_wmma_m16n16k16.ptx
+                ${CMAKE_CURRENT_BINARY_DIR}/ptx_wmma_m16n16k16.metal
+    )
+    set_tests_properties(functional_ptx_wmma_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_ptx_mma_numeric
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_wmma.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_mma_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ptx_mma_m16n8k16.ptx
+                ${CMAKE_CURRENT_BINARY_DIR}/ptx_mma_m16n8k16.metal
+    )
+    set_tests_properties(functional_ptx_mma_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_ptx_ldmatrix_numeric
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_wmma.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_ldmatrix_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ptx_ldmatrix_x4.ptx
+                ${CMAKE_CURRENT_BINARY_DIR}/ptx_ldmatrix_x4.metal
+    )
+    set_tests_properties(functional_ptx_ldmatrix_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_ptx_device_heap
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_ptx_wmma.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_ptx_device_heap_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/ptx_device_heap.ptx
+                ${CMAKE_CURRENT_BINARY_DIR}/ptx_device_heap.metal
+    )
+    set_tests_properties(functional_ptx_device_heap PROPERTIES SKIP_RETURN_CODE 77)
 
     # Device-side new/delete uses a persistent bounded heap shared by kernels.
     # Exercise cross-launch pointer lifetime, free-list reuse, exhaustion, and

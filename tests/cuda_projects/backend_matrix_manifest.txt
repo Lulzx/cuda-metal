@@ -19,7 +19,7 @@ tests/cuda_projects/constant_symbol/constant_symbol.cu fail pass pass pass
 tests/cuda_projects/cooperative_thread_group/cooperative_thread_group.cu fail pass pass pass
 tests/cuda_projects/cub_block_reduce/cub_block_reduce.cu fail pass pass pass
 tests/cuda_projects/cub_block_scan/cub_block_scan.cu fail pass pass pass
-tests/cuda_projects/descriptor_copy/descriptor_copy.cu fail pass fail fail
+tests/cuda_projects/descriptor_copy/descriptor_copy.cu fail pass fail pass
 tests/cuda_projects/device_calls/device_calls.cu fail pass pass pass
 tests/cuda_projects/device_graph_probe/device_graph_probe.cu fail pass pass pass
 tests/cuda_projects/device_printf_clang/device_printf_clang.cu fail pass pass pass
@@ -29,7 +29,7 @@ tests/cuda_projects/flash_attn/flash_standalone.cu fail pass pass pass
 tests/cuda_projects/float_atomics/float_atomics.cu fail pass pass pass
 tests/cuda_projects/fp64/fp64_precision.cu fail pass pass pass
 tests/cuda_projects/fp64_atomic_add/fp64_atomic_add.cu fail pass pass pass
-tests/cuda_projects/fp64_device_calls/fp64_device_calls.cu fail pass fail fail
+tests/cuda_projects/fp64_device_calls/fp64_device_calls.cu fail pass fail pass
 tests/cuda_projects/fp64_reciprocal/fp64_reciprocal.cu fail pass fail pass
 tests/cuda_projects/fp64_vf64_math/fp64_vf64_math.cu fail pass pass pass
 tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass

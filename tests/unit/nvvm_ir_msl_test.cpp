@@ -65,6 +65,226 @@ declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
 )llvm";
 
+constexpr const char* kNvvmButterflyReduce = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @warp_reduce(ptr %in, ptr %out) {
+entry:
+  %thread = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %wide = sext i32 %thread to i64
+  %p = getelementptr float, ptr %in, i64 %wide
+  %v0 = load float, ptr %p, align 4
+  %b0 = bitcast float %v0 to i32
+  %s1 = call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %b0, i32 16, i32 31)
+  %f1 = bitcast i32 %s1 to float
+  %v1 = fadd float %v0, %f1
+  %b1 = bitcast float %v1 to i32
+  %s2 = call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %b1, i32 8, i32 31)
+  %f2 = bitcast i32 %s2 to float
+  %v2 = fadd float %v1, %f2
+  %b2 = bitcast float %v2 to i32
+  %s3 = call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %b2, i32 4, i32 31)
+  %f3 = bitcast i32 %s3 to float
+  %v3 = fadd float %v2, %f3
+  %b3 = bitcast float %v3 to i32
+  %s4 = call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %b3, i32 2, i32 31)
+  %f4 = bitcast i32 %s4 to float
+  %v4 = fadd float %v3, %f4
+  %b4 = bitcast float %v4 to i32
+  %s5 = call i32 @llvm.nvvm.shfl.sync.bfly.i32(i32 -1, i32 %b4, i32 1, i32 31)
+  %f5 = bitcast i32 %s5 to float
+  %v5 = fadd float %v4, %f5
+  %po = getelementptr float, ptr %out, i64 %wide
+  store float %v5, ptr %po, align 4
+  ret void
+}
+
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+declare i32 @llvm.nvvm.shfl.sync.bfly.i32(i32, i32, i32, i32)
+)llvm";
+
+constexpr const char* kNvvmLaunchBounds = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @bounded_kernel(ptr %out, float %value) #0 {
+entry:
+  %thread = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %wide = sext i32 %thread to i64
+  %p = getelementptr float, ptr %out, i64 %wide
+  store float %value, ptr %p, align 4
+  ret void
+}
+
+attributes #0 = { "nvvm.maxntid"="256" }
+
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+)llvm";
+
+constexpr const char* kNvvmWmmaMarker = R"llvm(
+target datalayout = "e-p:64:64-p3:32:32-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @wmma_kernel(ptr addrspace(3) %dst, ptr addrspace(3) %a, ptr addrspace(3) %b) {
+entry:
+  call void @__cumetal_wmma_f32_mma_8x8(ptr addrspace(3) %dst, ptr addrspace(3) %a, ptr addrspace(3) %b)
+  ret void
+}
+
+declare void @__cumetal_wmma_f32_mma_8x8(ptr addrspace(3), ptr addrspace(3), ptr addrspace(3))
+)llvm";
+
+constexpr const char* kPtxMaxntid = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry bounded_ptx(.param .u64 p) .maxntid 64, 2, 1
+{
+    .reg .u64 %rd<2>;
+    ld.param.u64 %rd1, [p];
+    ret;
+}
+)ptx";
+
+constexpr const char* kPtxWmma = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry wm(.param .u64 a, .param .u64 b, .param .u64 c)
+{
+    .reg .b32 %r<16>;
+    .reg .f32 %f<16>;
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [a];
+    ld.param.u64 %rd2, [b];
+    ld.param.u64 %rd3, [c];
+    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {%r0, %r1, %r2, %r3}, [%rd1], 16;
+    wmma.load.b.sync.aligned.m16n16k16.global.col.f16 {%r4, %r5, %r6, %r7}, [%rd2], 16;
+    wmma.load.c.sync.aligned.m16n16k16.global.row.f32 {%f0, %f1, %f2, %f3, %f4, %f5, %f6, %f7}, [%rd3], 16;
+    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {%f8, %f9, %f10, %f11, %f12, %f13, %f14, %f15}, {%r0, %r1, %r2, %r3}, {%r4, %r5, %r6, %r7}, {%f0, %f1, %f2, %f3, %f4, %f5, %f6, %f7};
+    wmma.store.d.sync.aligned.m16n16k16.global.row.f32 [%rd3], {%f8, %f9, %f10, %f11, %f12, %f13, %f14, %f15}, 16;
+    ret;
+}
+)ptx";
+
+constexpr const char* kPtxMmaSync = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry mm(.param .u64 d)
+{
+    .reg .b32 %r<8>;
+    .reg .f32 %f<8>;
+    .reg .b64 %rd<2>;
+    ld.param.u64 %rd1, [d];
+    mov.u32 %r0, 0x3c003c00;
+    mov.u32 %r1, 0x3c003c00;
+    mov.u32 %r2, 0x3c003c00;
+    mov.u32 %r3, 0x3c003c00;
+    mov.u32 %r4, 0x3c003c00;
+    mov.u32 %r5, 0x3c003c00;
+    mov.f32 %f0, 0f00000000;
+    mov.f32 %f1, 0f00000000;
+    mov.f32 %f2, 0f00000000;
+    mov.f32 %f3, 0f00000000;
+    mma.sync.aligned.m16n8k16.row.col.f32.f16.f16.f32 {%f4, %f5, %f6, %f7}, {%r0, %r1, %r2, %r3}, {%r4, %r5}, {%f0, %f1, %f2, %f3};
+    st.global.f32 [%rd1], %f4;
+    ret;
+}
+)ptx";
+
+constexpr const char* kPtxLdmatrix = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.shared .align 16 .b8 smem[512];
+.visible .entry ldm(.param .u64 out)
+{
+    .reg .b32 %r<8>;
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [out];
+    mov.b64 %rd2, smem;
+    ldmatrix.sync.aligned.m8n8.x4.shared.b16 {%r0, %r1, %r2, %r3}, [%rd2];
+    st.global.b32 [%rd1], %r0;
+    ret;
+}
+)ptx";
+
+constexpr const char* kPtxRedux = R"ptx(
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry warp_ptx_reduce(.param .u64 in_ptr, .param .u64 out_ptr)
+{
+    .reg .s32 %r<12>;
+    .reg .u64 %rd<4>;
+    .reg .pred %p<2>;
+    ld.param.u64 %rd1, [in_ptr];
+    ld.param.u64 %rd2, [out_ptr];
+    mov.u32 %r1, %tid.x;
+    cvta.to.global.u64 %rd3, %rd1;
+    mul.wide.s32 %rd1, %r1, 4;
+    add.u64 %rd1, %rd3, %rd1;
+    ld.global.s32 %r2, [%rd1];
+    redux.sync.add.s32 %r3, %r2, -1;
+    redux.sync.max.s32 %r4, %r2, -1;
+    and.b32 %r5, %r1, 31;
+    setp.eq.s32 %p1, %r5, 0;
+    @!%p1 bra DONE;
+    shr.u32 %r6, %r1, 5;
+    mul.wide.s32 %rd1, %r6, 4;
+    cvta.to.global.u64 %rd3, %rd2;
+    add.u64 %rd1, %rd3, %rd1;
+    st.global.s32 [%rd1], %r3;
+    add.u64 %rd1, %rd1, 128;
+    st.global.s32 [%rd1], %r4;
+DONE:
+    ret;
+}
+)ptx";
+
+// A by-value 16-byte packed parameter populated by a b64 store at +0 and
+// a b32 store at +8; the +12 padding word is never stored.
+constexpr const char* kPtxPackedParamPadding = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .func (.param .b32 func_retval0) helper(
+    .param .align 8 .b8 helper_param_0[16]
+)
+{
+    .reg .b32 %r<3>;
+    .reg .b64 %rd<2>;
+    mov.b64 %rd1, helper_param_0;
+    ld.local.b32 %r1, [%rd1+8];
+    st.param.b32 [func_retval0], %r1;
+    ret;
+}
+.visible .entry probe(
+    .param .align 8 .b8 probe_param_0[16],
+    .param .u64 out_ptr
+)
+{
+    .reg .b32 %r<4>;
+    .reg .b64 %rd<6>;
+    ld.param.u64 %rd1, [out_ptr];
+    cvta.to.global.u64 %rd2, %rd1;
+    ld.param.b64 %rd3, [probe_param_0];
+    ld.param.b32 %r1, [probe_param_0+8];
+    { // callseq 0, 0
+    .param .align 8 .b8 param0[16];
+    .param .b32 retval0;
+    st.param.b64 [param0], %rd3;
+    st.param.b32 [param0+8], %r1;
+    call.uni (retval0), helper, (param0);
+    ld.param.b32 %r2, [retval0];
+    } // callseq 0
+    st.global.b32 [%rd2], %r2;
+    ret;
+}
+)ptx";
+
 constexpr const char* kNvvmPrintf = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -1690,6 +1910,57 @@ int main() {
     ok &= expect(result.source.find("device uchar*") != std::string::npos &&
                      result.source.find("const device uchar*") == std::string::npos,
                  "hoisted SSA pointer storage does not make device pointees read-only");
+    {
+        // Register-pressure estimator: vector_add keeps a handful of
+        // values live, and the estimate is surfaced in the MSL header.
+        bool found_kernel = false;
+        for (const auto& function : result.gpu_ir.functions) {
+            if (!function.is_kernel || !function.kernel_abi.has_value()) continue;
+            found_kernel = true;
+            const std::uint32_t pressure =
+                function.kernel_abi->estimated_register_pressure;
+            ok &= expect(pressure >= 4 && pressure <= 64,
+                         "vector_add register-pressure estimate is sane");
+            ok &= expect(ir::estimate_register_pressure(function) == pressure,
+                         "register-pressure estimate is stored in KernelAbi");
+        }
+        ok &= expect(found_kernel, "vector_add kernel carries a KernelAbi");
+        ok &= expect(result.source.find(
+                         "cumetal-register-pressure-warning:") ==
+                         std::string::npos,
+                     "low-pressure kernel gets no launch-bound warning");
+    }
+    {
+        // A hand-built function holding 120 FP32 values live at once must
+        // estimate at least 120 registers.
+        ir::Function wide;
+        wide.name = "wide";
+        wide.is_kernel = true;
+        wide.kernel_abi = ir::KernelAbi{};
+        ir::BasicBlock block;
+        block.id = 1;
+        for (std::uint32_t i = 0; i < 120; ++i) {
+            ir::Operation constant;
+            constant.opcode = ir::OpCode::kConstant;
+            constant.results = {i + 1};
+            constant.result_types = {ir::Type::floating(32)};
+            block.operations.push_back(std::move(constant));
+        }
+        ir::Operation sum;
+        sum.opcode = ir::OpCode::kAdd;
+        sum.results = {121};
+        sum.result_types = {ir::Type::floating(32)};
+        for (std::uint32_t i = 0; i < 120; ++i)
+            sum.operands.push_back(
+                ir::Operand::value_ref(i + 1, ir::Type::floating(32)));
+        block.operations.push_back(std::move(sum));
+        ir::Operation ret;
+        ret.opcode = ir::OpCode::kReturn;
+        block.operations.push_back(std::move(ret));
+        wide.blocks.push_back(std::move(block));
+        ok &= expect(ir::estimate_register_pressure(wide) >= 120,
+                     "wide kernel register-pressure estimate counts live values");
+    }
 
     const metal::NvvmToMslResult selected =
         metal::compile_nvvm_to_msl(kNvvmSelectedCall, "selected.ll", "selected");
@@ -2674,6 +2945,308 @@ int main() {
     ok &= expect(sign_extend.ok && sign_extend.source.find("ulong(int(") != std::string::npos,
                  "typed NVVM sign-extends i32 to i64 through int");
     if (!sign_extend.ok) std::cerr << sign_extend.error << "\n";
+
+    // An unrolled __shfl_xor_sync butterfly (widths 16..1, full mask) is a
+    // full-warp reduction and must become one simd_sum, not five shuffles.
+    const metal::NvvmToMslResult butterfly =
+        metal::compile_nvvm_to_msl(kNvvmButterflyReduce, "butterfly.ll", "warp_reduce");
+    ok &= expect(butterfly.ok, "NVVM butterfly warp reduction lowers");
+    if (butterfly.ok) {
+        ok &= expect(butterfly.source.find("simd_sum(") != std::string::npos,
+                     "butterfly reduction folds into simd_sum");
+        ok &= expect(butterfly.source.find("simd_shuffle") == std::string::npos,
+                     "butterfly reduction leaves no per-step shuffles");
+    } else {
+        std::cerr << butterfly.error << "\n";
+    }
+
+    // __launch_bounds__ (nvvm.maxntid) becomes a Metal launch-bound
+    // attribute so register allocation uses the real threadgroup size.
+    const metal::NvvmToMslResult bounded =
+        metal::compile_nvvm_to_msl(kNvvmLaunchBounds, "bounded.ll", "bounded_kernel");
+    ok &= expect(bounded.ok, "NVVM launch-bounds kernel lowers");
+    if (bounded.ok) {
+        ok &= expect(bounded.source.find(
+                         "[[max_total_threads_per_threadgroup(256)]]") !=
+                         std::string::npos,
+                     "launch bound becomes max_total_threads_per_threadgroup");
+    } else {
+        std::cerr << bounded.error << "\n";
+    }
+
+    // PTX .maxntid reaches the same launch-bound attribute.
+    metal::PtxToMslOptions bounded_ptx_options;
+    bounded_ptx_options.entry_name = "bounded_ptx";
+    bounded_ptx_options.source_name = "bounded.ptx";
+    const metal::PtxToMslResult bounded_ptx =
+        metal::compile_ptx_to_msl(kPtxMaxntid, bounded_ptx_options);
+    ok &= expect(bounded_ptx.ok, "PTX .maxntid kernel lowers");
+    if (bounded_ptx.ok) {
+        ok &= expect(bounded_ptx.source.find(
+                         "[[max_total_threads_per_threadgroup(128)]]") !=
+                         std::string::npos,
+                     "PTX .maxntid becomes max_total_threads_per_threadgroup");
+    } else {
+        std::cerr << bounded_ptx.error << "\n";
+    }
+
+    // The WMMA 8x8 marker from runtime/api/mma.h becomes simdgroup_matrix
+    // hardware operations in typed MSL.
+    const metal::NvvmToMslResult wmma =
+        metal::compile_nvvm_to_msl(kNvvmWmmaMarker, "wmma.ll", "wmma_kernel");
+    ok &= expect(wmma.ok, "NVVM WMMA marker lowers");
+    if (wmma.ok) {
+        ok &= expect(wmma.source.find("simdgroup_matrix<float, 8, 8>") !=
+                         std::string::npos,
+                     "WMMA marker declares simdgroup_matrix tiles");
+        ok &= expect(wmma.source.find("simdgroup_multiply_accumulate") !=
+                         std::string::npos,
+                     "WMMA marker emits simdgroup_multiply_accumulate");
+        ok &= expect(wmma.source.find("simdgroup_load") != std::string::npos &&
+                         wmma.source.find("simdgroup_store") != std::string::npos,
+                     "WMMA marker emits simdgroup load/store");
+    } else {
+        std::cerr << wmma.error << "\n";
+    }
+
+    // PTX redux.sync with a full membermask maps to the same hardware ops.
+    metal::PtxToMslOptions redux_options;
+    redux_options.entry_name = "warp_ptx_reduce";
+    redux_options.source_name = "redux.ptx";
+    const metal::PtxToMslResult redux =
+        metal::compile_ptx_to_msl(kPtxRedux, redux_options);
+    ok &= expect(redux.ok, "PTX redux.sync lowers through typed IR");
+    if (redux.ok) {
+        ok &= expect(redux.source.find("simd_sum(") != std::string::npos,
+                     "redux.sync.add becomes simd_sum");
+        ok &= expect(redux.source.find("simd_max(int(") != std::string::npos,
+                     "redux.sync.max.s32 becomes signed simd_max");
+    } else {
+        std::cerr << redux.error << "\n";
+    }
+
+    // Raw PTX wmma m16n16k16 (f16 inputs, f32 accumulator) lowers through
+    // the typed importer: pointer parameters used only as wmma bracket
+    // addresses must classify as buffers, and the mma must reach the 8x8
+    // simdgroup hardware path.
+    metal::PtxToMslOptions wmma_ptx_options;
+    wmma_ptx_options.entry_name = "wm";
+    wmma_ptx_options.source_name = "wmma.ptx";
+    const metal::PtxToMslResult wmma_ptx =
+        metal::compile_ptx_to_msl(kPtxWmma, wmma_ptx_options);
+    ok &= expect(wmma_ptx.ok, "PTX wmma m16n16k16 lowers through typed IR");
+    if (wmma_ptx.ok) {
+        ok &= expect(wmma_ptx.source.find("simdgroup_multiply_accumulate") !=
+                         std::string::npos,
+                     "PTX wmma emits simdgroup_multiply_accumulate");
+        ok &= expect(wmma_ptx.source.find("device uchar* a") != std::string::npos,
+                     "PTX wmma-only address parameter classifies as a buffer");
+    } else {
+        std::cerr << wmma_ptx.error << "\n";
+    }
+    // Raw PTX mma.sync m16n8k16 row.col f16/f32 lowers to the same 8x8
+    // simdgroup hardware path; other shapes are refused.
+    metal::PtxToMslOptions mma_ptx_options;
+    mma_ptx_options.entry_name = "mm";
+    mma_ptx_options.source_name = "mma.ptx";
+    const metal::PtxToMslResult mma_ptx =
+        metal::compile_ptx_to_msl(kPtxMmaSync, mma_ptx_options);
+    ok &= expect(mma_ptx.ok, "PTX mma.sync m16n8k16 lowers through typed IR");
+    if (mma_ptx.ok) {
+        ok &= expect(mma_ptx.source.find("simdgroup_multiply_accumulate") !=
+                         std::string::npos,
+                     "PTX mma.sync emits simdgroup_multiply_accumulate");
+    } else {
+        std::cerr << mma_ptx.error << "\n";
+    }
+    // Raw PTX ldmatrix m8n8.x4.shared.b16 lowers through the typed
+    // importer; the .trans variant is refused.
+    metal::PtxToMslOptions ldmatrix_options;
+    ldmatrix_options.entry_name = "ldm";
+    ldmatrix_options.source_name = "ldm.ptx";
+    const metal::PtxToMslResult ldmatrix_ptx =
+        metal::compile_ptx_to_msl(kPtxLdmatrix, ldmatrix_options);
+    ok &= expect(ldmatrix_ptx.ok, "PTX ldmatrix m8n8.x4 lowers through typed IR");
+    if (!ldmatrix_ptx.ok) {
+        std::cerr << ldmatrix_ptx.error << "\n";
+    }
+    const std::string ldmatrix_trans =
+        std::string(kPtxLdmatrix).replace(
+            std::string(kPtxLdmatrix).find(".x4"), 3, ".x4.trans");
+    const metal::PtxToMslResult ldmatrix_bad =
+        metal::compile_ptx_to_msl(ldmatrix_trans, ldmatrix_options);
+    ok &= expect(!ldmatrix_bad.ok, "PTX ldmatrix .trans is refused");
+
+    const std::string mma_bad_shape = std::string(kPtxMmaSync).replace(
+        std::string(kPtxMmaSync).find("m16n8k16"), 8, "m16n8k8");
+    const metal::PtxToMslResult mma_bad =
+        metal::compile_ptx_to_msl(mma_bad_shape, mma_ptx_options);
+    ok &= expect(!mma_bad.ok, "PTX mma.sync non-m16n8k16 shape is refused");
+
+    const std::string wmma_bad_shape = std::string(kPtxWmma).replace(
+        std::string(kPtxWmma).find("m16n16k16"), 9, "m8n32k16");
+    const metal::PtxToMslResult wmma_bad =
+        metal::compile_ptx_to_msl(wmma_bad_shape, wmma_ptx_options);
+    ok &= expect(!wmma_bad.ok, "PTX wmma non-16x16x16 shape is refused");
+
+    // A Pair{double,double} return stored as two f64 words over a 4xu32
+    // packed aggregate must split into u32 halves (bitcast, not convert).
+    const std::string fp64_packed_return_ptx = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .func (.param .align 8 .b8 func_retval0[16]) widen(
+    .param .b64 widen_param_0
+)
+{
+    .reg .b64 %rd<4>;
+    ld.param.b64 %rd1, [widen_param_0];
+    add.f64 %rd2, %rd1, 0d3FF0000000000000;
+    st.param.b64 [func_retval0+8], %rd2;
+    st.param.b64 [func_retval0], %rd1;
+    ret;
+}
+.visible .entry probe2(
+    .param .u64 in_ptr,
+    .param .u64 out_ptr
+)
+{
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [in_ptr];
+    cvta.to.global.u64 %rd2, %rd1;
+    ld.global.b64 %rd3, [%rd2];
+    { // callseq 0, 0
+    .param .align 8 .b8 retval0[16];
+    .param .b64 param0;
+    st.param.b64 [param0], %rd3;
+    call.uni (retval0), widen, (param0);
+    ld.param.b64 %rd4, [retval0+8];
+    } // callseq 0
+    ld.param.u64 %rd5, [out_ptr];
+    cvta.to.global.u64 %rd6, %rd5;
+    st.global.b64 [%rd6], %rd4;
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions fp64_return_options;
+    fp64_return_options.entry_name = "probe2";
+    fp64_return_options.source_name = "fp64_return.ptx";
+    const metal::PtxToMslResult fp64_return =
+        metal::compile_ptx_to_msl(fp64_packed_return_ptx, fp64_return_options);
+    ok &= expect(fp64_return.ok,
+                 "PTX f64 packed aggregate return lowers through typed IR");
+    if (!fp64_return.ok) {
+        std::cerr << fp64_return.error << "\n";
+    }
+
+    // Warp-aggregated atomics: a uniform-address add in uniform control
+    // flow uses the one-atomic-per-warp helper; a lane-dependent address
+    // or a divergent guard keeps the per-lane atomic.
+    const std::string atomic_ptx_prefix = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+)ptx";
+    const std::string atomic_uniform_ptx = atomic_ptx_prefix + R"ptx(
+.visible .entry agg_uniform(.param .u64 counter, .param .u64 out)
+{
+    .reg .b64 %rd<6>;
+    .reg .b32 %r<3>;
+    ld.param.u64 %rd1, [counter];
+    cvta.to.global.u64 %rd2, %rd1;
+    atom.global.add.u32 %r1, [%rd2], 1;
+    ld.param.u64 %rd3, [out];
+    cvta.to.global.u64 %rd4, %rd3;
+    mov.u32 %r2, %tid.x;
+    mul.wide.u32 %rd5, %r2, 4;
+    add.u64 %rd4, %rd4, %rd5;
+    st.global.b32 [%rd4], %r1;
+    ret;
+}
+)ptx";
+    const std::string atomic_divergent_ptx = atomic_ptx_prefix + R"ptx(
+.visible .entry agg_divergent(.param .u64 counter)
+{
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<3>;
+    .reg .pred %p<2>;
+    mov.u32 %r1, %tid.x;
+    setp.lt.u32 %p1, %r1, 16;
+    @!%p1 bra DONE;
+    ld.param.u64 %rd1, [counter];
+    cvta.to.global.u64 %rd2, %rd1;
+    atom.global.add.u32 %r2, [%rd2], 1;
+DONE:
+    ret;
+}
+)ptx";
+    const std::string atomic_lane_address_ptx = atomic_ptx_prefix + R"ptx(
+.visible .entry agg_lane_address(.param .u64 counter)
+{
+    .reg .b64 %rd<5>;
+    .reg .b32 %r<3>;
+    ld.param.u64 %rd1, [counter];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %tid.x;
+    mul.wide.u32 %rd3, %r1, 4;
+    add.u64 %rd4, %rd2, %rd3;
+    atom.global.add.u32 %r2, [%rd4], 1;
+    ret;
+}
+)ptx";
+    auto compile_atomic = [&](const std::string& ptx, const char* entry) {
+        metal::PtxToMslOptions options;
+        options.entry_name = entry;
+        options.source_name = "atomic.ptx";
+        return metal::compile_ptx_to_msl(ptx, options);
+    };
+    const metal::PtxToMslResult agg_uniform =
+        compile_atomic(atomic_uniform_ptx, "agg_uniform");
+    ok &= expect(agg_uniform.ok, "uniform atomic PTX lowers");
+    if (agg_uniform.ok) {
+        ok &= expect(agg_uniform.source.find(
+                         "cm_atomic_add_warp_aggregated_device(") !=
+                         std::string::npos,
+                     "uniform-address atomic add is warp-aggregated");
+        ok &= expect(agg_uniform.source.find("simd_prefix_exclusive_sum") !=
+                         std::string::npos,
+                     "aggregated atomic reconstructs per-lane old values");
+    } else {
+        std::cerr << agg_uniform.error << "\n";
+    }
+    const metal::PtxToMslResult agg_divergent =
+        compile_atomic(atomic_divergent_ptx, "agg_divergent");
+    ok &= expect(agg_divergent.ok, "divergent atomic PTX lowers");
+    if (agg_divergent.ok) {
+        ok &= expect(agg_divergent.source.find("warp_aggregated") ==
+                         std::string::npos,
+                     "divergent-guarded atomic is not warp-aggregated");
+    } else {
+        std::cerr << agg_divergent.error << "\n";
+    }
+    const metal::PtxToMslResult agg_lane =
+        compile_atomic(atomic_lane_address_ptx, "agg_lane_address");
+    ok &= expect(agg_lane.ok, "lane-address atomic PTX lowers");
+    if (agg_lane.ok) {
+        ok &= expect(agg_lane.source.find("warp_aggregated") ==
+                         std::string::npos,
+                     "lane-addressed atomic is not warp-aggregated");
+    } else {
+        std::cerr << agg_lane.error << "\n";
+    }
+
+    // Packed by-value parameters: a b64+b32 store pair over a 4xu32
+    // aggregate with an unwritten padding word must materialize.
+    metal::PtxToMslOptions packed_options;
+    packed_options.entry_name = "probe";
+    packed_options.source_name = "packed.ptx";
+    const metal::PtxToMslResult packed =
+        metal::compile_ptx_to_msl(kPtxPackedParamPadding, packed_options);
+    ok &= expect(packed.ok,
+                 "PTX packed parameter with padding word lowers through typed IR");
+    if (!packed.ok) {
+        std::cerr << packed.error << "\n";
+    }
 
     if (!ok) return 1;
     std::cout << "NVVM -> CuMetal IR -> typed MSL tests passed\n";

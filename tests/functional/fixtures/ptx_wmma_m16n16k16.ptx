@@ -1,0 +1,18 @@
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry wm(.param .u64 a, .param .u64 b, .param .u64 c)
+{
+    .reg .b32 %r<16>;
+    .reg .f32 %f<16>;
+    .reg .b64 %rd<8>;
+    ld.param.u64 %rd1, [a];
+    ld.param.u64 %rd2, [b];
+    ld.param.u64 %rd3, [c];
+    wmma.load.a.sync.aligned.m16n16k16.global.row.f16 {%r0, %r1, %r2, %r3}, [%rd1], 16;
+    wmma.load.b.sync.aligned.m16n16k16.global.col.f16 {%r4, %r5, %r6, %r7}, [%rd2], 16;
+    wmma.load.c.sync.aligned.m16n16k16.global.row.f32 {%f0, %f1, %f2, %f3, %f4, %f5, %f6, %f7}, [%rd3], 16;
+    wmma.mma.sync.aligned.m16n16k16.row.col.f32.f16.f16.f32 {%f8, %f9, %f10, %f11, %f12, %f13, %f14, %f15}, {%r0, %r1, %r2, %r3}, {%r4, %r5, %r6, %r7}, {%f0, %f1, %f2, %f3, %f4, %f5, %f6, %f7};
+    wmma.store.d.sync.aligned.m16n16k16.global.row.f32 [%rd3], {%f8, %f9, %f10, %f11, %f12, %f13, %f14, %f15}, 16;
+    ret;
+}
