@@ -128,6 +128,23 @@ CUMETAL_TRACE_GPU=1 /tmp/vectorAdd
 An installed `cumetalc` finds its headers, `libcumetal.dylib`, and the `ptxas`/`fatbinary` shims
 relative to its own path. Set `CUMETAL_ROOT` to point it at a prefix explicitly.
 
+Use CuMetal as a CMake CUDA compiler
+------------------------------------
+
+The build tree contains a minimal toolkit-shaped directory whose `bin/nvcc`
+is `cumetalc` itself (nvcc-compatible probes, per-object `-c` builds, and
+link mode included), so an unmodified CMake CUDA project configures with:
+
+```bash
+cmake -B build-cuda -DCMAKE_CUDA_COMPILER=$PWD/build/cumetal-toolkit/bin/nvcc
+cmake --build build-cuda
+```
+
+Kernel-bearing objects still need the offline Metal toolchain for metallib
+emission; kernel-free translation units compile and link without it.
+`unit_cumetalc_cmake_toolkit` covers configure, compiler identification,
+and a kernel-free build/run.
+
 Use `cumetal doctor` to check Apple Silicon, macOS, LLVM, Metal tools, headers,
 and runtime discovery in one pass.
 

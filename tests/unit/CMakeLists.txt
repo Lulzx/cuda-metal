@@ -563,6 +563,14 @@ add_test(
 )
 
 add_test(
+    NAME unit_cumetalc_cmake_toolkit
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_cmake_toolkit_test.sh
+            ${CMAKE_BINARY_DIR}/cumetal-toolkit
+            ${CMAKE_CURRENT_BINARY_DIR}/cmake_toolkit_probe
+)
+
+add_test(
     NAME unit_intrinsic_lower
     COMMAND cumetal_intrinsic_lower_test
 )
