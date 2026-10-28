@@ -1,5 +1,6 @@
 #include "trap_reporting.h"
 #include "record_contexts.h"
+#include "private_array_scalarize.h"
 #include "cumetal/metal/lower_to_msl.h"
 #include "cumetal/common/compile_trace.h"
 #include "cumetal/common/kernel_abi.h"
@@ -9079,6 +9080,9 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     }
     for (ir::Function& function : result.module.functions) {
         mark_warp_aggregated_atomics(function);
+    }
+    for (ir::Function& function : result.module.functions) {
+        detail::scalarize_private_arrays(function);
     }
 
     for (ir::Function& function : result.module.functions) {
