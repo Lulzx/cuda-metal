@@ -50,6 +50,7 @@ struct LowerToMetalResult {
     // ring-buffer argument (spec §5.3).  printf_formats[i] is the format string for id i.
     std::vector<std::string> printf_formats;
     bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
     // A double libdevice call was evaluated in binary32 (see LowerToLlvmResult).
     bool fp64_libdevice_via_f32 = false;
     std::vector<std::string> warnings;

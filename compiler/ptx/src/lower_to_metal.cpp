@@ -3524,6 +3524,7 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         result.lowering_kind = MetalLoweringKind::kGenericCumetalIr;
         result.printf_formats = compiled.printf_formats;
         result.uses_device_heap = compiled.uses_device_heap;
+        result.uses_device_launch_queue = compiled.uses_device_launch_queue;
         const auto& caveats = compiled.gpu_ir.semantic_caveats;
         result.fp64_libdevice_via_f32 =
             std::find(caveats.begin(), caveats.end(),

@@ -562,6 +562,223 @@ MslFunction make_device_free_helper() {
     return helper;
 }
 
+// Device launch queue layout (shared with the legacy PTX lowering and the
+// runtime drain): word 0 is the parameter-buffer bump offset in bytes,
+// word 1 is the record count, records of 16 words start at word 4. A
+// parameter buffer reserves its byte size in a header word 8 bytes before
+// the returned pointer. Record kind 0 is a kernel launch: token, parameter
+// offset/size, grid, block, shared bytes, stream, kind last.
+MslFunction make_device_param_buffer_helper() {
+    const MslType uint_type = MslType::uint();
+    const MslType ulong_type = MslType::uint(64);
+    const MslType queue_type =
+        MslType::pointer(uint_type, MslAddressSpace::kDevice);
+    const MslType byte_pointer =
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice);
+    const auto literal = [&](const char* text, MslType type) {
+        return MslExpression::literal(text, type);
+    };
+    const auto ident = [&](const char* name, MslType type) {
+        return MslExpression::identifier(name, type);
+    };
+    const MslExpr queue = ident("queue", queue_type);
+    const MslExpr capacity = ident("capacity", uint_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+
+    MslFunction helper;
+    helper.name = "cm_device_param_buffer";
+    helper.return_type = byte_pointer;
+    helper.parameters = {
+        {.type = queue_type, .name = "queue"},
+        {.type = uint_type, .name = "capacity"},
+        {.type = ulong_type, .name = "alignment"},
+        {.type = ulong_type, .name = "size"},
+    };
+    const MslExpr align32 = ident("align32", uint_type);
+    const MslExpr size32 = ident("size32", uint_type);
+    const MslExpr raw = ident("raw", uint_type);
+    const MslExpr aligned = ident("aligned", uint_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "align32",
+        MslExpression::cast(uint_type, ident("alignment", ulong_type))));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", align32, literal("0u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::assignment(align32, literal("1u", uint_type))}));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "size32",
+        MslExpression::cast(uint_type, ident("size", ulong_type))));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "raw",
+        MslExpression::call(
+            "atomic_fetch_add_explicit",
+            {MslExpression::cast(atomic_pointer, queue, true),
+             MslExpression::binary(
+                 "-",
+                 MslExpression::binary(
+                     "+", size32,
+                     MslExpression::binary("+", literal("8u", uint_type),
+                                           align32, uint_type),
+                     uint_type),
+                 literal("1u", uint_type), uint_type),
+             relaxed},
+            uint_type)));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "aligned",
+        MslExpression::binary(
+            "&",
+            MslExpression::binary(
+                "-",
+                MslExpression::binary(
+                    "+", raw,
+                    MslExpression::binary("+", literal("8u", uint_type),
+                                          align32, uint_type),
+                    uint_type),
+                literal("1u", uint_type), uint_type),
+            MslExpression::unary("~",
+                                 MslExpression::binary("-", align32,
+                                                       literal("1u", uint_type),
+                                                       uint_type),
+                                 uint_type),
+            uint_type)));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary(
+            ">", MslExpression::binary("+", aligned, size32, uint_type),
+            capacity, MslType::boolean()),
+        {MslStatement::return_statement(
+            MslExpression::literal("nullptr", byte_pointer))}));
+    helper.statements.push_back(MslStatement::assignment(
+        MslExpression::subscript(
+            queue,
+            MslExpression::binary(
+                ">>",
+                MslExpression::binary("-", aligned, literal("8u", uint_type),
+                                      uint_type),
+                literal("2u", uint_type), uint_type),
+            uint_type),
+        size32));
+    helper.statements.push_back(MslStatement::return_statement(
+        MslExpression::binary(
+            "+", MslExpression::cast(byte_pointer, queue, true), aligned,
+            byte_pointer)));
+    return helper;
+}
+
+MslFunction make_device_launch_helper() {
+    const MslType uint_type = MslType::uint();
+    const MslType ulong_type = MslType::uint(64);
+    const MslType int_type = MslType::sint(32);
+    const MslType queue_type =
+        MslType::pointer(uint_type, MslAddressSpace::kDevice);
+    const MslType byte_pointer =
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice);
+    const auto literal = [&](const char* text, MslType type) {
+        return MslExpression::literal(text, type);
+    };
+    const auto ident = [&](const char* name, MslType type) {
+        return MslExpression::identifier(name, type);
+    };
+    const MslExpr queue = ident("queue", queue_type);
+    const MslExpr token = ident("token", ulong_type);
+    const MslExpr params = ident("params", byte_pointer);
+    const MslExpr stream = ident("stream", ulong_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+
+    MslFunction helper;
+    helper.name = "cm_device_launch";
+    helper.return_type = int_type;
+    helper.parameters = {
+        {.type = queue_type, .name = "queue"},
+        {.type = ulong_type, .name = "token"},
+        {.type = byte_pointer, .name = "params"},
+        {.type = uint_type, .name = "grid_x"},
+        {.type = uint_type, .name = "grid_y"},
+        {.type = uint_type, .name = "grid_z"},
+        {.type = uint_type, .name = "block_x"},
+        {.type = uint_type, .name = "block_y"},
+        {.type = uint_type, .name = "block_z"},
+        {.type = uint_type, .name = "shared"},
+        {.type = ulong_type, .name = "stream"},
+    };
+    const MslExpr index = ident("index", uint_type);
+    const MslExpr record = ident("record", queue_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "index",
+        MslExpression::call(
+            "atomic_fetch_add_explicit",
+            {MslExpression::cast(
+                 atomic_pointer,
+                 MslExpression::binary("+", queue, literal("1u", uint_type),
+                                       queue_type),
+                 true),
+             literal("1u", uint_type), relaxed},
+            uint_type)));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary(">=", index, literal("1023u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::return_statement(literal("1", int_type))}));
+    helper.statements.push_back(MslStatement::variable(
+        queue_type, "record",
+        MslExpression::binary(
+            "+",
+            MslExpression::binary("+", queue, literal("4u", uint_type),
+                                  queue_type),
+            MslExpression::binary("*", index, literal("16u", uint_type),
+                                  uint_type),
+            queue_type)));
+    const auto store_word = [&](int word, MslExpr value) {
+        helper.statements.push_back(MslStatement::assignment(
+            MslExpression::subscript(record, literal((std::to_string(word) + "u").c_str(), uint_type), uint_type),
+            std::move(value)));
+    };
+    const auto low = [&](const MslExpr& value) {
+        return MslExpression::cast(uint_type, value);
+    };
+    const auto high = [&](const MslExpr& value, const char* name) {
+        return MslExpression::cast(
+            uint_type,
+            MslExpression::binary(">>", value, literal("32", ulong_type),
+                                  ulong_type));
+    };
+    store_word(0, low(token));
+    store_word(1, high(token, "token_high"));
+    store_word(2, MslExpression::cast(
+                      uint_type,
+                      MslExpression::binary(
+                          "-", MslExpression::cast(ulong_type, params, true),
+                          MslExpression::cast(ulong_type, queue, true),
+                          ulong_type)));
+    store_word(3, MslExpression::subscript(
+                      MslExpression::cast(
+                          queue_type,
+                          MslExpression::binary("-", params,
+                                                literal("8", ulong_type),
+                                                byte_pointer),
+                          true),
+                      literal("0u", uint_type), uint_type));
+    store_word(4, ident("grid_x", uint_type));
+    store_word(5, ident("grid_y", uint_type));
+    store_word(6, ident("grid_z", uint_type));
+    store_word(7, ident("block_x", uint_type));
+    store_word(8, ident("block_y", uint_type));
+    store_word(9, ident("block_z", uint_type));
+    store_word(10, ident("shared", uint_type));
+    store_word(11, low(stream));
+    store_word(12, high(stream, "stream_high"));
+    store_word(13, literal("0u", uint_type));
+    store_word(14, literal("0u", uint_type));
+    store_word(15, literal("0u", uint_type));
+    helper.statements.push_back(
+        MslStatement::return_statement(literal("0", int_type)));
+    return helper;
+}
+
 MslFunction make_cta_any_helper(bool count = false) {
     const auto pointer = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
     const auto uint3 = MslType::vector(MslType::uint(), 3);
@@ -6003,6 +6220,31 @@ struct AstLowerer {
                 }
                 continue;
             }
+            if (operation.opcode == ir::OpCode::kDeviceParamBuffer ||
+                operation.opcode == ir::OpCode::kDeviceLaunch) {
+                const bool param_buffer =
+                    operation.opcode == ir::OpCode::kDeviceParamBuffer;
+                if (operation.operands.size() != (param_buffer ? 4u : 11u)) {
+                    return fail(&operation, "malformed typed device launch queue record");
+                }
+                std::vector<MslExpr> arguments;
+                for (const auto& operand : operation.operands)
+                    arguments.push_back(expression_for(operand));
+                if (param_buffer) {
+                    statements->push_back(declare_result(
+                        operation,
+                        MslExpression::call(
+                            "cm_device_param_buffer", arguments,
+                            MslType::pointer(MslType::uint(8),
+                                             MslAddressSpace::kDevice))));
+                } else {
+                    statements->push_back(declare_result(
+                        operation,
+                        MslExpression::call("cm_device_launch", arguments,
+                                            MslType::sint(32))));
+                }
+                continue;
+            }
             if (operation.opcode == ir::OpCode::kPrintf) {
                 if (operation.attributes.contains("null_format") &&
                     operation.attributes.at("null_format") == "true") {
@@ -8914,6 +9156,24 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         result.ast.functions.push_back(make_device_malloc_helper());
         result.ast.functions.push_back(make_device_free_helper());
     }
+    const bool needs_device_launch_queue = std::any_of(
+        metal_module.functions.begin(), metal_module.functions.end(),
+        [](const ir::Function& function) {
+            return std::any_of(
+                function.blocks.begin(), function.blocks.end(),
+                [](const ir::BasicBlock& block) {
+                    return std::any_of(
+                        block.operations.begin(), block.operations.end(),
+                        [](const ir::Operation& operation) {
+                            return operation.opcode == ir::OpCode::kDeviceParamBuffer ||
+                                   operation.opcode == ir::OpCode::kDeviceLaunch;
+                        });
+                });
+        });
+    if (needs_device_launch_queue) {
+        result.ast.functions.push_back(make_device_param_buffer_helper());
+        result.ast.functions.push_back(make_device_launch_helper());
+    }
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
         if (!structurized.ok) {
@@ -9214,6 +9474,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
     result.uses_device_heap = imported.uses_device_heap;
+    result.uses_device_launch_queue = imported.uses_device_launch_queue;
     if (!imported.ok) {
         result.error = imported.error;
         return result;
@@ -9244,6 +9505,9 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     if (result.uses_device_heap) {
         result.source.insert(0, "// cumetal-uses-device-heap: 1\n");
     }
+    if (result.uses_device_launch_queue) {
+        result.source.insert(0, "// cumetal-uses-device-launch-queue: 1\n");
+    }
     for (auto format = result.printf_formats.rbegin();
          format != result.printf_formats.rend(); ++format) {
         static constexpr char kHex[] = "0123456789abcdef";
@@ -9273,6 +9537,7 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
     result.uses_device_heap = imported.uses_device_heap;
+    result.uses_device_launch_queue = imported.uses_device_launch_queue;
     if (!imported.ok) {
         result.error = imported.error;
         return result;
@@ -9296,6 +9561,9 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     result.source = std::move(lowered.source);
     if (result.uses_device_heap) {
         result.source.insert(0, "// cumetal-uses-device-heap: 1\n");
+    }
+    if (result.uses_device_launch_queue) {
+        result.source.insert(0, "// cumetal-uses-device-launch-queue: 1\n");
     }
     for (auto format = result.printf_formats.rbegin();
          format != result.printf_formats.rend(); ++format) {
