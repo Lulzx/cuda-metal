@@ -2325,17 +2325,34 @@ struct Importer {
             }
             return std::nullopt;
         };
+        // Offsets outside the depot extent (one-past-the-end included) can
+        // never name a local cell, so they carry no address identity. Dropping
+        // them also bounds stride recurrences: a cursor that advances by a
+        // fixed stride reaches a stable offset set at the depot boundary
+        // instead of growing past the finite-value cap and losing the proof.
+        const auto prune_offsets = [&](LocalAddress& address) {
+            if (!address.offsets || !local_depots.contains(address.depot)) return;
+            const __int128 extent = local_depots.at(address.depot).byte_size;
+            for (auto offset = address.offsets->begin(); offset != address.offsets->end();) {
+                const __int128 cell = static_cast<__int128>(address.base) + *offset;
+                if (cell < 0 || cell > extent)
+                    offset = address.offsets->erase(offset);
+                else
+                    ++offset;
+            }
+        };
         bool addresses_changed = true;
         for (int iteration = 0; iteration < 16 && addresses_changed; ++iteration) {
             addresses_changed = false;
             for (const Instruction* proof_instruction : proof_instructions) {
                 const Instruction& instruction = *proof_instruction;
                 const auto destinations = destination_registers(instruction);
-                const auto address = instruction_address(instruction);
+                auto address = instruction_address(instruction);
                 if (destinations.size() != 1 || !address ||
                     !is_64_bit_register(destinations.front())) {
                     continue;
                 }
+                prune_offsets(*address);
                 const auto found = local_addresses.find(destinations.front());
                 if (found == local_addresses.end()) {
                     local_addresses.emplace(destinations.front(), *address);
@@ -2353,6 +2370,7 @@ struct Importer {
                 const std::size_t before = found->second.offsets->size();
                 found->second.offsets->insert(
                     address->offsets->begin(), address->offsets->end());
+                prune_offsets(found->second);
                 if (found->second.offsets->size() > kMaxFiniteValues) {
                     found->second.offsets.reset();
                 }
@@ -2374,7 +2392,8 @@ struct Importer {
                         valid = false;
                         break;
                     }
-                    const auto address = instruction_address(*instruction);
+                    auto address = instruction_address(*instruction);
+                    if (address) prune_offsets(*address);
                     if (!address || !same_subobject(known->second, *address) ||
                         (known->second.offsets && (!address->offsets ||
                          !std::includes(known->second.offsets->begin(), known->second.offsets->end(),
@@ -2619,8 +2638,20 @@ struct Importer {
         // The bounded table scan above only discovers candidates. Its textual
         // store order is not a proof that a store reaches a load. Validate each
         // candidate on the normalized CFG, using the final SSA store operands.
+        // A store through a pointer produced by another candidate load cannot
+        // be classified until that load is proven; such loads defer (recorded
+        // in deferred_proof_reason) and the caller republishes proven types
+        // and retries while rounds keep making progress.
+        bool deferred_proof_pending = false;
+        std::string deferred_proof_reason;
+        std::vector<const Instruction*> deferred_sibling_loads;
+        bool proof_provisional = false;
+        std::unordered_set<const Instruction*> provisional_dependencies;
         const auto validate_local_load_proofs = [&](const auto& candidates, auto& refined) {
             if (candidates.empty()) return true;
+            deferred_proof_pending = false;
+            deferred_proof_reason.clear();
+            deferred_sibling_loads.clear();
             std::unordered_map<std::string, detail::CallEffectSummary> call_effects;
             const auto effects_for = [&](const Instruction& call) -> const detail::CallEffectSummary* {
                 const auto target = direct_call_target(call);
@@ -2697,6 +2728,64 @@ struct Importer {
                 if (found == sources.end()) return std::nullopt;
                 const auto value = found->second.find(first_register(operand));
                 return value == found->second.end() ? std::nullopt : std::optional(value->second);
+            };
+            // Classify a store address derived (through mov/add/sub) from a
+            // local load: kNonLocal when that load is already proven to hold
+            // a concrete non-private pointer, kDefer when it is not proven
+            // yet, kUnknown otherwise.
+            enum class StoreOrigin { kUnknown, kDefer, kNonLocal };
+            const auto store_origin = [&](const Instruction* store) {
+                const auto start_value = source_value(store, store->operands[0]);
+                if (!start_value) return StoreOrigin::kUnknown;
+                bool defer = false;
+                std::vector<ValueId> pending{*start_value};
+                std::unordered_set<ValueId> visited;
+                for (int depth = 0; depth < 16 && !pending.empty(); ++depth) {
+                    std::vector<ValueId> next;
+                    for (const auto value : pending) {
+                        if (!visited.insert(value).second) continue;
+                        if (joined_values.contains(value)) {
+                            for (const auto input : joined_values.at(value)) next.push_back(input);
+                            continue;
+                        }
+                        if (!definitions.contains(value)) continue;
+                        const auto* definition = definitions.at(value);
+                        if (root_opcode(definition->opcode) == "ld" &&
+                            definition->opcode.find(".local") != std::string::npos) {
+                            const auto* key = proof_key(definition);
+                            if (refined.contains(key)) {
+                                bool non_local = true;
+                                for (const auto& [lane, type] : refined.at(key)) {
+                                    if (!type.is_pointer() ||
+                                        type.address_space == AddressSpace::kNone ||
+                                        type.address_space == AddressSpace::kPrivate)
+                                        non_local = false;
+                                }
+                                if (non_local) return StoreOrigin::kNonLocal;
+                                continue;
+                            }
+                            if (!candidates.contains(key) &&
+                                std::find(deferred_sibling_loads.begin(),
+                                          deferred_sibling_loads.end(),
+                                          key) == deferred_sibling_loads.end())
+                                deferred_sibling_loads.push_back(key);
+                            if (proof_provisional)
+                                provisional_dependencies.insert(key);
+                            defer = true;
+                            continue;
+                        }
+                        const auto root = root_opcode(definition->opcode);
+                        if ((root == "mov" || root == "add" || root == "sub") &&
+                            definition->predicate.empty()) {
+                            for (std::size_t i = 1; i < definition->operands.size(); ++i) {
+                                if (const auto input = source_value(definition, definition->operands[i]))
+                                    next.push_back(*input);
+                            }
+                        }
+                    }
+                    pending = std::move(next);
+                }
+                return defer ? StoreOrigin::kDefer : StoreOrigin::kUnknown;
             };
             // A scalar copy/join can relay a loop index through many blocks.
             // Prove identity using actual SSA edges; every reachable leaf must
@@ -3094,9 +3183,20 @@ struct Importer {
                             return fail(load, "invalid local pointer memory proof lane");
                         Type proven_type = refined.contains(origin) && refined.at(origin).contains(lane)
                             ? refined.at(origin).at(lane) : candidate_type;
+                        bool lane_deferred = false;
                         for (const auto offset : *address->offsets) {
                             const __int128 cell = static_cast<__int128>(address->base) + offset +
                                 memory_operand_offset(load->operands[1]) + static_cast<__int128>(lane) * 8;
+                            // The widened offset set can name cells outside
+                            // the depot (a cursor's final value plus a
+                            // positive displacement). No execution loads
+                            // there, so there is no reaching store to find.
+                            if (const auto extent = depot_sizes.find(address->depot);
+                                extent != depot_sizes.end() &&
+                                (cell < 0 || cell + 8 > static_cast<__int128>(extent->second)))
+                                continue;
+                            bool defer_tainted = false;
+                            bool abandon_walk = false;
                             std::deque<std::pair<std::size_t, std::size_t>> pending{{b, index}};
                             // The initial block prefix and a full backedge visit
                             // are distinct states. All other full blocks need
@@ -3113,6 +3213,7 @@ struct Importer {
                                     const auto root = root_opcode(event->opcode);
                                     if (root == "call") {
                                         if (call_is_disjoint(event, *address, cell)) continue;
+                                        if (defer_tainted) { abandon_walk = true; break; }
                                         return fail(load, "unsupported local pointer memory proof: intervening call at line " +
                                             std::to_string(event->line) + " (" + direct_call_target(*event).value_or("indirect") +
                                             ") may modify the cell; " +
@@ -3132,6 +3233,17 @@ struct Importer {
                                             event->opcode.find(".const") != std::string::npos ||
                                             (type.is_pointer() && type.address_space != AddressSpace::kNone &&
                                              type.address_space != AddressSpace::kPrivate)) continue;
+                                        // A store through a pointer from an
+                                        // as-yet-unproven candidate load may
+                                        // become classifiable once that load
+                                        // is proven; defer this load instead
+                                        // of refusing it outright.
+                                        const auto origin = store_origin(event);
+                                        if (origin == StoreOrigin::kNonLocal) continue;
+                                        if (origin == StoreOrigin::kDefer) {
+                                            defer_tainted = true;
+                                            continue;
+                                        }
                                         const auto& prefix = prefix_proofs.at(load);
                                         return fail(load, "unsupported local pointer memory proof: unresolved potentially overlapping store at line " +
                                             std::to_string(event->line) + " (" + event->operands[0] + "); prefix " +
@@ -3139,12 +3251,14 @@ struct Importer {
                                             (scalar_ranges.budget_exhausted() ? "; scalar range budget exhausted" : ""));
                                     }
                                     if (written->depot != address->depot) continue;
-                                    if (!written->offsets)
+                                    if (!written->offsets) {
+                                        if (defer_tainted) { abandon_walk = true; break; }
                                         return fail(load, "unsupported local pointer memory proof: unresolved store offset at line " +
                                             std::to_string(event->line) + " (" + event->operands[0] +
                                             ", base " + std::to_string(written->base) + ") for loaded cell " +
                                             std::to_string(static_cast<std::int64_t>(cell)) +
                                             (scalar_ranges.budget_exhausted() ? "; scalar range budget exhausted" : ""));
+                                    }
                                     const std::size_t lanes = memory_vector_width(event->opcode);
                                     const std::int64_t bytes = ptx_scalar_type(event->opcode).bit_width / 8;
                                     bool overlaps = false;
@@ -3154,18 +3268,24 @@ struct Importer {
                                                 memory_operand_offset(event->operands[0]) + static_cast<__int128>(written_lane) * bytes;
                                             if (start >= cell + 8 || cell >= start + bytes) continue;
                                             overlaps = true;
-                                            if (start != cell || bytes != 8)
+                                            if (start != cell || bytes != 8) {
+                                                if (defer_tainted) { abandon_walk = true; break; }
                                                 return fail(load, "unsupported local pointer memory proof: partial overlapping store");
+                                            }
                                             const auto& types = stored_types.at(event);
                                             if (written_lane >= types.size() || !types[written_lane].is_pointer() ||
-                                                types[written_lane].address_space == AddressSpace::kNone)
+                                                types[written_lane].address_space == AddressSpace::kNone) {
+                                                if (defer_tainted) { abandon_walk = true; break; }
                                                 return fail(load, "unsupported local pointer memory proof: reaching store has no concrete pointer type");
+                                            }
                                             if (proven_type.address_space == AddressSpace::kNone)
                                                 proven_type = types[written_lane];
-                                            else if (types[written_lane].address_space != proven_type.address_space)
+                                            else if (types[written_lane].address_space != proven_type.address_space) {
+                                                if (defer_tainted) { abandon_walk = true; break; }
                                                 return fail(load, "conflicting local pointer memory proof: reaching store at line " +
                                                     std::to_string(event->line) + " has type " + types[written_lane].str() +
                                                     ", candidate " + proven_type.str());
+                                            }
                                         }
                                     }
                                     if (overlaps && written->offsets->size() == 1 && event->predicate.empty()) {
@@ -3178,14 +3298,27 @@ struct Importer {
                                     // must agree, and prior initialization must
                                     // independently be proved on every path.
                                 }
+                                if (abandon_walk) break;
                                 if (defined) continue;
-                                if (raw_blocks[block].predecessors.empty())
+                                if (raw_blocks[block].predecessors.empty()) {
+                                    if (defer_tainted) { abandon_walk = true; break; }
                                     return fail(load, "unsupported local pointer memory proof: an incoming path has no initializing store");
+                                }
                                 for (const auto predecessor : raw_blocks[block].predecessors)
                                     pending.emplace_back(predecessor, raw_blocks[predecessor].instructions.size());
                             }
+                            if (defer_tainted && !proof_provisional) {
+                                lane_deferred = true;
+                                break;
+                            }
                             if (!found_store)
                                 return fail(load, "unsupported local pointer memory proof: uninitialized memory cycle");
+                        }
+                        if (lane_deferred) {
+                            deferred_proof_pending = true;
+                            deferred_proof_reason =
+                                "store through an as-yet-unproven local pointer load";
+                            continue;
                         }
                         refined[origin][lane] = proven_type;
                     }
@@ -3411,6 +3544,79 @@ struct Importer {
                     }
                 }
                 if (added) continue;
+                // Loads deferred on an unproven sibling load get another
+                // round only when this round published a new proven type;
+                // without progress the dependency cannot resolve.
+                if (deferred_proof_pending) {
+                    // Register the sibling loads the deferred stores write
+                    // through as candidates, then retry: proving one may
+                    // classify the stores blocking the others.
+                    bool added_sibling = false;
+                    for (const Instruction* sibling : deferred_sibling_loads) {
+                        if (local_load_proofs.contains(sibling)) continue;
+                        for (std::size_t lane = 0; lane < memory_vector_width(sibling->opcode); ++lane) {
+                            local_load_proofs[sibling][lane] =
+                                Type::pointer(Type::integer(8), AddressSpace::kNone);
+                            added_sibling = true;
+                        }
+                    }
+                    if (added_sibling) continue;
+                    // Mutual dependence with no sequential order (an
+                    // unrolled cursor loop whose stores write through other
+                    // table loads) gets one provisional round: stores
+                    // through unproven loads are treated as non-local while
+                    // every candidate is proven, and the assumption is
+                    // discharged only if every load relied on refined to a
+                    // concrete non-private pointer. A private or generic
+                    // result keeps the refusal.
+                    const std::string deferred_reason = deferred_proof_reason;
+                    proof_provisional = true;
+                    provisional_dependencies.clear();
+                    PointerLoadTypes provisional_refined;
+                    const bool provisional_ok =
+                        validate_local_load_proofs(local_load_proofs, provisional_refined);
+                    proof_provisional = false;
+                    bool discharged = provisional_ok && !provisional_dependencies.empty();
+                    if (discharged) {
+                        for (const Instruction* dependency : provisional_dependencies) {
+                            const auto found = provisional_refined.find(dependency);
+                            if (found == provisional_refined.end()) {
+                                discharged = false;
+                                break;
+                            }
+                            for (const auto& [lane, type] : found->second) {
+                                if (!type.is_pointer() ||
+                                    type.address_space == AddressSpace::kNone ||
+                                    type.address_space == AddressSpace::kPrivate) {
+                                    discharged = false;
+                                    break;
+                                }
+                            }
+                            if (!discharged) break;
+                        }
+                    }
+                    if (discharged) {
+                        for (const auto& [key, lanes] : provisional_refined) {
+                            for (const auto& [lane, type] : lanes) {
+                                auto& known = pointer_load_types[key];
+                                const auto found = known.find(lane);
+                                if (found == known.end() ||
+                                    found->second.address_space == AddressSpace::kNone) {
+                                    if (found == known.end() || found->second != type) {
+                                        known[lane] = type;
+                                        added = true;
+                                    }
+                                } else if (found->second != type) {
+                                    return fail(key, "conflicting validated pointer load types");
+                                }
+                            }
+                        }
+                        result.error.clear();
+                        if (added) continue;
+                    }
+                    return fail(nullptr, "unsupported local pointer memory proof: " +
+                                             deferred_reason);
+                }
                 if (invalidated_local_cell_hints && !solve_value_types(true)) return false;
                 break;
             }
