@@ -6129,6 +6129,38 @@ struct AstLowerer {
                 operation.attributes.at("signed") == "true" &&
                 (operation_name == "min" || operation_name == "max");
             if (operation.result_types.front().bit_width == 64) {
+                if (operation.attributes.contains("native_u64_minmax") &&
+                    operation.attributes.at("native_u64_minmax") == "true" &&
+                    address_space == MslAddressSpace::kDevice) {
+                    // In-place native min/max on device atomic_ulong; the
+                    // old value is unused (mark_native_u64_minmax), which
+                    // is the only form Metal provides for 64-bit atomics.
+                    const MslType atomic_ulong = {
+                        .kind = MslTypeKind::kStruct,
+                        .struct_name = "atomic_ulong",
+                    };
+                    const MslType atomic_pointer =
+                        MslType::pointer(atomic_ulong, address_space);
+                    const MslExpr pointer = MslExpression::cast(
+                        atomic_pointer, raw_pointer, true);
+                    const MslExpr ordering = MslExpression::identifier(
+                        "memory_order_relaxed", MslType{
+                                                    .kind = MslTypeKind::kStruct,
+                                                    .struct_name = "memory_order",
+                                                });
+                    const MslType u64 = MslType::uint(64);
+                    const MslExpr raw_operand =
+                        expression_for(operation.operands[1]);
+                    const MslExpr operand =
+                        raw_operand->type.kind == MslTypeKind::kInt &&
+                                raw_operand->type.lanes == 64
+                            ? MslExpression::bitcast(u64, raw_operand)
+                            : MslExpression::cast(u64, raw_operand);
+                    return MslStatement::expression(MslExpression::call(
+                        operation_name == "min" ? "atomic_min_explicit"
+                                                : "atomic_max_explicit",
+                        {pointer, operand, ordering}, MslType::void_type()));
+                }
                 static const std::unordered_set<std::string> kWideAtomicOperations = {
                     "add", "and", "or", "xor", "min", "max", "exch", "xchg",
                     "cas",
@@ -8872,6 +8904,54 @@ void fold_butterfly_reductions(ir::Function& function) {
     }
 }
 
+// Native 64-bit min/max: Metal (since 2.4, verified against the 32023
+// stdlib headers) provides in-place atomic_min_explicit /
+// atomic_max_explicit on device atomic_ulong, but no 64-bit fetch forms,
+// exchange, or CAS. An unsigned 64-bit min/max whose old value is unused
+// therefore maps to the native instruction; anything needing the old
+// value (and every signed or non-min/max 64-bit atomic) keeps the
+// lock-bank helper.
+void mark_native_u64_minmax(ir::Function& function) {
+    std::unordered_map<ir::ValueId, std::size_t> uses;
+    for (const ir::BasicBlock& block : function.blocks) {
+        for (const ir::Operation& operation : block.operations) {
+            for (const ir::Operand& operand : operation.operands)
+                if (operand.kind == ir::OperandKind::kValue) uses[operand.value]++;
+            for (const ir::Successor& successor : operation.successors)
+                for (const ir::ValueId argument : successor.arguments)
+                    uses[argument]++;
+        }
+    }
+    for (ir::BasicBlock& block : function.blocks) {
+        for (ir::Operation& operation : block.operations) {
+            if (operation.opcode != ir::OpCode::kAtomic ||
+                operation.results.size() != 1 ||
+                operation.result_types.size() != 1 ||
+                operation.result_types.front().kind != ir::TypeKind::kInteger ||
+                operation.result_types.front().bit_width != 64 ||
+                operation.operands.size() != 2 ||
+                operation.memory_ordering != ir::MemoryOrdering::kRelaxed ||
+                (operation.memory_scope == ir::MemoryScope::kSystem &&
+                 (!operation.attributes.contains("metal_uma_system_scope") ||
+                  operation.attributes.at("metal_uma_system_scope") != "true")))
+                continue;
+            const auto atomic_op = operation.attributes.find("atomic_op");
+            if (atomic_op == operation.attributes.end() ||
+                (atomic_op->second != "min" && atomic_op->second != "max"))
+                continue;
+            if (operation.attributes.contains("signed") &&
+                operation.attributes.at("signed") == "true")
+                continue;
+            if (!operation.operands.front().type.is_pointer() ||
+                operation.operands.front().type.address_space !=
+                    ir::AddressSpace::kDevice)
+                continue;
+            if (uses[operation.results.front()] != 0) continue;
+            operation.attributes["native_u64_minmax"] = "true";
+        }
+    }
+}
+
 // Warp-aggregated atomics: an integer `add` atomic may be executed once
 // per warp (simd_sum + leader atomic + prefix reconstruction) only when
 // (a) its address is warp-uniform -- no lane-dependent value feeds it --
@@ -9081,6 +9161,9 @@ MetalLegalizeResult legalize_for_metal(const ir::Module& module) {
     }
     for (ir::Function& function : result.module.functions) {
         mark_warp_aggregated_atomics(function);
+    }
+    for (ir::Function& function : result.module.functions) {
+        mark_native_u64_minmax(function);
     }
     for (ir::Function& function : result.module.functions) {
         detail::scalarize_private_arrays(function);
