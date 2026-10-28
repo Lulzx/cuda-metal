@@ -3494,12 +3494,28 @@ LowerToMetalResult lower_ptx_to_metal_source(std::string_view ptx, const LowerTo
         compile_options.fp64_mode = options.fp64_mode;
         const auto compiled = cumetal::metal::compile_ptx_to_msl(ptx, compile_options);
         result.warnings = compiled.warnings;
-        if (!compiled.ok) {
-            result.error = compiled.error;
-            return result;
-        }
-        if (compiled.gpu_ir.functions.empty()) {
-            result.error = "CuMetal IR backend produced no kernel functions";
+        if (!compiled.ok || compiled.gpu_ir.functions.empty()) {
+            result.error = !compiled.ok ? compiled.error
+                                        : "CuMetal IR backend produced no kernel functions";
+            if (!options.allow_legacy_fallback) {
+                return result;
+            }
+            // The typed backend declined. The legacy backend's contract is
+            // to decline rather than guess, so retrying there cannot turn a
+            // typed refusal into a silent wrong answer; it only serves the
+            // kernels the typed backend does not yet take. The scoped-global
+            // routing inside the legacy path re-checks atomicity-sensitive
+            // accesses and returns the typed error for those.
+            LowerToMetalOptions legacy_options = options;
+            legacy_options.backend = PtxMetalBackend::kLegacy;
+            legacy_options.allow_legacy_fallback = false;
+            LowerToMetalResult fallback = lower_ptx_to_metal_source(ptx, legacy_options);
+            if (fallback.ok) {
+                fallback.warnings.push_back(
+                    "typed PTX backend declined (" + result.error +
+                    "); legacy backend used");
+                return fallback;
+            }
             return result;
         }
         result.ok = true;

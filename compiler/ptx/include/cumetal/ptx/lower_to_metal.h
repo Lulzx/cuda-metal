@@ -18,6 +18,11 @@ struct LowerToMetalOptions {
     bool allow_workload_specializations = false;
     std::string entry_name;
     PtxMetalBackend backend = PtxMetalBackend::kLegacy;
+    // Only meaningful with kCumetalIr: when the typed backend declines a
+    // kernel, retry once with the legacy backend and report the fallback in
+    // the result warnings. Explicit typed selection leaves this off so a
+    // refusal stays a refusal.
+    bool allow_legacy_fallback = false;
     std::string fp64_mode = "fast48";
 };
 

@@ -1572,6 +1572,71 @@ $L__BB0_2:
         return 1;
     }
 
+    // Typed-first with legacy fallback: a kernel the typed backend declines
+    // (atom.inc has no typed lowering) is served by the legacy backend when
+    // the caller allows fallback, and the fallback is reported. Explicit
+    // typed selection without fallback keeps the refusal.
+    const char* fallback_ptx = R"PTX(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry fallback_probe(.param .u64 fallback_param_0, .param .u32 fallback_param_1)
+{
+    .reg .u64 %rd<3>;
+    .reg .u32 %r<3>;
+    ld.param.u64 %rd0, [fallback_param_0];
+    ld.param.u32 %r0, [fallback_param_1];
+    cvta.to.global.u64 %rd1, %rd0;
+    atom.global.inc.u32 %r1, [%rd1], %r0;
+    ret;
+}
+)PTX";
+    cumetal::ptx::LowerToMetalOptions strict_typed_options;
+    strict_typed_options.entry_name = "fallback_probe";
+    strict_typed_options.backend = cumetal::ptx::PtxMetalBackend::kCumetalIr;
+    const auto strict_typed =
+        cumetal::ptx::lower_ptx_to_metal_source(fallback_ptx, strict_typed_options);
+    if (!expect(!strict_typed.ok &&
+                    strict_typed.error.find("unsupported PTX atomic operation") !=
+                        std::string::npos,
+                "explicit typed selection refuses atom.inc without fallback")) {
+        std::fprintf(stderr, "%s\n", strict_typed.error.c_str());
+        return 1;
+    }
+    cumetal::ptx::LowerToMetalOptions fallback_options = strict_typed_options;
+    fallback_options.allow_legacy_fallback = true;
+    const auto with_fallback =
+        cumetal::ptx::lower_ptx_to_metal_source(fallback_ptx, fallback_options);
+    bool fallback_warned = false;
+    for (const auto& warning : with_fallback.warnings) {
+        fallback_warned |= warning.find("legacy backend used") != std::string::npos;
+    }
+    if (!expect(with_fallback.ok && fallback_warned &&
+                    with_fallback.lowering_kind !=
+                        cumetal::ptx::MetalLoweringKind::kGenericCumetalIr,
+                "typed decline with fallback is served and reported as legacy")) {
+        std::fprintf(stderr, "%s\n", with_fallback.error.c_str());
+        return 1;
+    }
+    // The fallback must never resurrect a non-atomic lowering for scoped
+    // accesses: the legacy path routes those back to the typed backend, so
+    // the refusal survives even with fallback allowed.
+    cumetal::ptx::LowerToMetalOptions scoped_fallback_options;
+    scoped_fallback_options.entry_name = "scoped";
+    scoped_fallback_options.backend = cumetal::ptx::PtxMetalBackend::kCumetalIr;
+    scoped_fallback_options.allow_legacy_fallback = true;
+    const auto scoped_fallback = cumetal::ptx::lower_ptx_to_metal_source(
+        scoped_ptx("    st.relaxed.gpu.global.u16 [%rd1], %h0;"),
+        scoped_fallback_options);
+    if (!expect(!scoped_fallback.ok &&
+                    (scoped_fallback.error.find("only the typed backend makes atomic") !=
+                         std::string::npos ||
+                     scoped_fallback.error.find("scoped PTX store") != std::string::npos),
+                "scoped store stays refused even with legacy fallback allowed")) {
+        std::fprintf(stderr, "%s\n", scoped_fallback.error.c_str());
+        return 1;
+    }
+
     std::printf("PASS: ptx lower-to-metal unit tests\n");
     return 0;
 }
