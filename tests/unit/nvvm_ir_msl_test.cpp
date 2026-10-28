@@ -3298,6 +3298,115 @@ $L__done:
                              std::string::npos,
                      "device memcpy helper writes the kind-1 record marker");
     }
+    // A private array indexed dynamically (acc[b] with b computed at
+    // runtime) scalarizes into SSA select chains: no indexed thread byte
+    // array remains in the legalized IR or the emitted MSL.
+    const char* kPtxDynamicPrivateArray = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry _Z8dyn_histPKfPfii(
+    .param .u64 .ptr .align 1 _Z8dyn_histPKfPfii_param_0,
+    .param .u64 .ptr .align 1 _Z8dyn_histPKfPfii_param_1,
+    .param .u32 _Z8dyn_histPKfPfii_param_2,
+    .param .u32 _Z8dyn_histPKfPfii_param_3
+)
+{
+    .local .align 4 .b8 __local_depot0[16];
+    .reg .b64 %SP;
+    .reg .b64 %SPL;
+    .reg .pred %p<3>;
+    .reg .b32 %r<15>;
+    .reg .b64 %rd<8>;
+    mov.b64 %SPL, __local_depot0;
+    ld.param.b32 %r14, [_Z8dyn_histPKfPfii_param_2];
+    ld.param.b64 %rd3, [_Z8dyn_histPKfPfii_param_0];
+    ld.param.b64 %rd4, [_Z8dyn_histPKfPfii_param_1];
+    cvta.to.global.u64 %rd1, %rd4;
+    cvta.to.global.u64 %rd7, %rd3;
+    add.u64 %rd2, %SPL, 0;
+    setp.lt.s32 %p1, %r14, 1;
+    st.local.b32 [%rd2+12], 0;
+    st.local.b32 [%rd2+8], 0;
+    st.local.b32 [%rd2+4], 0;
+    st.local.b32 [%rd2], 0;
+    @%p1 bra $L__BB0_3;
+    ld.param.b32 %r1, [_Z8dyn_histPKfPfii_param_3];
+$L__BB0_2:
+    ld.global.b32 %r2, [%rd7];
+    cvt.rzi.s32.f32 %r3, %r2;
+    rem.s32 %r4, %r3, %r1;
+    shr.s32 %r5, %r4, 31;
+    and.b32 %r6, %r5, %r1;
+    add.s32 %r7, %r6, %r4;
+    mul.wide.s32 %rd5, %r7, 4;
+    add.s64 %rd6, %rd2, %rd5;
+    ld.local.b32 %r8, [%rd6];
+    add.f32 %r9, %r2, %r8;
+    st.local.b32 [%rd6], %r9;
+    add.s32 %r14, %r14, -1;
+    add.s64 %rd7, %rd7, 4;
+    setp.eq.b32 %p2, %r14, 0;
+    @!%p2 bra $L__BB0_2;
+$L__BB0_3:
+    ld.local.b32 %r10, [%rd2];
+    st.global.b32 [%rd1], %r10;
+    ld.local.b32 %r11, [%rd2+4];
+    st.global.b32 [%rd1+4], %r11;
+    ld.local.b32 %r12, [%rd2+8];
+    st.global.b32 [%rd1+8], %r12;
+    ld.local.b32 %r13, [%rd2+12];
+    st.global.b32 [%rd1+12], %r13;
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions dyn_options;
+    dyn_options.entry_name = "_Z8dyn_histPKfPfii";
+    dyn_options.source_name = "dyn_hist.ptx";
+    const metal::PtxToMslResult dyn_ptx =
+        metal::compile_ptx_to_msl(kPtxDynamicPrivateArray, dyn_options);
+    ok &= expect(dyn_ptx.ok, "PTX dynamic private array lowers: " + dyn_ptx.error);
+    if (dyn_ptx.ok) {
+        bool has_private_byte_array = false;
+        for (const ir::Function& function : dyn_ptx.metal_ir.functions)
+            for (const ir::BasicBlock& block : function.blocks)
+                for (const ir::Operation& operation : block.operations)
+                    if (operation.opcode == ir::OpCode::kAlloca &&
+                        operation.attributes.contains("byte_size"))
+                        has_private_byte_array = true;
+        ok &= expect(!has_private_byte_array,
+                     "dynamic private array scalarized out of legalized IR");
+        ok &= expect(ir::verify(dyn_ptx.metal_ir).ok,
+                     "scalarized IR verifies");
+        ok &= expect(dyn_ptx.source.find("_storage[16]") == std::string::npos,
+                     "scalarized MSL has no indexed thread byte array");
+    }
+    // Negative: when the array address escapes (stored to global memory),
+    // the pass must leave the indexed thread array in place.
+    {
+        std::string escaped_ptx(kPtxDynamicPrivateArray);
+        const std::string anchor = "    @%p1 bra $L__BB0_3;";
+        const std::size_t anchor_pos = escaped_ptx.find(anchor);
+        ok &= expect(anchor_pos != std::string::npos,
+                     "dynamic private array fixture anchor");
+        if (anchor_pos != std::string::npos) {
+            escaped_ptx.replace(anchor_pos, anchor.size(),
+                                "    st.global.b64 [%rd1], %rd2;\n" + anchor);
+            metal::PtxToMslOptions escaped_options;
+            escaped_options.entry_name = "_Z8dyn_histPKfPfii";
+            escaped_options.source_name = "dyn_hist_escaped.ptx";
+            const metal::PtxToMslResult escaped_ptx_result =
+                metal::compile_ptx_to_msl(escaped_ptx, escaped_options);
+            ok &= expect(escaped_ptx_result.ok,
+                         "escaped private array still lowers: " +
+                             escaped_ptx_result.error);
+            if (escaped_ptx_result.ok) {
+                ok &= expect(escaped_ptx_result.source.find("_storage[16]") !=
+                                 std::string::npos,
+                             "escaped private array keeps indexed thread array");
+            }
+        }
+    }
     // A C++ vtable is an initialized u64 function table: entries are
     // materialized as stable name tokens in a constant, and an indirect
     // call through a loaded entry dispatches on that token.
