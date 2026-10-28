@@ -149,8 +149,13 @@ uses CUDA Clang 21-23:
 | direct `.cu` | 0/52 | **52/52** |
 | `.cu --cuda-device` / PTX | **47/52** | **52/52** |
 
-Direct `.cu` therefore defaults to `cumetal-ir`; PTX and `--cuda-device`
-default to `legacy`. Reproduce the reviewed per-file baseline with:
+All three input shapes therefore default to `cumetal-ir`. In the
+registration JIT the default is typed-first with one legacy retry when the
+typed backend declines a kernel (the retry is named in the lowering
+warnings); explicit `CUMETAL_PTX_BACKEND=cumetal-ir` disables the retry and
+`CUMETAL_PTX_BACKEND=legacy` keeps the old default. In `cumetalc` the typed
+default is strict and `--backend=legacy` is the explicit escape. Reproduce
+the reviewed per-file baseline with:
 
 ```bash
 ctest --test-dir build -R '^conformance_compiler_backend_matrix$' --output-on-failure

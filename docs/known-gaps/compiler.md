@@ -155,12 +155,17 @@ Remaining typed-path blockers include combinations of:
 The old direct legacy `.cu` path is textual qualifier stripping and fails this
 corpus. It is not a correctness fallback.
 
-### Registration default: what blocks `cumetal-ir`
+### Registration default: typed-first, legacy on typed refusal
 
-The registration JIT still defaults to `legacy`. Running the inner test tier
+The registration JIT and `cumetalc` now default to `cumetal-ir` for PTX
+inputs. The JIT default retries once with `legacy` when the typed backend
+declines a kernel and names the retry in the lowering warnings; explicit
+`CUMETAL_PTX_BACKEND=cumetal-ir` is strict, and `legacy` remains available
+in both drivers. Running the inner test tier
 (`ctest -LE slow`, 376 tests) with `CUMETAL_PTX_BACKEND=cumetal-ir` on
-2026-09-23 passed 370. The six failures, plus one from the typed corpus, are
-the checklist for flipping the default:
+2026-09-23 passed 370. The six failures, plus one from the typed corpus,
+are now the checklist for *retiring* the legacy backend (they are served
+by the fallback, not blocking the typed default):
 
 | Blocker | Kind | Test |
 | --- | --- | --- |
@@ -173,8 +178,10 @@ the checklist for flipping the default:
 
 The device-heap, device-launch-queue and pointer-array rows are real
 typed-backend work (the WMMA row has since closed). The last two are fixtures written
-for the legacy path and need real PTX before the flip. None of the six was a
-wrong answer on the typed backend.
+for the legacy path and need real PTX before legacy can be retired. None of the six was a
+wrong answer on the typed backend. Until they close, the legacy backend
+stays as the JIT's fallback and as an explicit driver selection; it is no
+longer any default.
 
 ### Legacy direct PTX->MSL emitter
 
@@ -198,7 +205,8 @@ Before these rules, integer division by a constant, float warp shuffles,
 offset float atomics and `bool` stores compiled and silently returned wrong
 answers. `functional_cuda_projects_ptx_idioms_{legacy,cumetal_ir}` executes
 each of those idioms on the GPU for both backends. The typed backend never had
-these defects; the emitter is kept only for the legacy default.
+these defects; the emitter is kept for the legacy fallback and explicit
+legacy selection.
 
 The exact 27-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
