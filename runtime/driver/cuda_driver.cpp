@@ -3,6 +3,9 @@
 #include "cumetal/air_emitter/emitter.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal/ptx/lower_to_llvm.h"
+#include "cumetal/ptx/lower_to_metal.h"
+#include "cumetal/ptx/parser.h"
+#include "metal_math_mode.h"
 #include "cumetal_diag.h"
 #include "cuda_runtime.h"
 #include "fatbin_elf.h"
@@ -613,9 +616,116 @@ bool parse_ptx_image(const void* image, std::string* out_ptx) {
            cumetal::fatbin::ElfPtxStatus::kFound;
 }
 
+// Typed-first PTX JIT for the driver path, mirroring the registration
+// JIT's backend policy: cumetal-ir by default with a legacy retry on
+// typed refusals, strict under CUMETAL_PTX_BACKEND=cumetal-ir, and
+// skipped entirely under =legacy. Entries are lowered one at a time and
+// linked into a single metallib; modules whose MSL needs same-TU
+// support files (FP64/libdevice helpers) keep the legacy path, whose
+// FP64 emulation semantics the driver path has always used.
+bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
+                                    bool* toolchain_missing) {
+    const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
+    const std::string backend = backend_env == nullptr ? "" : backend_env;
+    if (backend == "legacy") return false;
+
+    const cumetal::ptx::ParseResult parsed = cumetal::ptx::parse_ptx(ptx);
+    if (!parsed.ok || parsed.module.entries.empty()) return false;
+
+    const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
+    const std::filesystem::path tmp = std::filesystem::temp_directory_path();
+    std::vector<std::filesystem::path> metal_paths;
+    const auto cleanup_metal = [&]() {
+        std::error_code ec;
+        for (const auto& path : metal_paths) std::filesystem::remove(path, ec);
+    };
+
+    cumetal::ptx::LowerToMetalOptions options;
+    options.backend = cumetal::ptx::PtxMetalBackend::kCumetalIr;
+    options.allow_legacy_fallback = false;
+    options.fp64_mode = std::string(
+        cumetal::ptx::fp64_mode_name(cumetal::ptx::fp64_mode_from_env()));
+    for (std::size_t i = 0; i < parsed.module.entries.size(); ++i) {
+        options.entry_name = parsed.module.entries[i].name;
+        const cumetal::ptx::LowerToMetalResult lowered =
+            cumetal::ptx::lower_ptx_to_metal_source(ptx, options);
+        if (!lowered.ok || lowered.metal_source.empty() || lowered.approximate) {
+            if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+                std::fprintf(stderr,
+                             "CUMETAL_DEBUG_ERRORS: typed PTX lowering declined "
+                             "'%s': %s\n",
+                             options.entry_name.c_str(),
+                             lowered.error.empty() ? "no MSL produced"
+                                                   : lowered.error.c_str());
+            }
+            cleanup_metal();
+            return false;
+        }
+        if (lowered.metal_source.find("cm_fp64_") != std::string::npos ||
+            lowered.metal_source.find("cm_libdevice_") != std::string::npos ||
+            lowered.metal_source.find("vf64_") != std::string::npos) {
+            cleanup_metal();
+            return false;
+        }
+        const std::filesystem::path metal_path =
+            tmp / ("cumetal-driver-typed-" + std::to_string(stamp) + "-" +
+                   std::to_string(i) + ".metal");
+        std::string io_error;
+        const std::vector<std::uint8_t> metal_bytes(lowered.metal_source.begin(),
+                                                    lowered.metal_source.end());
+        if (!cumetal::common::write_file_bytes(metal_path, metal_bytes, &io_error)) {
+            cleanup_metal();
+            return false;
+        }
+        metal_paths.push_back(metal_path);
+    }
+
+    const std::filesystem::path metallib_path =
+        tmp / ("cumetal-driver-typed-" + std::to_string(stamp) + ".metallib");
+    cumetal::air_emitter::EmitOptions emit_options;
+    emit_options.input = metal_paths.front();
+    for (std::size_t i = 1; i < metal_paths.size(); ++i) {
+        emit_options.additional_link_inputs.push_back(metal_paths[i]);
+    }
+    emit_options.output = metallib_path;
+    emit_options.mode = cumetal::air_emitter::EmitMode::kXcrun;
+    emit_options.overwrite = true;
+    emit_options.validate_output = true;
+    emit_options.fallback_to_experimental = true;
+    emit_options.kernel_name = parsed.module.entries.front().name;
+    emit_options.math_mode =
+        cumetal::metal_math_mode_name(cumetal::current_metal_math_mode());
+    const cumetal::air_emitter::EmitResult emitted =
+        cumetal::air_emitter::emit_metallib(emit_options);
+    cleanup_metal();
+    if (!emitted.ok || emitted.output.empty()) {
+        if (toolchain_missing != nullptr) *toolchain_missing = true;
+        return false;
+    }
+    if (emitted.mode_used ==
+        cumetal::air_emitter::EmitMode::kExperimentalContainer) {
+        std::error_code ec;
+        std::filesystem::remove(emitted.output, ec);
+        if (toolchain_missing != nullptr) *toolchain_missing = true;
+        return false;
+    }
+    *out_path = emitted.output.string();
+    return true;
+}
+
 bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
                                bool* toolchain_missing) {
     if (ptx.empty() || out_path == nullptr) {
+        return false;
+    }
+    if (try_typed_ptx_to_temp_metallib(ptx, out_path, toolchain_missing)) {
+        return true;
+    }
+    const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
+    if (backend_env != nullptr && std::string(backend_env) == "cumetal-ir") {
+        // Strict typed selection: a typed refusal stays a refusal (the
+        // toolchain flag from the typed attempt, when set, still lets the
+        // caller report JIT_COMPILER_NOT_FOUND accurately).
         return false;
     }
 

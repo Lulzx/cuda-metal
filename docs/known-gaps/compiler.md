@@ -203,10 +203,17 @@ by the fallback, not blocking the typed default):
 The device-heap, device-launch-queue and pointer-array rows are real
 typed-backend work (the WMMA row has since closed). The printf and rope
 rows closed by giving their fixtures real PTX. None of the six was a
-wrong answer on the typed backend. With the checklist closed, the legacy
-backend remains only as an explicit driver selection and as the JIT's
-named retry on typed refusal for inputs outside the tested matrix; it is
-no longer any default.
+wrong answer on the typed backend. With the checklist closed, cumetal-ir
+is the default on every entry point: `cumetalc` (.cu/.ptx), the
+registration JIT, the driver-API JIT (entries lowered individually and
+linked into one metallib; same-TU FP64/libdevice support modules keep
+the legacy route), and NVRTC via `cumetalc`. The legacy backend remains
+only as an explicit selection (`--backend=legacy` /
+`CUMETAL_PTX_BACKEND=legacy`), as the JITs' named retry on typed
+refusal for inputs outside the tested matrix, and as the home of the
+opt-in workload specializations; it is no longer any default. Deleting
+the legacy code outright is deliberately not done: it is still the
+explicit compatibility escape and is covered by its own unit gates.
 
 ### Legacy direct PTX->MSL emitter
 
