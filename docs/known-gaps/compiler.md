@@ -52,12 +52,19 @@ Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit
 `mul.hi` lower to Metal's `mulhi`; mixed operand widths remain invalid.
 
-Private (local) arrays whose indices are not compile-time constants stay
-indexed `thread` byte arrays in emitted MSL. Constant-index accesses are
-scalarized by the front ends (Clang unrolls constant-bound loops before
-PTX, and the NVVM path runs its private-array SROA), but a dynamic index
-into a private array is not yet rewritten to a scalar select chain in the
-typed PTX path, so such kernels pay indexed thread-memory costs.
+Private (local) arrays whose indices are not compile-time constants are
+scalarized by `detail::scalarize_private_arrays` (in
+`compiler/metal/src/private_array_scalarize.cpp`, run during Metal
+legalization) when every access to the array uses a constant element
+offset or a dynamic index of the form `base + i * element_size`: elements
+become SSA scalars threaded through block arguments, loads become select
+chains and stores per-element conditional updates, so Apple's shader
+compiler can hold them in registers. The rewrite refuses — leaving the
+indexed `thread` byte array in place — when the address escapes, crosses
+a block argument, uses a byte-form dynamic offset (e.g. a strength-
+reduced byte counter), mixes element types, or has guarded/volatile
+accesses. Out-of-range dynamic indices remain undefined behavior, as in
+the source program.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers

@@ -499,6 +499,10 @@ add_executable(cumetal_runtime_rope_neox_test
     runtime_rope_neox_test.cpp
 )
 
+add_executable(cumetal_runtime_private_array_dynamic_test
+    runtime_private_array_dynamic_test.cpp
+)
+
 add_executable(cumetal_runtime_cooperative_launch_test
     runtime_cooperative_launch_test.cpp
 )
@@ -1295,6 +1299,11 @@ target_link_libraries(cumetal_driver_jit_compiler_missing_test
 )
 
 target_link_libraries(cumetal_runtime_rope_neox_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_private_array_dynamic_test
     PRIVATE
         cumetal_runtime
 )
@@ -2259,6 +2268,13 @@ target_compile_options(cumetal_runtime_fp64_ops_test
 )
 
 target_compile_options(cumetal_runtime_rope_neox_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_private_array_dynamic_test
     PRIVATE
         -Wall
         -Wextra
@@ -3670,6 +3686,19 @@ add_test(
 set_tests_properties(functional_runtime_rope_neox PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS=1"
+)
+
+add_test(
+    NAME functional_runtime_private_array_dynamic
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_registration_fatbin_ptx.sh
+            $<TARGET_FILE:cumetal_runtime_private_array_dynamic_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/dyn_hist.ptx
+)
+
+set_tests_properties(functional_runtime_private_array_dynamic PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_PTX_BACKEND=cumetal-ir"
 )
 
 add_test(
