@@ -565,6 +565,9 @@ struct ExecutableDriverOptions {
     BackendKind backend = BackendKind::kCumetalIr;
     cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     bool keep_intermediates = false;
+    // nvcc -c object mode: merge host, registration and metallib objects
+    // into one relocatable object instead of linking an executable.
+    bool object_only = false;
 };
 
 int run_legacy_executable_driver(const ExecutableDriverOptions& options,
@@ -861,10 +864,8 @@ bool parse_native_host_kernels(std::string_view llvm_ir,
         }
         kernels->push_back(std::move(kernel));
     }
-    if (kernels->empty()) {
-        if (error != nullptr) *error = "CUDA host compilation produced no kernel launch stubs";
-        return false;
-    }
+    // A translation unit without kernels is valid: it needs no metallib
+    // and no registration. Callers handle the empty list explicitly.
     return true;
 }
 
@@ -1176,18 +1177,25 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         return 1;
     }
     if (!device_result.started || device_result.exit_code != 0) {
-        if (!device_result.output.empty()) std::cerr << device_result.output;
-        cleanup();
-        std::cerr << "cumetalc failed: native AOT device compilation failed\n";
-        return 1;
+        // A kernel-free translation unit legitimately has no device code:
+        // the device frontend refuses empty modules, which is fine here.
+        if (!kernels.empty()) {
+            if (!device_result.output.empty()) std::cerr << device_result.output;
+            cleanup();
+            std::cerr << "cumetalc failed: native AOT device compilation failed\n";
+            return 1;
+        }
     }
-    const auto metal_bytes = cumetal::common::read_file_bytes(metal_source, &io_error);
-    if (!io_error.empty()) {
-        cleanup();
-        std::cerr << "cumetalc failed: " << io_error << "\n";
-        return 1;
+    std::string metal_text;
+    if (!kernels.empty()) {
+        const auto metal_bytes = cumetal::common::read_file_bytes(metal_source, &io_error);
+        if (!io_error.empty()) {
+            cleanup();
+            std::cerr << "cumetalc failed: " << io_error << "\n";
+            return 1;
+        }
+        metal_text.assign(metal_bytes.begin(), metal_bytes.end());
     }
-    const std::string metal_text(metal_bytes.begin(), metal_bytes.end());
     const std::vector<NativeSourceSymbol> symbols =
         parse_native_source_symbols(metal_text);
     const std::vector<std::string> printf_formats =
@@ -1285,6 +1293,40 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         }
     }
 
+    // A translation unit with no kernels needs no metallib and no
+    // registration object. This is also what lets CMake's compiler-ID and
+    // ABI probes (kernel-free .cu files) build without a Metal toolchain.
+    if (kernels.empty()) {
+        if (options.object_only) {
+            std::error_code copy_error;
+            std::filesystem::copy_file(
+                object_file, options.output,
+                std::filesystem::copy_options::overwrite_existing, copy_error);
+            const bool copied = !copy_error && std::filesystem::exists(options.output);
+            cleanup();
+            if (!copied) {
+                std::cerr << "cumetalc failed: could not write object "
+                          << options.output << "\n";
+                return 1;
+            }
+            return 0;
+        }
+        const std::string host_link = quote_shell(compiler.string()) + " " +
+            quote_shell(object_file.string()) + " -L " +
+            quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
+            quote_shell(layout.lib_dir.string()) + " -o " +
+            quote_shell(options.output.string()) + " 2>&1";
+        const CommandResult host_link_result = run_command_capture(host_link);
+        if (!host_link_result.output.empty()) std::cerr << host_link_result.output;
+        cleanup();
+        if (!host_link_result.started || host_link_result.exit_code != 0 ||
+            !std::filesystem::exists(options.output)) {
+            std::cerr << "cumetalc failed: linking " << options.output << " failed\n";
+            return 1;
+        }
+        return 0;
+    }
+
     cumetal::air_emitter::EmitOptions emit;
     emit.input = metal_source;
     emit.output = metallib;
@@ -1359,6 +1401,24 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         return 1;
     }
 
+    if (options.object_only) {
+        const std::string merge = quote_shell(compiler.string()) + " -r " +
+            quote_shell(object_file.string()) + " " +
+            quote_shell(registration_object.string()) + " " +
+            quote_shell(metallib_object.string()) + " -o " +
+            quote_shell(options.output.string()) + " 2>&1";
+        const CommandResult merge_result = run_command_capture(merge);
+        if (!merge_result.output.empty()) std::cerr << merge_result.output;
+        cleanup();
+        if (!merge_result.started || merge_result.exit_code != 0 ||
+            !std::filesystem::exists(options.output)) {
+            std::cerr << "cumetalc failed: merging object " << options.output
+                      << " failed\n";
+            return 1;
+        }
+        return 0;
+    }
+
     // Link with an rpath so the produced binary runs without the caller exporting
     // DYLD_LIBRARY_PATH first.
     const std::string link = quote_shell(compiler.string()) + " " +
@@ -1387,7 +1447,195 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
 
 }  // namespace
 
+// nvcc-compatible invocation surface, used when cumetalc is invoked as
+// `nvcc` (the CMake toolkit shim) or with --nvcc-compat. Handles the probes
+// CMake's CUDA language detection performs and the compile/link command
+// shapes it emits. Returns -1 when the invocation is not a compat shape
+// and normal cumetalc parsing should continue.
+std::filesystem::path nvcc_toolkit_root(const char* argv0) {
+    if (const char* root = std::getenv("CUMETAL_TOOLKIT_ROOT");
+        root != nullptr && root[0] != '\0') {
+        return std::filesystem::path(root);
+    }
+    const std::filesystem::path self = executable_path(argv0);
+    if (self.empty()) return {};
+    const std::filesystem::path bin_dir = self.parent_path();
+    const std::vector<std::filesystem::path> candidates = {
+        bin_dir / ".." / "share" / "cumetal" / "toolkit",
+        bin_dir / ".." / "cumetal-toolkit",
+        bin_dir / "cumetal-toolkit",
+        bin_dir / "..",
+        bin_dir,
+    };
+    for (const auto& candidate : candidates) {
+        std::error_code ec;
+        const auto normalized = std::filesystem::weakly_canonical(candidate, ec);
+        if (!ec && std::filesystem::exists(normalized / "nvvm" / "libdevice")) {
+            return normalized;
+        }
+    }
+    return bin_dir.parent_path();
+}
+
+void emit_nvcc_verbose(const char* argv0, const std::string& output) {
+    const std::filesystem::path toolkit = nvcc_toolkit_root(argv0);
+    const std::filesystem::path compiler = find_cuda_clang({});
+    const char* path_env = std::getenv("PATH");
+    std::cout << "nvcc: cumetalc Cuda compiler driver\n";
+    std::cout << "#$ PATH=" << (toolkit / "bin").string() << ":"
+              << (path_env != nullptr ? path_env : "") << "\n";
+    std::cout << "#$ LIBRARIES= -L" << (toolkit / "lib64").string()
+              << " -lcudart\n";
+    std::cout << "#$ INCLUDES= -I" << (toolkit / "include").string() << "\n";
+    std::cout << "#$ SYSTEM_INCLUDES= -I" << (toolkit / "include").string()
+              << "\n";
+    std::cout << "#$ TARGET= -arch compute_80\n";
+    std::cout << "#$ " << compiler.string() << " -o " << output << " -L"
+              << (toolkit / "lib64").string() << " -lcudart\n";
+}
+
+int run_nvcc_compat(int argc, char** argv) {
+    std::vector<std::string> args(argv + 1, argv + argc);
+    const auto has = [&](const std::string& flag) {
+        return std::find(args.begin(), args.end(), flag) != args.end();
+    };
+    if (has("--version")) {
+        std::cout << "nvcc: cumetalc Cuda compiler driver\n"
+                     "Cuda compilation tools, release 12.0, V12.0.140 "
+                     "(CuMetal " CUMETAL_VERSION_STRING ")\n";
+        return 0;
+    }
+    for (std::size_t i = 0; i + 1 < args.size(); ++i) {
+        if (args[i] == "-v" && args[i + 1] == "__cmake_determine_cuda") {
+            std::cout << "#$ NVCC_PREPEND_FLAGS = \n"
+                         "#$ TOP=" +
+                             nvcc_toolkit_root(argv[0]).string() +
+                             "\n";
+            return 0;
+        }
+    }
+
+    std::string output;
+    std::vector<std::string> inputs;
+    std::vector<std::string> include_dirs;
+    std::vector<std::string> defines;
+    std::vector<std::string> host_flags;
+    bool compile_only = false;
+    for (std::size_t i = 0; i < args.size(); ++i) {
+        const std::string& arg = args[i];
+        auto next = [&]() -> std::string {
+            return i + 1 < args.size() ? args[++i] : std::string{};
+        };
+        if (arg == "-o") output = next();
+        else if (arg == "-c") compile_only = true;
+        else if (arg == "-I") include_dirs.push_back(next());
+        else if (arg.rfind("-I", 0) == 0 && arg.size() > 2)
+            include_dirs.push_back(arg.substr(2));
+        else if (arg == "-D") defines.push_back(next());
+        else if (arg.rfind("-D", 0) == 0 && arg.size() > 2)
+            defines.push_back(arg.substr(2));
+        else if (arg == "-Xcompiler") {
+            const std::string flags = next();
+            std::size_t begin = 0;
+            while (begin <= flags.size()) {
+                const std::size_t comma = flags.find(',', begin);
+                host_flags.push_back(flags.substr(
+                    begin, comma == std::string::npos ? std::string::npos
+                                                      : comma - begin));
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+        } else if (arg == "-x") (void)next();
+        else if (arg == "--keep-dir" || arg == "-MT" || arg == "-MF" ||
+                 arg == "-odir" || arg == "--output-dir" || arg == "-t") {
+            (void)next();
+        }
+        else if (arg == "-forward-unknown-to-host-compiler" || arg == "-lcudart" ||
+                 arg == "-lcudadevrt" || arg == "--expt-relaxed-constexpr" ||
+                 arg == "--expt-extended-lambda" || arg == "--extended-lambda" ||
+                 arg == "-rdc=false" || arg == "--relocatable-device-code=false") {
+            // Accepted and handled by the single-pass driver model.
+        } else if (arg.rfind("-gencode", 0) == 0 ||
+                   arg.rfind("--generate-code", 0) == 0 ||
+                   arg.rfind("-arch=", 0) == 0 || arg.rfind("--gpu-architecture", 0) == 0 ||
+                   arg.rfind("-std=", 0) == 0 || arg.rfind("--std=", 0) == 0 ||
+                   arg.rfind("-O", 0) == 0 || arg == "-g" || arg == "-lineinfo" ||
+                   arg.rfind("-L", 0) == 0 || arg.rfind("-l", 0) == 0 ||
+                   arg.rfind("-Wl,", 0) == 0 || arg.rfind("--threads", 0) == 0) {
+            if ((arg == "-gencode" || arg == "--generate-code" ||
+                 arg == "--gpu-architecture" || arg == "--threads") &&
+                i + 1 < args.size()) {
+                (void)next();
+            }
+        } else if (!arg.empty() && arg[0] != '-') {
+            inputs.push_back(arg);
+        }
+        // Remaining nvcc flags CMake emits for bookkeeping (-MD, -MT,
+        // --keep, ...) do not affect the single-pass build and are ignored.
+    }
+    if (inputs.empty()) return -1;
+    // nvcc writes a.out when -o is omitted (CMake's compiler-ID build
+    // relies on this).
+    if (output.empty() && !compile_only) output = "a.out";
+    if (output.empty()) return -1;
+
+    const bool all_objects =
+        std::all_of(inputs.begin(), inputs.end(), [](const std::string& input) {
+            const std::string ext = lower_ext(input);
+            return ext == ".o" || ext == ".a" || ext == ".dylib" || ext == ".so";
+        });
+    if (all_objects && !compile_only) {
+        const ResourceLayout layout = resolve_resources(argv[0]);
+        if (!layout.ok) {
+            std::cerr << "cumetalc failed: could not locate libcumetal.dylib "
+                         "for nvcc-compatible linking\n";
+            return 1;
+        }
+        const std::filesystem::path compiler = find_cuda_clang({});
+        std::string link = quote_shell(compiler.string());
+        for (const std::string& input : inputs) link += " " + quote_shell(input);
+        for (const std::string& flag : host_flags) link += " " + quote_shell(flag);
+        link += " -L " + quote_shell(layout.lib_dir.string()) +
+                " -lcumetal -Wl,-rpath," + quote_shell(layout.lib_dir.string()) +
+                " -o " + quote_shell(output) + " 2>&1";
+        const CommandResult result = run_command_capture(link);
+        if (!result.output.empty()) std::cerr << result.output;
+        return result.started && result.exit_code == 0 ? 0 : 1;
+    }
+    if (compile_only && inputs.size() == 1 && lower_ext(inputs.front()) == ".cu") {
+        ExecutableDriverOptions driver;
+        driver.input = inputs.front();
+        driver.output = output;
+        driver.object_only = true;
+        driver.include_dirs.assign(include_dirs.begin(), include_dirs.end());
+        driver.defines = defines;
+        driver.host_compiler_flags = host_flags;
+        const int driver_result = run_executable_driver(driver, argv[0]);
+        if (driver_result == 0 && has("-v")) emit_nvcc_verbose(argv[0], output);
+        return driver_result;
+    }
+    if (!compile_only && inputs.size() == 1 && lower_ext(inputs.front()) == ".cu") {
+        ExecutableDriverOptions driver;
+        driver.input = inputs.front();
+        driver.output = output;
+        driver.include_dirs.assign(include_dirs.begin(), include_dirs.end());
+        driver.defines = defines;
+        driver.host_compiler_flags = host_flags;
+        const int driver_result = run_executable_driver(driver, argv[0]);
+        if (driver_result == 0 && has("-v")) emit_nvcc_verbose(argv[0], output);
+        return driver_result;
+    }
+    return -1;
+}
+
 int main(int argc, char** argv) {
+    const bool nvcc_compat =
+        std::filesystem::path(argv[0]).filename() == "nvcc" ||
+        std::getenv("CUMETAL_NVCC_COMPAT") != nullptr;
+    if (nvcc_compat) {
+        const int compat = run_nvcc_compat(argc, argv);
+        if (compat >= 0) return compat;
+    }
     cumetal::air_emitter::EmitOptions options;
     BackendKind backend = BackendKind::kLegacy;
     bool backend_set_explicitly = false;
