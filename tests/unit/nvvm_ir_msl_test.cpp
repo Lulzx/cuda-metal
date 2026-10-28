@@ -3254,6 +3254,41 @@ DONE:
     } else {
         std::cerr << agg_uniform.error << "\n";
     }
+    const std::string atomic_minmax_ptx = atomic_ptx_prefix + R"ptx(
+.visible .entry agg_minmax(.param .u64 counter, .param .u64 out)
+{
+    .reg .b64 %rd<6>;
+    .reg .b32 %r<4>;
+    ld.param.u64 %rd1, [counter];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u32 %r1, %tid.x;
+    atom.global.min.s32 %r2, [%rd2], %r1;
+    atom.global.max.s32 %r3, [%rd2], %r1;
+    ld.param.u64 %rd3, [out];
+    cvta.to.global.u64 %rd4, %rd3;
+    mul.wide.u32 %rd5, %r1, 4;
+    add.u64 %rd4, %rd4, %rd5;
+    st.global.b32 [%rd4], %r2;
+    add.u64 %rd4, %rd4, 128;
+    st.global.b32 [%rd4], %r3;
+    ret;
+}
+)ptx";
+    const metal::PtxToMslResult agg_minmax =
+        compile_atomic(atomic_minmax_ptx, "agg_minmax");
+    ok &= expect(agg_minmax.ok, "uniform atomic min/max PTX lowers");
+    if (agg_minmax.ok) {
+        ok &= expect(agg_minmax.source.find(
+                         "cm_atomic_min_warp_aggregated_device_s32(") !=
+                         std::string::npos,
+                     "uniform-address atomic min is warp-aggregated");
+        ok &= expect(agg_minmax.source.find(
+                         "cm_atomic_max_warp_aggregated_device_s32(") !=
+                         std::string::npos,
+                     "uniform-address atomic max is warp-aggregated");
+    } else {
+        std::cerr << agg_minmax.error << "\n";
+    }
     const metal::PtxToMslResult agg_divergent =
         compile_atomic(atomic_divergent_ptx, "agg_divergent");
     ok &= expect(agg_divergent.ok, "divergent atomic PTX lowers");

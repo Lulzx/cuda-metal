@@ -455,6 +455,10 @@ add_executable(cumetal_runtime_ptx_ldmatrix_trans_test
     runtime_ptx_ldmatrix_trans_test.cpp
 )
 
+add_executable(cumetal_runtime_atomic_minmax_agg_test
+    runtime_atomic_minmax_agg_test.cpp
+)
+
 add_executable(cumetal_runtime_atomic_shared_test
     runtime_atomic_shared_test.cpp
 )
@@ -1236,6 +1240,11 @@ target_link_libraries(cumetal_runtime_ptx_device_heap_test
 )
 
 target_link_libraries(cumetal_runtime_ptx_ldmatrix_trans_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_atomic_minmax_agg_test
     PRIVATE
         cumetal_runtime
 )
@@ -2180,6 +2189,13 @@ target_compile_options(cumetal_runtime_ptx_device_heap_test
 )
 
 target_compile_options(cumetal_runtime_ptx_ldmatrix_trans_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_atomic_minmax_agg_test
     PRIVATE
         -Wall
         -Wextra
@@ -4179,6 +4195,17 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_CURRENT_BINARY_DIR}/ptx_ldmatrix_x4_trans.metal
     )
     set_tests_properties(functional_ptx_ldmatrix_trans_numeric PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
+        NAME functional_atomic_minmax_aggregation
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_source_heap.sh
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime_atomic_minmax_agg_test>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/atomic_minmax_agg.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/atomic_minmax_agg.metal
+    )
+    set_tests_properties(functional_atomic_minmax_aggregation PROPERTIES SKIP_RETURN_CODE 77)
 
     # Device-side new/delete uses a persistent bounded heap shared by kernels.
     # Exercise cross-launch pointer lifetime, free-list reuse, exhaustion, and
