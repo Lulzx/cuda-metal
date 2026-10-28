@@ -343,6 +343,20 @@ the shape CUB's inline-asm warp scans expand to) is split into separate
 statements by the parser. Integer operations other than add/sub on a pointer
 operand (`ptr & 15` alignment tests) cast the pointer to `ulong`.
 
+## Native 64-bit min/max
+
+Metal's stdlib (verified against the 32023 headers and by compiling with
+`xcrun metal`) provides exactly two native 64-bit device atomic forms:
+in-place `atomic_min_explicit` / `atomic_max_explicit` on
+`atomic_ulong` (`__HAVE_ATOMIC_ULONG_MIN_MAX__`). There are no 64-bit
+fetch forms, exchange, CAS, load, or store. `mark_native_u64_minmax`
+therefore maps an unsigned 64-bit min/max whose old value is unused
+(relaxed ordering, device address space, system scope only under the
+UMA attribute) to the native instruction, avoiding the lock bank for
+the common fire-and-forget `atomicMin`/`atomicMax`. Everything else —
+live-result min/max (CUDA returns the old value), signed min/max, and
+all other 64-bit operations — keeps the lock-bank helper below.
+
 ## Device coherence for lock-backed accesses
 
 The typed backend qualifies device payloads in its 64-bit atomic and scoped
