@@ -72,6 +72,15 @@ struct RegistrationCacheMetadata {
     bool uses_device_launch_queue = false;
     // A double libdevice call runs in binary32; kept so warm cache hits warn too.
     bool fp64_libdevice_via_f32 = false;
+    // Integrity digest of the cached artifact itself (size + FNV-1a of
+    // its bytes), so a torn .metal/.metallib entry is detected on the
+    // next hit instead of failing every launch until deleted by hand.
+    // Entries written before this field existed carry no digest; a
+    // .metallib is then guarded by its MTLB header check, while a bare
+    // .metal entry is treated as a miss and recompiled once.
+    std::uint64_t artifact_size = 0;
+    std::uint64_t artifact_fnv1a = 0;
+    bool has_artifact_digest = false;
 };
 
 // Identity of the libcumetal binary currently executing, taken from its Mach-O LC_UUID.
@@ -304,6 +313,26 @@ void append_u32_le(std::vector<std::uint8_t>* bytes, std::uint32_t value) {
     }
 }
 
+void append_u64_le(std::vector<std::uint8_t>* bytes, std::uint64_t value) {
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        bytes->push_back(static_cast<std::uint8_t>((value >> shift) & 0xffu));
+    }
+}
+
+bool consume_u64_le(const std::vector<std::uint8_t>& bytes,
+                    std::size_t* offset,
+                    std::uint64_t* value) {
+    if (offset == nullptr || value == nullptr || *offset > bytes.size() ||
+        bytes.size() - *offset < 8) {
+        return false;
+    }
+    *value = 0;
+    for (unsigned shift = 0; shift < 64; shift += 8) {
+        *value |= static_cast<std::uint64_t>(bytes[(*offset)++]) << shift;
+    }
+    return true;
+}
+
 bool consume_u32_le(const std::vector<std::uint8_t>& bytes,
                     std::size_t* offset,
                     std::uint32_t* value) {
@@ -325,6 +354,16 @@ bool write_registration_metadata(const std::filesystem::path& artifact_path,
         return false;
     }
 
+    // Digest the artifact as published so later hits can verify it.
+    std::string artifact_error;
+    const std::vector<std::uint8_t> artifact_bytes =
+        cumetal::common::read_file_bytes(artifact_path, &artifact_error);
+    if (!artifact_error.empty() && artifact_bytes.empty()) {
+        return false;
+    }
+    const std::uint64_t artifact_fnv1a = fnv1a64_registration_update(
+        kFnv1a64Offset, artifact_bytes.data(), artifact_bytes.size());
+
     std::vector<std::uint8_t> bytes(kRegistrationMetadataMagic.begin(),
                                     kRegistrationMetadataMagic.end());
     std::uint32_t flags = 0;
@@ -341,6 +380,8 @@ bool write_registration_metadata(const std::filesystem::path& artifact_path,
         append_u32_le(&bytes, static_cast<std::uint32_t>(format.size()));
         bytes.insert(bytes.end(), format.begin(), format.end());
     }
+    append_u64_le(&bytes, static_cast<std::uint64_t>(artifact_bytes.size()));
+    append_u64_le(&bytes, artifact_fnv1a);
 
     const std::filesystem::path destination = jit_metadata_path_for(artifact_path);
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
@@ -396,9 +437,40 @@ bool read_registration_metadata(const std::filesystem::path& artifact_path,
             reinterpret_cast<const char*>(bytes.data() + offset), size);
         offset += size;
     }
-    if (offset != bytes.size()) return false;
+    if (offset != bytes.size()) {
+        // Trailing artifact digest (size + FNV-1a). Entries written before
+        // the digest existed end exactly at the formats and stay readable.
+        if (bytes.size() - offset != 16 ||
+            !consume_u64_le(bytes, &offset, &parsed.artifact_size) ||
+            !consume_u64_le(bytes, &offset, &parsed.artifact_fnv1a) ||
+            offset != bytes.size()) {
+            return false;
+        }
+        parsed.has_artifact_digest = true;
+    }
     *metadata = std::move(parsed);
     return true;
+}
+
+// A cache hit is trusted only when the artifact still matches the digest
+// recorded when it was published. Without a digest (legacy entries), a
+// .metallib relies on its MTLB header check, while a bare .metal source
+// entry cannot be verified and must be recompiled once.
+bool artifact_integrity_ok(const std::filesystem::path& path,
+                           const RegistrationCacheMetadata& metadata) {
+    if (!metadata.has_artifact_digest) {
+        return path.extension() == ".metallib";
+    }
+    std::error_code ec;
+    const std::uintmax_t size = std::filesystem::file_size(path, ec);
+    if (ec || size != metadata.artifact_size) return false;
+    std::string error;
+    const std::vector<std::uint8_t> bytes =
+        cumetal::common::read_file_bytes(path, &error);
+    if (bytes.size() != metadata.artifact_size) return false;
+    return fnv1a64_registration_update(kFnv1a64Offset, bytes.data(),
+                                       bytes.size()) ==
+           metadata.artifact_fnv1a;
 }
 
 }  // namespace
@@ -1104,22 +1176,35 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         if (!cached_hit_path.empty()) {
             RegistrationCacheMetadata cached_metadata;
             if (read_registration_metadata(cached_hit_path, &cached_metadata)) {
-                REG_DEBUG("jit metadata cache hit: %s",
-                          jit_metadata_path_for(cached_hit_path).c_str());
-                REG_DEBUG("jit cache hit: %s", cached_hit_path.c_str());
-                publish_metadata(cached_metadata);
-                *out_path = cached_hit_path.string();
-                if (out_is_persistent != nullptr) *out_is_persistent = true;
-                if (out_provenance != nullptr) {
-                    *out_provenance = cached_hit_path.extension() == ".metallib"
-                                          ? generic_ptx_provenance
-                                          : "";
+                if (!artifact_integrity_ok(cached_hit_path, cached_metadata)) {
+                    REG_DEBUG("jit cache hit failed integrity check; removing and treating as miss: %s",
+                              cached_hit_path.c_str());
+                    std::error_code remove_ec;
+                    std::filesystem::remove(cached_hit_path, remove_ec);
+                    std::filesystem::remove(
+                        jit_metadata_path_for(cached_hit_path), remove_ec);
+                    cached_hit_path.clear();
+                } else {
+                    REG_DEBUG("jit metadata cache hit: %s",
+                              jit_metadata_path_for(cached_hit_path).c_str());
+                    REG_DEBUG("jit cache hit: %s", cached_hit_path.c_str());
+                    publish_metadata(cached_metadata);
+                    *out_path = cached_hit_path.string();
+                    if (out_is_persistent != nullptr) *out_is_persistent = true;
+                    if (out_provenance != nullptr) {
+                        *out_provenance = cached_hit_path.extension() == ".metallib"
+                                              ? generic_ptx_provenance
+                                              : "";
+                    }
+                    return true;
                 }
-                return true;
             }
-            REG_DEBUG("jit metadata cache miss: %s",
-                      jit_metadata_path_for(cached_hit_path).c_str());
-        } else {
+            if (!cached_hit_path.empty()) {
+                REG_DEBUG("jit metadata cache miss: %s",
+                          jit_metadata_path_for(cached_hit_path).c_str());
+            }
+        }
+        if (cached_hit_path.empty()) {
             REG_DEBUG("jit cache miss: %s", cached_metallib.c_str());
         }
     }
@@ -1193,6 +1278,17 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         metadata.uses_device_launch_queue = lowered_llvm_metadata.uses_device_launch_queue;
     }
 
+    if (!cached_hit_path.empty() &&
+        !artifact_integrity_ok(cached_hit_path, metadata)) {
+        // The artifact is torn but its sidecar was unreadable, so the fast
+        // path above could not check it. Do not serve it as a hit.
+        REG_DEBUG("jit cache hit failed integrity check; removing and treating as miss: %s",
+                  cached_hit_path.c_str());
+        std::error_code remove_ec;
+        std::filesystem::remove(cached_hit_path, remove_ec);
+        std::filesystem::remove(jit_metadata_path_for(cached_hit_path), remove_ec);
+        cached_hit_path.clear();
+    }
     if (!cached_hit_path.empty()) {
         (void)write_registration_metadata(cached_hit_path, metadata);
         REG_DEBUG("jit cache hit: %s", cached_hit_path.c_str());
@@ -1276,10 +1372,29 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             if (!cached_metallib.empty()) {
                 msl_final = cached_metallib;
                 msl_final.replace_extension(".metal");
+                // Publish atomically (staging file + rename), matching the
+                // .metallib discipline: a process killed mid-publish never
+                // leaves a torn entry at the cache key's path.
+                const auto publish_stamp =
+                    std::chrono::steady_clock::now().time_since_epoch().count();
+                std::filesystem::path staging = msl_final;
+                staging += ".partial-" + std::to_string(::getpid()) + "-" +
+                           std::to_string(publish_stamp);
+                std::string publish_error;
+                if (!cumetal::common::write_file_bytes(staging, metal_bytes,
+                                                       &publish_error)) {
+                    REG_DEBUG("publish msl cache entry failed: %s",
+                              publish_error.c_str());
+                    return false;
+                }
                 std::error_code ec;
-                std::filesystem::copy_file(
-                    metal_path, msl_final,
-                    std::filesystem::copy_options::overwrite_existing, ec);
+                std::filesystem::rename(staging, msl_final, ec);
+                if (ec) {
+                    REG_DEBUG("publish msl cache entry failed: %s",
+                              ec.message().c_str());
+                    remove_path_if_exists(staging.string());
+                    return false;
+                }
             }
             *out_path = msl_final.string();
             if (out_is_persistent != nullptr) {

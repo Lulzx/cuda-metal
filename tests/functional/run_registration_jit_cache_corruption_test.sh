@@ -2,9 +2,13 @@
 # A torn registration-JIT cache entry must be detected and recompiled, never
 # reused. Before this was checked, one metallib whose header had been zeroed
 # (a process killed mid-write) failed every later launch of that kernel with
-# cudaErrorInvalidValue until someone deleted the cache by hand.
+# cudaErrorInvalidValue until someone deleted the cache by hand. The same
+# now holds for direct-MSL entries: the metadata sidecar records the
+# artifact's size + FNV-1a digest, and a hit that fails the integrity check
+# is dropped and recompiled.
 #
-#   1. Cold run compiles the kernel into a sandboxed cache (.metallib entry).
+#   1. Cold run compiles the kernel into a sandboxed cache (one artifact
+#      entry, .metallib or .metal depending on the lowering path).
 #   2. The entry's header is zeroed; the next run must report the bad entry,
 #      recompile, compute the right answer, and leave an intact entry.
 #   3. Same for a truncated entry.
@@ -27,7 +31,8 @@ run() {
 }
 
 entry() {
-    find "$CACHE_DIR/registration-jit" -maxdepth 1 -type f -name "*.metallib" \
+    find "$CACHE_DIR/registration-jit" -maxdepth 1 -type f \
+        \( -name "*.metallib" -o -name "*.metal" \) \
         ! -name "*.partial-*" -print
 }
 
@@ -36,8 +41,15 @@ is_intact() {
 import os, struct, sys
 path = sys.argv[1]
 data = open(path, "rb").read(0x18)
-ok = len(data) == 0x18 and data[:4] == b"MTLB" and \
-     struct.unpack_from("<Q", data, 0x10)[0] == os.path.getsize(path)
+if path.endswith(".metallib"):
+    ok = len(data) == 0x18 and data[:4] == b"MTLB" and \
+         struct.unpack_from("<Q", data, 0x10)[0] == os.path.getsize(path)
+else:
+    # Direct-MSL entry: cumetalc output starts with its provenance comment
+    # and ends with the kernel's closing brace.
+    tail = open(path, "rb").read()[-64:].strip()
+    ok = len(data) == 0x18 and data[:2] == b"//" and \
+         os.path.getsize(path) > 0x400 and tail.endswith(b"}")
 sys.exit(0 if ok else 1)
 PY
 }
@@ -50,7 +62,7 @@ if ! grep -q "jit cache miss:" <<<"$cold"; then
 fi
 cached="$(entry)"
 if [ "$(wc -l <<<"$cached" | tr -d ' ')" -ne 1 ] || [ -z "$cached" ]; then
-    echo "FAIL: expected exactly one .metallib cache entry, got:"
+    echo "FAIL: expected exactly one cache entry, got:"
     echo "${cached:-<none>}"
     exit 1
 fi
@@ -72,7 +84,7 @@ PY
     is_intact "$cached" && { echo "FAIL: $label corruption did not take"; exit 1; }
     local out
     out="$(run)" || { echo "FAIL: run after $label corruption failed"; echo "$out"; exit 1; }
-    if ! grep -q "is not a complete metallib" <<<"$out"; then
+    if ! grep -qE "is not a complete metallib|failed integrity check" <<<"$out"; then
         echo "FAIL: $label cache entry was not detected"
         echo "$out"
         exit 1
