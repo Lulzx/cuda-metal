@@ -17,6 +17,19 @@ __global__ void queue_parent(int* value) {
     queue_child<<<1, 1>>>(value);
 }
 
+__global__ void queue_bump(int* value) {
+    atomicAdd(value, 1);
+}
+
+__global__ void queue_copy_parent(int* dst, const int* src, int* status) {
+    if (threadIdx.x == 0) {
+        const cudaError_t copy_status =
+            cudaMemcpyAsync(dst, src, sizeof(int), cudaMemcpyDeviceToDevice, 0);
+        *status = static_cast<int>(copy_status);
+        queue_bump<<<1, 1>>>(dst);
+    }
+}
+
 __global__ void queue_invalid_parent(int* value) {
     queue_leaf<<<0, 1>>>(value);
 }
@@ -54,6 +67,41 @@ int main(int argc, char** argv) {
         return 0;
     }
 
+    if (std::strcmp(mode, "memcpy") == 0) {
+        int* device_src = nullptr;
+        int* device_status = nullptr;
+        const int seed = 41;
+        if (cudaMalloc(reinterpret_cast<void**>(&device_src), sizeof(int)) != cudaSuccess ||
+            cudaMalloc(reinterpret_cast<void**>(&device_status), sizeof(int)) != cudaSuccess ||
+            cudaMemcpy(device_src, &seed, sizeof(seed), cudaMemcpyHostToDevice) !=
+                cudaSuccess) {
+            std::fprintf(stderr, "FAIL: memcpy queue setup\n");
+            return 1;
+        }
+        queue_copy_parent<<<1, 1>>>(device_value, device_src, device_status);
+        if (cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: memcpy queue synchronization\n");
+            return 1;
+        }
+        int value = 0;
+        int status = -1;
+        if (cudaMemcpy(&value, device_value, sizeof(value), cudaMemcpyDeviceToHost) !=
+                cudaSuccess ||
+            cudaMemcpy(&status, device_status, sizeof(status), cudaMemcpyDeviceToHost) !=
+                cudaSuccess ||
+            value != 42 || status != 0) {
+            std::fprintf(stderr,
+                         "FAIL: device memcpy queue value=%d status=%d expected=42,0\n",
+                         value, status);
+            return 1;
+        }
+        cudaFree(device_src);
+        cudaFree(device_status);
+        cudaFree(device_value);
+        std::printf("PASS: device memcpy queue record copied then launched value=42\n");
+        return 0;
+    }
+
     if (std::strcmp(mode, "invalid") == 0) {
         queue_invalid_parent<<<1, 1>>>(device_value);
         const cudaError_t status = cudaDeviceSynchronize();
@@ -83,7 +131,7 @@ int main(int argc, char** argv) {
         return 0;
     }
 
-    std::fprintf(stderr, "usage: %s [nested|invalid|overflow]\n", argv[0]);
+    std::fprintf(stderr, "usage: %s [nested|memcpy|invalid|overflow]\n", argv[0]);
     cudaFree(device_value);
     return 64;
 }

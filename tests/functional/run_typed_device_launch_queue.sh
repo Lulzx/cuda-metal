@@ -52,13 +52,14 @@ xcrun clang++ "${OBJECT}" \
     -o "${EXECUTABLE}"
 
 combined=""
-for mode in nested invalid overflow; do
+for mode in nested memcpy invalid overflow; do
     output="$(CUMETAL_PTX_BACKEND=cumetal-ir "${EXECUTABLE}" "${mode}" 2>&1)"
     printf '%s\n' "${output}"
     combined+="${output}"$'\n'
 done
 
 grep -Fq 'PASS: nested device launch queue value=111' <<<"${combined}"
+grep -Fq 'PASS: device memcpy queue record copied then launched value=42' <<<"${combined}"
 grep -Fq 'PASS: invalid child configuration propagated' <<<"${combined}"
 grep -Fq 'PASS: device launch queue overflow propagated' <<<"${combined}"
 

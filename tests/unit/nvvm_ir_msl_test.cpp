@@ -3250,6 +3250,54 @@ $L__done:
     launch_options.source_name = "launch.ptx";
     const metal::PtxToMslResult launch_ptx =
         metal::compile_ptx_to_msl(kPtxDeviceLaunch, launch_options);
+    // Device cudaMemcpyAsync enqueues a kind-1 record on the same queue.
+    const char* kPtxDeviceMemcpy = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry copier(.param .u64 .ptr copier_param_0, .param .u64 .ptr copier_param_1)
+{
+    .reg .b64 %rd<6>;
+    .reg .b32 %r<2>;
+    ld.param.b64 %rd0, [copier_param_0];
+    ld.param.b64 %rd1, [copier_param_1];
+    { // callseq 0
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 param2;
+    .param .b32 param3;
+    .param .b64 param4;
+    .param .b32 retval0;
+    st.param.b64 [param0], %rd0;
+    st.param.b64 [param1], %rd1;
+    st.param.b64 [param2], 4;
+    st.param.b32 [param3], 2;
+    st.param.b64 [param4], 0;
+    call.uni (retval0), cudaMemcpyAsync, (param0, param1, param2, param3, param4);
+    ld.param.b32 %r0, [retval0];
+    } // callseq 0
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions memcpy_options;
+    memcpy_options.entry_name = "copier";
+    memcpy_options.source_name = "memcpy.ptx";
+    const metal::PtxToMslResult memcpy_ptx =
+        metal::compile_ptx_to_msl(kPtxDeviceMemcpy, memcpy_options);
+    ok &= expect(memcpy_ptx.ok, "PTX device cudaMemcpyAsync lowers: " +
+                                    memcpy_ptx.error);
+    if (memcpy_ptx.ok) {
+        ok &= expect(memcpy_ptx.uses_device_launch_queue,
+                     "PTX device memcpy reports uses_device_launch_queue");
+        ok &= expect(memcpy_ptx.source.find("cm_device_memcpy_async(") !=
+                         std::string::npos,
+                     "PTX device memcpy calls cm_device_memcpy_async");
+        ok &= expect(memcpy_ptx.source.find("cm_device_memcpy_async") !=
+                             std::string::npos &&
+                         memcpy_ptx.source.find("record[15u] = 1u") !=
+                             std::string::npos,
+                     "device memcpy helper writes the kind-1 record marker");
+    }
     // A C++ vtable is an initialized u64 function table: entries are
     // materialized as stable name tokens in a constant, and an indirect
     // call through a loaded entry dispatches on that token.
