@@ -119,6 +119,7 @@ struct Analysis {
     const std::unordered_map<std::string, std::uint64_t>& sizes;
     const std::function<bool(const Instruction&)>& preserves;
     LocalMemoryRangeLimits limits;
+    std::optional<LocalMemoryRanges::CfgCache>& cfg_cache;
     LocalMemoryRangeProof proof;
     std::map<const Instruction*, std::optional<LocalStoreRange>> observations;
     bool exhausted = false;
@@ -455,26 +456,45 @@ struct Analysis {
             proof.reason = "invalid load target";
             return proof;
         }
+        // Target-independent CFG facts are built once (under this proof's
+        // budget) and shared by later proofs over the same CFG.
+        LocalMemoryRanges::CfgCache pending_cache;
+        const bool building_cache = !cfg_cache.has_value();
+        const LocalMemoryRanges::CfgCache& cache =
+            building_cache ? pending_cache : *cfg_cache;
         std::optional<std::size_t> target_block;
         std::size_t target_position = 0;
-        for (std::size_t b = 0; b < blocks.size(); ++b) {
-            if (!spend(blocks[b].instructions.size() + 1, "locate target"))
+        if (!building_cache) {
+            const auto found = cache.locations.find(target);
+            if (found == cache.locations.end()) {
+                proof.reason = "load is absent from CFG";
                 return proof;
-            if (std::find(blocks[b].instructions.begin(), blocks[b].instructions.end(), target) !=
-                blocks[b].instructions.end()) {
-                if (target_block) {
-                    proof.reason = "ambiguous load target";
-                    return proof;
-                }
-                target_block = b;
-                target_position = static_cast<std::size_t>(
-                    std::find(blocks[b].instructions.begin(), blocks[b].instructions.end(), target) -
-                    blocks[b].instructions.begin());
             }
-        }
-        if (!target_block) {
-            proof.reason = "load is absent from CFG";
-            return proof;
+            target_block = found->second.first;
+            target_position = found->second.second;
+        } else {
+            for (std::size_t b = 0; b < blocks.size(); ++b) {
+                if (!spend(blocks[b].instructions.size() + 1, "locate target"))
+                    return proof;
+                for (std::size_t position = 0; position < blocks[b].instructions.size();
+                     ++position) {
+                    const Instruction* candidate = blocks[b].instructions[position];
+                    if (!pending_cache.locations.emplace(candidate,
+                                                         std::make_pair(b, position))
+                             .second) {
+                        proof.reason = "ambiguous load target";
+                        return proof;
+                    }
+                    if (candidate == target) {
+                        target_block = b;
+                        target_position = position;
+                    }
+                }
+            }
+            if (!target_block) {
+                proof.reason = "load is absent from CFG";
+                return proof;
+            }
         }
         std::vector<bool> seen(blocks.size(), false), reaches(blocks.size(), false);
         std::vector<std::size_t> pending = blocks[*target_block].successors;
@@ -497,18 +517,40 @@ struct Analysis {
             for (const auto successor : blocks[b].successors)
                 pending.push_back(successor);
         }
-        std::vector<std::vector<std::size_t>> predecessors(blocks.size());
-        for (std::size_t b = 0; b < blocks.size(); ++b) {
-            if (!spend(blocks[b].successors.size() + 1, "CFG predecessors"))
-                return proof;
-            for (const auto successor : blocks[b].successors) {
-                if (successor >= blocks.size()) {
-                    proof.reason = "invalid CFG edge";
+        if (building_cache) {
+            pending_cache.predecessors.assign(blocks.size(), {});
+            for (std::size_t b = 0; b < blocks.size(); ++b) {
+                if (!spend(blocks[b].successors.size() + 1, "CFG predecessors"))
                     return proof;
+                for (const auto successor : blocks[b].successors) {
+                    if (successor >= blocks.size()) {
+                        proof.reason = "invalid CFG edge";
+                        return proof;
+                    }
+                    pending_cache.predecessors[successor].push_back(b);
                 }
-                predecessors[successor].push_back(b);
+            }
+            pending_cache.entry_reachable.assign(blocks.size(), false);
+            std::vector<std::size_t> forward = {0};
+            pending_cache.entry_reachable[0] = true;
+            while (!forward.empty()) {
+                if (!spend(1, "CFG predecessors"))
+                    return proof;
+                const auto b = forward.back();
+                forward.pop_back();
+                for (const auto successor : blocks[b].successors) {
+                    if (successor >= blocks.size()) {
+                        proof.reason = "invalid CFG edge";
+                        return proof;
+                    }
+                    if (!pending_cache.entry_reachable[successor]) {
+                        pending_cache.entry_reachable[successor] = true;
+                        forward.push_back(successor);
+                    }
+                }
             }
         }
+        const std::vector<std::vector<std::size_t>>& predecessors = cache.predecessors;
         pending = {*target_block};
         while (!pending.empty()) {
             if (!spend(1, "target reachability"))
@@ -521,7 +563,7 @@ struct Analysis {
             for (const auto predecessor : predecessors[b])
                 pending.push_back(predecessor);
         }
-        if (!reaches[0]) {
+        if (!reaches[0] || !cache.entry_reachable[*target_block]) {
             proof.reason = "load unreachable from entry";
             return proof;
         }
@@ -537,21 +579,49 @@ struct Analysis {
         std::vector<std::size_t> ends(blocks.size());
         std::deque<std::size_t> liveness_queue;
         std::vector<bool> queued(blocks.size(), false);
+        if (building_cache) {
+            pending_cache.uses.assign(blocks.size(), {});
+            pending_cache.kills.assign(blocks.size(), {});
+            for (std::size_t b = 0; b < blocks.size(); ++b) {
+                for (std::size_t i = 0; i < blocks[b].instructions.size(); ++i) {
+                    const auto& instruction = *blocks[b].instructions[i];
+                    const auto read = source_registers(instruction),
+                                 written = written_registers(instruction);
+                    if (!spend(1 + read.size() + written.size(),
+                               "register liveness summary"))
+                        return proof;
+                    for (const auto& name : read)
+                        if (!pending_cache.kills[b].contains(name))
+                            pending_cache.uses[b].insert(name);
+                    if (instruction.predicate.empty())
+                        for (const auto& name : written)
+                            pending_cache.kills[b].insert(name);
+                }
+            }
+            cfg_cache = pending_cache;
+        }
         for (std::size_t b = 0; b < blocks.size(); ++b) {
             if (!reaches[b])
                 continue;
             ends[b] = b == *target_block ? target_position : blocks[b].instructions.size();
-            for (std::size_t i = 0; i < ends[b]; ++i) {
-                const auto& instruction = *blocks[b].instructions[i];
-                const auto read = source_registers(instruction), written = written_registers(instruction);
-                if (!spend(1 + read.size() + written.size(), "register liveness summary"))
-                    return proof;
-                for (const auto& name : read)
-                    if (!kills[b].contains(name))
-                        uses[b].insert(name);
-                if (instruction.predicate.empty())
-                    for (const auto& name : written)
-                        kills[b].insert(name);
+            if (b == *target_block) {
+                for (std::size_t i = 0; i < ends[b]; ++i) {
+                    const auto& instruction = *blocks[b].instructions[i];
+                    const auto read = source_registers(instruction),
+                                     written = written_registers(instruction);
+                    if (!spend(1 + read.size() + written.size(),
+                               "register liveness summary"))
+                        return proof;
+                    for (const auto& name : read)
+                        if (!kills[b].contains(name))
+                            uses[b].insert(name);
+                    if (instruction.predicate.empty())
+                        for (const auto& name : written)
+                            kills[b].insert(name);
+                }
+            } else {
+                uses[b] = cache.uses[b];
+                kills[b] = cache.kills[b];
             }
             live_in[b] = uses[b];
             liveness_queue.push_back(b);
@@ -782,7 +852,8 @@ LocalMemoryRanges::LocalMemoryRanges(const std::vector<RawBlock>& blocks,
       preserves_caller_memory_(std::move(preserves_caller_memory)), limits_(limits) {}
 
 LocalMemoryRangeProof LocalMemoryRanges::prove_before(const Instruction* target_load) const {
-    return Analysis{blocks_, depot_sizes_, preserves_caller_memory_, limits_}.run(target_load);
+    return Analysis{blocks_, depot_sizes_, preserves_caller_memory_, limits_, cfg_cache_}
+        .run(target_load);
 }
 
 } // namespace cumetal::ir::detail

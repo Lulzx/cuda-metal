@@ -415,6 +415,41 @@ bool incomplete_exploration() {
     }
     return ok;
 }
+// One LocalMemoryRanges instance serving repeated prove_before calls must
+// reuse its cached CFG facts: same results, strictly less counted work on
+// the later proofs, and no cache pollution from a budget-starved first call.
+bool repeated_proofs_share_cfg_work() {
+    bool ok = true;
+    Graph graph(2);
+    graph.edge(0, 1);
+    graph.record();
+    const auto* load1 = graph.add(1, "ld.local.b8", {"%one", "[%record+2]"});
+    graph.add(1, "add.u64", {"%later", "%base", "8"});
+    const auto* load2 = graph.add(1, "ld.local.b8", {"%two", "[%record+8]"});
+    detail::LocalMemoryRanges shared(graph.blocks, graph.depots);
+    const auto first = shared.prove_before(load1);
+    const auto second = shared.prove_before(load2);
+    detail::LocalMemoryRanges fresh(graph.blocks, graph.depots);
+    const auto fresh_second = fresh.prove_before(load2);
+    ok &= expect(first.complete && second.complete && fresh_second.complete,
+                 "repeated proofs complete");
+    ok &= expect(second.operations < fresh_second.operations,
+                 "cached CFG facts reduce repeated proof work");
+    ok &= expect(second.stores.size() == fresh_second.stores.size(),
+                 "cached proof results match fresh-instance proof");
+    // A first proof that exhausts its budget must not publish partial facts:
+    // a following generous proof on the same instance still succeeds.
+    detail::LocalMemoryRangeLimits starved_limits;
+    starved_limits.operations = 1;
+    detail::LocalMemoryRanges starved(graph.blocks, graph.depots, {},
+                                      starved_limits);
+    ok &= expect(!starved.prove_before(load1).complete,
+                 "starved first proof stays incomplete");
+    ok &= expect(!starved.prove_before(load1).complete,
+                 "starved attempt does not publish partial facts as success");
+    return ok;
+}
+
 } // namespace
 
 int main() {
@@ -437,5 +472,6 @@ int main() {
     ok &= liveness_preserves_conditional_values(true);
     ok &= incomplete_exploration();
     ok &= scalar_shifts();
+    ok &= repeated_proofs_share_cfg_work();
     return ok ? 0 : 1;
 }

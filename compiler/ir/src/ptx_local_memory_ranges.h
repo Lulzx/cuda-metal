@@ -3,7 +3,12 @@
 #include "ptx_cfg.h"
 
 #include <functional>
+#include <optional>
+#include <set>
 #include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 namespace cumetal::ir::detail {
 
@@ -50,11 +55,27 @@ class LocalMemoryRanges {
                       LocalMemoryRangeLimits limits = {});
     LocalMemoryRangeProof prove_before(const Instruction* target_load) const;
 
+    // Target-independent CFG facts shared by every proof over this CFG:
+    // predecessor lists, full-block liveness transfer summaries
+    // (uses/kills), entry reachability, and instruction locations. They
+    // are computed once under the first proof's work budget and reused by
+    // later proofs, which keeps repeated proofs over one function from
+    // re-solving unchanged blocks.
+    struct CfgCache {
+        std::vector<std::vector<std::size_t>> predecessors;
+        std::vector<std::set<std::string>> uses;
+        std::vector<std::set<std::string>> kills;
+        std::vector<bool> entry_reachable;
+        std::unordered_map<const Instruction*, std::pair<std::size_t, std::size_t>>
+            locations;
+    };
+
   private:
     const std::vector<RawBlock>& blocks_;
     const std::unordered_map<std::string, std::uint64_t>& depot_sizes_;
     std::function<bool(const Instruction&)> preserves_caller_memory_;
     LocalMemoryRangeLimits limits_;
+    mutable std::optional<CfgCache> cfg_cache_;
 };
 
 } // namespace cumetal::ir::detail
