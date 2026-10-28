@@ -77,6 +77,7 @@ std::size_t lt_element_size(cudaDataType_t type) {
         case CUDA_R_16F:
         case CUDA_R_16BF: return 2;
         case CUDA_R_64F: return sizeof(double);
+        case CUDA_R_8I: return 1;
         default: return sizeof(float);
     }
 }
@@ -170,7 +171,8 @@ void lt_write_float(void* base, std::size_t index, cudaDataType_t type, float va
 
 bool valid_layout(const cublasLtMatrixLayoutOpaque* layout) {
     return layout && (layout->type == CUDA_R_32F || layout->type == CUDA_R_64F ||
-                      layout->type == CUDA_R_16F || layout->type == CUDA_R_16BF) &&
+                      layout->type == CUDA_R_16F || layout->type == CUDA_R_16BF ||
+                      layout->type == CUDA_R_8I || layout->type == CUDA_R_32I) &&
            layout->order == 0 && layout->rows > 0 && layout->cols > 0 &&
            layout->rows <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
            layout->cols <= static_cast<uint64_t>(std::numeric_limits<int>::max()) &&
@@ -214,6 +216,13 @@ cublasStatus_t validate_matmul(cublasLtMatmulDesc_t computeDesc,
         if ((Cdesc->type != CUDA_R_16BF && Cdesc->type != CUDA_R_32F) ||
             computeDesc->compute_type != CUBLAS_COMPUTE_32F ||
             computeDesc->scale_type != CUDA_R_32F)
+            return CUBLAS_STATUS_NOT_SUPPORTED;
+    } else if (type == CUDA_R_8I) {
+        // INT8 inputs, INT32 accumulator/output and INT32 scales.
+        if (Cdesc->type != CUDA_R_32I ||
+            computeDesc->compute_type != CUBLAS_COMPUTE_32I ||
+            computeDesc->scale_type != CUDA_R_32I ||
+            computeDesc->epilogue != CUBLASLT_EPILOGUE_DEFAULT)
             return CUBLAS_STATUS_NOT_SUPPORTED;
     } else if (Cdesc->type != type ||
                (type == CUDA_R_32F &&
@@ -351,7 +360,8 @@ cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmulDesc,
     if (!matmulDesc) return CUBLAS_STATUS_INVALID_VALUE;
     if (!((computeType == CUBLAS_COMPUTE_32F && scaleType == CUDA_R_32F) ||
           (computeType == CUBLAS_COMPUTE_64F && scaleType == CUDA_R_64F) ||
-          (computeType == CUBLAS_COMPUTE_16F && scaleType == CUDA_R_32F)))
+          (computeType == CUBLAS_COMPUTE_16F && scaleType == CUDA_R_32F) ||
+          (computeType == CUBLAS_COMPUTE_32I && scaleType == CUDA_R_32I)))
         return CUBLAS_STATUS_NOT_SUPPORTED;
     auto* d = new (std::nothrow) cublasLtMatmulDescOpaque;
     if (!d) return CUBLAS_STATUS_ALLOC_FAILED;
@@ -447,7 +457,7 @@ cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* matLayout,
                                            uint64_t rows, uint64_t cols, int64_t ld) {
     if (!matLayout) return CUBLAS_STATUS_INVALID_VALUE;
     if (type != CUDA_R_32F && type != CUDA_R_64F && type != CUDA_R_16F &&
-        type != CUDA_R_16BF)
+        type != CUDA_R_16BF && type != CUDA_R_8I && type != CUDA_R_32I)
         return CUBLAS_STATUS_NOT_SUPPORTED;
     if (rows == 0 || cols == 0 || rows > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
         cols > static_cast<uint64_t>(std::numeric_limits<int>::max()) ||
@@ -1002,6 +1012,61 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                                       static_cast<std::size_t>(Ddesc->cols);
             for (std::size_t i = 0; i < count; ++i)
                 lt_write_float(dst, i, Ddesc->type, df[i]);
+        }
+        return CUBLAS_STATUS_SUCCESS;
+    }
+
+    // INT8 GEMM: exact integer accumulation (int64 internally, wrapped
+    // to int32 on store, matching 32-bit accumulator semantics).
+    if (Adesc->type == CUDA_R_8I) {
+        const std::int32_t alpha_i = *static_cast<const std::int32_t*>(alpha);
+        const std::int32_t beta_i = *static_cast<const std::int32_t*>(beta);
+        const bool trans_a = computeDesc->transa != CUBLAS_OP_N;
+        const bool trans_b = computeDesc->transb != CUBLAS_OP_N;
+        for (int b = 0; b < batch_count; ++b) {
+            const auto* ap = static_cast<const std::int8_t*>(A) +
+                             b * Adesc->strided_batch_offset;
+            const auto* bp = static_cast<const std::int8_t*>(B) +
+                             b * Bdesc->strided_batch_offset;
+            const auto* cp = static_cast<const std::int32_t*>(C) +
+                             b * Cdesc->strided_batch_offset;
+            auto* dp = static_cast<std::int32_t*>(D) +
+                       b * Ddesc->strided_batch_offset;
+            std::vector<std::int32_t> out(
+                static_cast<std::size_t>(ldd) * static_cast<std::size_t>(n));
+            for (int j = 0; j < n; ++j) {
+                for (int i = 0; i < m; ++i) {
+                    std::int64_t acc = 0;
+                    for (int t = 0; t < k; ++t) {
+                        const std::int64_t av = trans_a
+                            ? ap[static_cast<std::size_t>(t) +
+                                 static_cast<std::size_t>(i) * lda]
+                            : ap[static_cast<std::size_t>(i) +
+                                 static_cast<std::size_t>(t) * lda];
+                        const std::int64_t bv = trans_b
+                            ? bp[static_cast<std::size_t>(j) +
+                                 static_cast<std::size_t>(t) * ldb]
+                            : bp[static_cast<std::size_t>(t) +
+                                 static_cast<std::size_t>(j) * ldb];
+                        acc += av * bv;
+                    }
+                    const std::int64_t value =
+                        static_cast<std::int64_t>(alpha_i) * acc +
+                        static_cast<std::int64_t>(beta_i) *
+                            cp[static_cast<std::size_t>(i) +
+                               static_cast<std::size_t>(j) * ldc];
+                    out[static_cast<std::size_t>(i) +
+                        static_cast<std::size_t>(j) * ldd] =
+                        static_cast<std::int32_t>(
+                            static_cast<std::uint32_t>(value));
+                }
+            }
+            for (int j = 0; j < n; ++j)
+                for (int i = 0; i < m; ++i)
+                    dp[static_cast<std::size_t>(i) +
+                       static_cast<std::size_t>(j) * ldd] =
+                        out[static_cast<std::size_t>(i) +
+                            static_cast<std::size_t>(j) * ldd];
         }
         return CUBLAS_STATUS_SUCCESS;
     }

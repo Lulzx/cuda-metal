@@ -68,6 +68,7 @@ typedef enum cublasComputeType_t {
     CUBLAS_COMPUTE_16F = 64,
     CUBLAS_COMPUTE_32F = 68,
     CUBLAS_COMPUTE_64F = 70,
+    CUBLAS_COMPUTE_32I = 72,
     CUBLAS_COMPUTE_32F_FAST_TF32 = 77,
 } cublasComputeType_t;
 
