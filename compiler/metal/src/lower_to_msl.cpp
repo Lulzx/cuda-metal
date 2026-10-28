@@ -779,6 +779,106 @@ MslFunction make_device_launch_helper() {
     return helper;
 }
 
+// Record kind 1 is a device cudaMemcpyAsync: destination, source, count,
+// kind, stream, kind marker last (word 15). Mirrors the legacy PTX record
+// layout consumed by the runtime queue drain.
+MslFunction make_device_memcpy_async_helper() {
+    const MslType uint_type = MslType::uint();
+    const MslType ulong_type = MslType::uint(64);
+    const MslType int_type = MslType::sint(32);
+    const MslType queue_type =
+        MslType::pointer(uint_type, MslAddressSpace::kDevice);
+    const MslType byte_pointer =
+        MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+    const MslType atomic_pointer =
+        MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice);
+    const auto literal = [&](const char* text, MslType type) {
+        return MslExpression::literal(text, type);
+    };
+    const auto ident = [&](const char* name, MslType type) {
+        return MslExpression::identifier(name, type);
+    };
+    const MslExpr queue = ident("queue", queue_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+
+    MslFunction helper;
+    helper.name = "cm_device_memcpy_async";
+    helper.return_type = int_type;
+    helper.parameters = {
+        {.type = queue_type, .name = "queue"},
+        {.type = byte_pointer, .name = "dst"},
+        {.type = byte_pointer, .name = "src"},
+        {.type = ulong_type, .name = "count"},
+        {.type = int_type, .name = "kind"},
+        {.type = ulong_type, .name = "stream"},
+    };
+    const MslExpr index = ident("index", uint_type);
+    const MslExpr record = ident("record", queue_type);
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "index",
+        MslExpression::call(
+            "atomic_fetch_add_explicit",
+            {MslExpression::cast(
+                 atomic_pointer,
+                 MslExpression::binary("+", queue, literal("1u", uint_type),
+                                       queue_type),
+                 true),
+             literal("1u", uint_type), relaxed},
+            uint_type)));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary(">=", index, literal("1023u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::return_statement(literal("1", int_type))}));
+    helper.statements.push_back(MslStatement::variable(
+        queue_type, "record",
+        MslExpression::binary(
+            "+",
+            MslExpression::binary("+", queue, literal("4u", uint_type),
+                                  queue_type),
+            MslExpression::binary("*", index, literal("16u", uint_type),
+                                  uint_type),
+            queue_type)));
+    const auto store_word = [&](int word, MslExpr value) {
+        helper.statements.push_back(MslStatement::assignment(
+            MslExpression::subscript(
+                record, literal((std::to_string(word) + "u").c_str(), uint_type),
+                uint_type),
+            std::move(value)));
+    };
+    const auto bits = [&](const char* name, MslType type) {
+        return MslExpression::cast(ulong_type, ident(name, type), true);
+    };
+    const MslExpr dst_bits = bits("dst", byte_pointer);
+    const MslExpr src_bits = bits("src", byte_pointer);
+    const MslExpr count = ident("count", ulong_type);
+    const MslExpr stream = ident("stream", ulong_type);
+    const auto low = [&](const MslExpr& value) {
+        return MslExpression::cast(uint_type, value);
+    };
+    const auto high = [&](const MslExpr& value) {
+        return MslExpression::cast(
+            uint_type,
+            MslExpression::binary(">>", value, literal("32", ulong_type),
+                                  ulong_type));
+    };
+    store_word(0, low(dst_bits));
+    store_word(1, high(dst_bits));
+    store_word(2, low(src_bits));
+    store_word(3, high(src_bits));
+    store_word(4, low(count));
+    store_word(5, high(count));
+    store_word(6, MslExpression::cast(uint_type, ident("kind", int_type)));
+    store_word(7, low(stream));
+    store_word(8, high(stream));
+    for (int word = 9; word < 15; ++word)
+        store_word(word, literal("0u", uint_type));
+    store_word(15, literal("1u", uint_type));
+    helper.statements.push_back(
+        MslStatement::return_statement(literal("0", int_type)));
+    return helper;
+}
+
 std::string indirect_dispatcher_name(const std::string& callees) {
     std::uint64_t hash = 1469598103934665603ull;
     for (const char c : callees) {
@@ -6415,6 +6515,27 @@ struct AstLowerer {
                 }
                 continue;
             }
+            if (operation.opcode == ir::OpCode::kDeviceMemcpyAsync) {
+                if (operation.operands.size() != 6) {
+                    return fail(&operation, "malformed typed device memcpy record");
+                }
+                const MslType byte_pointer = MslType::pointer(
+                    MslType::uint(8), MslAddressSpace::kDevice);
+                std::vector<MslExpr> arguments;
+                arguments.push_back(expression_for(operation.operands[0]));
+                arguments.push_back(MslExpression::cast(
+                    byte_pointer, expression_for(operation.operands[1]), true));
+                arguments.push_back(MslExpression::cast(
+                    byte_pointer, expression_for(operation.operands[2]), true));
+                arguments.push_back(expression_for(operation.operands[3]));
+                arguments.push_back(expression_for(operation.operands[4]));
+                arguments.push_back(expression_for(operation.operands[5]));
+                statements->push_back(declare_result(
+                    operation,
+                    MslExpression::call("cm_device_memcpy_async", arguments,
+                                        MslType::sint(32))));
+                continue;
+            }
             if (operation.opcode == ir::OpCode::kPrintf) {
                 if (operation.attributes.contains("null_format") &&
                     operation.attributes.at("null_format") == "true") {
@@ -9354,13 +9475,15 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                         block.operations.begin(), block.operations.end(),
                         [](const ir::Operation& operation) {
                             return operation.opcode == ir::OpCode::kDeviceParamBuffer ||
-                                   operation.opcode == ir::OpCode::kDeviceLaunch;
+                                   operation.opcode == ir::OpCode::kDeviceLaunch ||
+                                   operation.opcode == ir::OpCode::kDeviceMemcpyAsync;
                         });
                 });
         });
     if (needs_device_launch_queue) {
         result.ast.functions.push_back(make_device_param_buffer_helper());
         result.ast.functions.push_back(make_device_launch_helper());
+        result.ast.functions.push_back(make_device_memcpy_async_helper());
     }
     {
         std::unordered_set<std::string> dispatcher_names;
