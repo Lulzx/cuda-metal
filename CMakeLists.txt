@@ -510,6 +510,29 @@ target_compile_definitions(cumetalc
         CUMETAL_VERSION_STRING="${PROJECT_VERSION}"
 )
 
+# A minimal CUDA-toolkit-shaped tree so CMake's CUDA language detection
+# accepts cumetalc as CMAKE_CUDA_COMPILER: bin/nvcc is cumetalc itself
+# (its nvcc-compat mode answers the --version and -v TOP probes),
+# nvvm/libdevice only needs to exist for CMake's library-root check, and
+# lib64/libcudart.dylib aliases the CuMetal runtime.
+set(CUMETAL_TOOLKIT_DIR ${CMAKE_BINARY_DIR}/cumetal-toolkit)
+file(MAKE_DIRECTORY ${CUMETAL_TOOLKIT_DIR}/bin ${CUMETAL_TOOLKIT_DIR}/nvvm/libdevice ${CUMETAL_TOOLKIT_DIR}/lib64)
+file(COPY ${CMAKE_SOURCE_DIR}/runtime/api/ DESTINATION ${CUMETAL_TOOLKIT_DIR}/include FILES_MATCHING PATTERN "*.h")
+file(WRITE ${CUMETAL_TOOLKIT_DIR}/nvvm/libdevice/README.txt
+     "Placeholder: CMake checks this directory exists to locate the CUDA library root. CuMetal does not use libdevice binaries.\n")
+add_custom_command(TARGET cumetalc POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${CUMETAL_TOOLKIT_DIR}/bin/nvcc
+    COMMAND ${CMAKE_COMMAND} -E create_symlink $<TARGET_FILE:cumetalc> ${CUMETAL_TOOLKIT_DIR}/bin/nvcc
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${CUMETAL_TOOLKIT_DIR}/lib64/libcudart.dylib
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:cumetal_runtime> ${CUMETAL_TOOLKIT_DIR}/lib64/libcudart.dylib
+    COMMAND install_name_tool -id ${CUMETAL_TOOLKIT_DIR}/lib64/libcudart.dylib ${CUMETAL_TOOLKIT_DIR}/lib64/libcudart.dylib
+    COMMAND codesign -f -s - ${CUMETAL_TOOLKIT_DIR}/lib64/libcudart.dylib
+    COMMAND ${CMAKE_COMMAND} -E rm -f ${CUMETAL_TOOLKIT_DIR}/lib64/libcudadevrt.dylib
+    COMMAND ${CMAKE_COMMAND} -E copy $<TARGET_FILE:cumetal_runtime> ${CUMETAL_TOOLKIT_DIR}/lib64/libcudadevrt.dylib
+    COMMAND install_name_tool -id ${CUMETAL_TOOLKIT_DIR}/lib64/libcudadevrt.dylib ${CUMETAL_TOOLKIT_DIR}/lib64/libcudadevrt.dylib
+    COMMAND codesign -f -s - ${CUMETAL_TOOLKIT_DIR}/lib64/libcudadevrt.dylib
+)
+
 add_executable(cumetal
     tools/cumetal/main.cpp
 )
