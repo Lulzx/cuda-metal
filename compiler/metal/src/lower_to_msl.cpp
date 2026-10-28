@@ -3782,6 +3782,22 @@ struct AstLowerer {
             }
             if ((operation.opcode == ir::OpCode::kShiftLeft ||
                  operation.opcode == ir::OpCode::kShiftRight) &&
+                operation.operands[0].type.kind == ir::TypeKind::kInteger &&
+                operation.operands[0].type.bit_width == 64 &&
+                std::holds_alternative<MslLiteral>(left->value)) {
+                // A bare 64-bit immediate prints without a width suffix,
+                // so Metal would evaluate the shift on a 32-bit int and
+                // mask the count (`1 >> 32` becomes 1, not 0). Force the
+                // literal to the operand width before shifting.
+                const bool signed_right =
+                    operation.opcode == ir::OpCode::kShiftRight &&
+                    operation.attributes.contains("signed") &&
+                    operation.attributes.at("signed") == "true";
+                left = MslExpression::cast(
+                    signed_right ? MslType::sint(64) : MslType::uint(64), left);
+            }
+            if ((operation.opcode == ir::OpCode::kShiftLeft ||
+                 operation.opcode == ir::OpCode::kShiftRight) &&
                 operation.attributes.contains("shift_clamp")) {
                 // PTX clamps shifts at the register width; C++/MSL leaves an
                 // overshift undefined. Establish the unsigned count first.
