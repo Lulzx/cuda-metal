@@ -81,6 +81,8 @@ typedef struct CuMetalKernelDescriptor {
     const char* const* printf_formats;
     /* Nonzero when the kernel takes the hidden device-heap buffer argument. */
     uint32_t uses_device_heap;
+    /* Nonzero when the kernel takes the hidden device launch queue arguments. */
+    uint32_t uses_device_launch_queue;
 } CuMetalKernelDescriptor;
 
 typedef enum CuMetalSymbolKind {

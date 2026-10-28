@@ -318,6 +318,7 @@ CuMetalModuleHandle cumetalRegisterModule(
                                       ? descriptor->semantic_quality
                                       : "exact";
         record.uses_device_heap = kernel.uses_device_heap != 0;
+        record.uses_device_launch_queue = kernel.uses_device_launch_queue != 0;
         record.printf_formats.reserve(kernel.printf_format_count);
         for (std::uint32_t format = 0; format < kernel.printf_format_count;
              ++format) {

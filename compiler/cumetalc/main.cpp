@@ -681,6 +681,7 @@ struct NativeHostKernel {
     std::vector<std::uint32_t> symbol_indices;
     std::vector<std::string> printf_formats;
     bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
 };
 
 struct NativeSourceSymbol {
@@ -999,7 +1000,8 @@ std::string native_registration_source(
             << (kernels[i].printf_formats.empty()
                     ? "nullptr"
                     : "cm_printf_formats_" + std::to_string(i))
-            << ',' << (kernels[i].uses_device_heap ? 1 : 0) << "},\n";
+            << ',' << (kernels[i].uses_device_heap ? 1 : 0)
+            << ',' << (kernels[i].uses_device_launch_queue ? 1 : 0) << "},\n";
     }
     out << "};\n";
     if (!symbols.empty()) {
@@ -1245,6 +1247,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         }
         kernel.uses_device_heap =
             signature.find("cm___cumetal_device_heap") != std::string_view::npos;
+        kernel.uses_device_launch_queue =
+            signature.find("cm___cumetal_device_launch_queue") != std::string_view::npos;
         const bool uses_constants =
             signature.find("cm___cumetal_constant_symbols") != std::string_view::npos;
         for (std::size_t i = 0; i < symbols.size(); ++i) {

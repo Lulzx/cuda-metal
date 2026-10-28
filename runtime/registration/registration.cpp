@@ -1173,8 +1173,12 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         .uses_device_heap = lowered_metal.uses_device_heap,
     };
     metadata.fp64_libdevice_via_f32 = lowered_metal.fp64_libdevice_via_f32;
-    if (ptx_source.find("cudaLaunchDevice") != std::string::npos ||
-        ptx_source.find("cudaMemcpyAsync") != std::string::npos) {
+    // The typed backend reports its own queue usage; only legacy-lowered
+    // kernels need the LLVM metadata probe below.
+    metadata.uses_device_launch_queue = lowered_metal.uses_device_launch_queue;
+    if (!metadata.uses_device_launch_queue &&
+        (ptx_source.find("cudaLaunchDevice") != std::string::npos ||
+         ptx_source.find("cudaMemcpyAsync") != std::string::npos)) {
         cumetal::ptx::LowerToLlvmOptions metadata_options;
         metadata_options.entry_name = kernel_name;
         metadata_options.strict = true;
