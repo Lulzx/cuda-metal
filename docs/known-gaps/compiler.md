@@ -51,6 +51,13 @@ support to arbitrary divergent synchronization topologies.
 Integer min/max explicitly types MSL operands to preserve signed comparisons
 and select the correct overload for literals. Signed and unsigned 64-bit
 `mul.hi` lower to Metal's `mulhi`; mixed operand widths remain invalid.
+
+Private (local) arrays whose indices are not compile-time constants stay
+indexed `thread` byte arrays in emitted MSL. Constant-index accesses are
+scalarized by the front ends (Clang unrolls constant-bound loops before
+PTX, and the NVVM path runs its private-array SROA), but a dynamic index
+into a private array is not yet rewritten to a scalar select chain in the
+typed PTX path, so such kernels pay indexed thread-memory costs.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers
