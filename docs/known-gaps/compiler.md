@@ -65,6 +65,21 @@ a block argument, uses a byte-form dynamic offset (e.g. a strength-
 reduced byte counter), mixes element types, or has guarded/volatile
 accesses. Out-of-range dynamic indices remain undefined behavior, as in
 the source program.
+
+Threadgroup memory gets two conservative rewrites in
+`detail::optimize_threadgroup_memory`
+(`compiler/metal/src/shared_memory_opt.cpp`, also during legalization).
+Four adjacent 4-byte shared loads or stores at provably 16-byte-aligned
+addresses coalesce into one `uint4`/`float4` vector access (the static
+allocation's alignment is raised to 16), unless a barrier, call, or
+other threadgroup access intervenes. A static allocation whose accesses
+all use 4-byte elements and whose address expressions show a single
+power-of-two row stride (e.g. a 32x32 float tile with 128-byte rows) is
+remapped through the injective offset function
+`o -> o + (o / row_bytes) * 4` — one padding element per row — so warp
+lanes striding down a column land in different banks; the reported
+static threadgroup size grows accordingly. Escapes, atomics, undescribed
+threadgroup accesses, or mixed element sizes keep the original layout.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers

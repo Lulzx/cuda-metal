@@ -503,6 +503,10 @@ add_executable(cumetal_runtime_private_array_dynamic_test
     runtime_private_array_dynamic_test.cpp
 )
 
+add_executable(cumetal_runtime_shared_memory_opt_test
+    runtime_shared_memory_opt_test.cpp
+)
+
 add_executable(cumetal_runtime_cooperative_launch_test
     runtime_cooperative_launch_test.cpp
 )
@@ -1304,6 +1308,11 @@ target_link_libraries(cumetal_runtime_rope_neox_test
 )
 
 target_link_libraries(cumetal_runtime_private_array_dynamic_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_runtime_shared_memory_opt_test
     PRIVATE
         cumetal_runtime
 )
@@ -2275,6 +2284,13 @@ target_compile_options(cumetal_runtime_rope_neox_test
 )
 
 target_compile_options(cumetal_runtime_private_array_dynamic_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+
+target_compile_options(cumetal_runtime_shared_memory_opt_test
     PRIVATE
         -Wall
         -Wextra
@@ -3697,6 +3713,19 @@ add_test(
 )
 
 set_tests_properties(functional_runtime_private_array_dynamic PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_PTX_BACKEND=cumetal-ir"
+)
+
+add_test(
+    NAME functional_runtime_shared_memory_opt
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_registration_fatbin_ptx.sh
+            $<TARGET_FILE:cumetal_runtime_shared_memory_opt_test>
+            ${CMAKE_CURRENT_SOURCE_DIR}/reference/shared_memory_opt.ptx
+)
+
+set_tests_properties(functional_runtime_shared_memory_opt PROPERTIES
     SKIP_RETURN_CODE 77
     ENVIRONMENT "CUMETAL_PTX_BACKEND=cumetal-ir"
 )
