@@ -709,6 +709,40 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         if (toolchain_missing != nullptr) *toolchain_missing = true;
         return false;
     }
+    // The xcrun-built metallib carries no kernel.arg_count metadata (the
+    // legacy AIR path stamps it), so write the ABI sidecar the driver
+    // reads for exact argument counts. Without it cuLaunchKernel falls
+    // back to scanning kernelParams for a NULL terminator CUDA never
+    // promises, which can walk off the caller's array.
+    {
+        std::string sidecar = "CUMETAL_ABI_V2\n";
+        for (const auto& entry : parsed.module.entries) {
+            sidecar += "kernel " + entry.name + "\n";
+            sidecar += "shared " +
+                       std::to_string(cumetal::ptx::compute_static_shared_bytes(
+                           ptx, entry.name)) +
+                       "\n";
+            for (const auto& param : entry.params) {
+                sidecar += param.is_pointer
+                               ? "arg buffer 8\n"
+                               : "arg bytes " +
+                                     std::to_string(param.byte_size == 0
+                                                        ? std::size_t{8}
+                                                        : param.byte_size) +
+                                     "\n";
+            }
+        }
+        const std::vector<std::uint8_t> sidecar_bytes(sidecar.begin(),
+                                                      sidecar.end());
+        std::string sidecar_error;
+        if (!cumetal::common::write_file_bytes(
+                emitted.output.string() + ".cumetal-abi", sidecar_bytes,
+                &sidecar_error)) {
+            std::error_code ec;
+            std::filesystem::remove(emitted.output, ec);
+            return false;
+        }
+    }
     *out_path = emitted.output.string();
     return true;
 }
