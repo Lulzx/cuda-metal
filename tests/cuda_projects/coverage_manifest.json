@@ -107,6 +107,7 @@
       "expect_pattern": "PASS: all 31 argument buffers written, none clobbered",
       "backends": [
         "legacy",
+        "cumetal-ir",
         "native-aot"
       ]
     },

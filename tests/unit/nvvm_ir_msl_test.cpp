@@ -3129,6 +3129,67 @@ int main() {
         metal::compile_ptx_to_msl(wmma_bad_shape, wmma_ptx_options);
     ok &= expect(!wmma_bad.ok, "PTX wmma non-16x16x16 shape is refused");
 
+    // An unrolled cursor loop over a local pointer table: loads walk the
+    // table by a fixed stride while generic stores write through sibling
+    // loads. The typed importer proves every table cell holds a kernel
+    // parameter pointer (mutual provisional proof, discharged on concrete
+    // device types); a cell initialized with an integer stays refused.
+    const char* kPtxCursorTable = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry cursor(.param .u64 .ptr cursor_param_0, .param .u64 .ptr cursor_param_1, .param .u64 .ptr cursor_param_2, .param .u64 .ptr cursor_param_3)
+{
+    .reg .b64 %rd<12>;
+    .reg .b32 %r<4>;
+    .reg .pred %p<2>;
+    .local .align 8 .b8 __local_depot0[32];
+    ld.param.b64 %rd0, [cursor_param_0];
+    ld.param.b64 %rd1, [cursor_param_1];
+    ld.param.b64 %rd2, [cursor_param_2];
+    ld.param.b64 %rd3, [cursor_param_3];
+    mov.b64 %rd4, __local_depot0;
+    st.local.b64 [%rd4], %rd0;
+    st.local.b64 [%rd4+8], %rd1;
+    st.local.b64 [%rd4+16], %rd2;
+    st.local.b64 [%rd4+24], %rd3;
+    add.s64 %rd5, %rd4, 8;
+    mov.b32 %r0, 0;
+$L__BB0_1:
+    ld.local.b64 %rd6, [%rd5-8];
+    st.b32 [%rd6], %r0;
+    ld.local.b64 %rd7, [%rd5];
+    st.b32 [%rd7], %r0;
+    setp.eq.b32 %p0, %r0, 2;
+    @%p0 bra $L__BB0_3;
+    ld.local.b64 %rd8, [%rd5+8];
+    st.b32 [%rd8], %r0;
+    add.s32 %r0, %r0, 2;
+    add.s64 %rd5, %rd5, 16;
+    bra.uni $L__BB0_1;
+$L__BB0_3:
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions cursor_options;
+    cursor_options.entry_name = "cursor";
+    cursor_options.source_name = "cursor.ptx";
+    const metal::PtxToMslResult cursor_ptx =
+        metal::compile_ptx_to_msl(kPtxCursorTable, cursor_options);
+    ok &= expect(cursor_ptx.ok,
+                 "PTX unrolled cursor over a local pointer table lowers");
+    if (!cursor_ptx.ok) {
+        std::cerr << cursor_ptx.error << "\n";
+    }
+    const std::string cursor_bad = std::string(kPtxCursorTable).replace(
+        std::string(kPtxCursorTable).find("st.local.b64 [%rd4+24], %rd3;"),
+        std::string("st.local.b64 [%rd4+24], %rd3;").size(),
+        "mov.b64 %rd9, 12345;\n    st.local.b64 [%rd4+24], %rd9;");
+    const metal::PtxToMslResult cursor_bad_ptx =
+        metal::compile_ptx_to_msl(cursor_bad, cursor_options);
+    ok &= expect(!cursor_bad_ptx.ok,
+                 "PTX cursor table with an integer cell is refused");
+
     // A Pair{double,double} return stored as two f64 words over a 4xu32
     // packed aggregate must split into u32 halves (bitcast, not convert).
     const std::string fp64_packed_return_ptx = R"ptx(

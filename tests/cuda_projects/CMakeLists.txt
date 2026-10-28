@@ -315,8 +315,7 @@ cumetal_add_cuda_project_test(
 
 # Regression: a kernel whose own arguments reach the buffer indices reserved for
 # hidden bindings (25-30) had those arguments overwritten at dispatch. Runs on
-# the default (legacy) registration path; the typed PTX backend refuses it (see
-# the file header).
+# the default registration path (see the file header).
 cumetal_add_cuda_project_test(
     functional_cuda_projects_reserved_bindings
     reserved_bindings reserved_bindings.cu reserved_bindings

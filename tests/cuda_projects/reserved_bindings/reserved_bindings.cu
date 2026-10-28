@@ -5,10 +5,9 @@
 // over the caller's: writes through the upper arguments landed in the hidden
 // buffers and read back zero with cudaSuccess everywhere.
 //
-// Enrolled for the legacy and native-AOT paths only. The typed PTX backend
-// cannot yet prove the pointer loaded from `slots[i]` (a local pointer table
-// walked by an unrolled cursor loop) and refuses the kernel; see the
-// registration-default blocker table in docs/known-gaps/compiler.md.
+// Enrolled for legacy, typed-PTX and native-AOT paths. The typed PTX
+// backend proves the pointers loaded from `slots[i]` (a local pointer table
+// walked by an unrolled cursor loop) through its mutual local-memory proof.
 #include <cuda_runtime.h>
 
 #include <cstdio>
