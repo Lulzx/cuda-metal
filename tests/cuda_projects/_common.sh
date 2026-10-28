@@ -82,9 +82,10 @@ cumetal_cuda_projects_compile_link() {
     # are filtered out of the printed log only — never out of the exit status.
     rm -f "${obj_file}" "${out_dir}/${out_bin}"
     local compile_status=0
+    # shellcheck disable=SC2086
     "${CLANG_BIN}" -x cuda -std=c++17 -O2 -DNDEBUG \
         -D__CUDACC__=1 -D__NVCC__=1 -Wno-pass-failed \
-        "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" -nocudainc -nocudalib \
+        "${CUMETAL_CUDA_DEVICE_FLAGS[@]}" ${CUMETAL_CUDA_PROJECT_EXTRA_DEVICE_FLAGS:-} -nocudainc -nocudalib \
         -I"${root_dir}/runtime/api" -include cuda_runtime.h \
         -c "${src_dir}/${src_cu}" -o "${obj_file}" \
         >"${compile_log}" 2>&1 || compile_status=$?

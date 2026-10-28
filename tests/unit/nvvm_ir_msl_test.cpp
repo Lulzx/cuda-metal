@@ -3190,6 +3190,82 @@ $L__BB0_3:
     ok &= expect(!cursor_bad_ptx.ok,
                  "PTX cursor table with an integer cell is refused");
 
+    // Device-side kernel launches (cudaGetParameterBuffer + cudaLaunchDevice)
+    // lower to the hidden launch-queue channel: queue buffer and capacity
+    // arguments, the record-writing MSL helpers, and the usage flag.
+    const char* kPtxDeviceLaunch = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry parent(.param .u64 .ptr parent_param_0)
+{
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<3>;
+    .reg .pred %p<2>;
+    ld.param.b64 %rd0, [parent_param_0];
+    { // callseq 0
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 retval0;
+    st.param.b64 [param1], 8;
+    st.param.b64 [param0], 64;
+    call.uni (retval0), cudaGetParameterBuffer, (param0, param1);
+    ld.param.b64 %rd1, [retval0];
+    } // callseq 0
+    setp.eq.b64 %p0, %rd1, 0;
+    @%p0 bra $L__done;
+    st.b64 [%rd1], %rd0;
+    { // callseq 1
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .align 4 .b8 param2[12];
+    .param .align 4 .b8 param3[12];
+    .param .b32 param4;
+    .param .b64 param5;
+    .param .b32 retval0;
+    st.param.b32 [param2], 1;
+    st.param.b32 [param2+4], 1;
+    st.param.b32 [param2+8], 1;
+    st.param.b32 [param3], 32;
+    st.param.b32 [param3+4], 1;
+    st.param.b32 [param3+8], 1;
+    st.param.b64 [param1], %rd1;
+    mov.b64 %rd2, child;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param5], 0;
+    st.param.b32 [param4], 0;
+    call.uni (retval0), cudaLaunchDevice, (param0, param1, param2, param3, param4, param5);
+    ld.param.b32 %r0, [retval0];
+    } // callseq 1
+$L__done:
+    ret;
+}
+.visible .entry child(.param .u64 .ptr child_param_0)
+{
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions launch_options;
+    launch_options.entry_name = "parent";
+    launch_options.source_name = "launch.ptx";
+    const metal::PtxToMslResult launch_ptx =
+        metal::compile_ptx_to_msl(kPtxDeviceLaunch, launch_options);
+    ok &= expect(launch_ptx.ok, "PTX device launch lowers through typed IR");
+    if (launch_ptx.ok) {
+        ok &= expect(launch_ptx.uses_device_launch_queue,
+                     "PTX device launch reports uses_device_launch_queue");
+        ok &= expect(launch_ptx.source.find("cm_device_param_buffer(") !=
+                         std::string::npos &&
+                         launch_ptx.source.find("cm_device_launch(") !=
+                             std::string::npos,
+                     "PTX device launch emits queue helpers");
+        ok &= expect(launch_ptx.source.find(
+                         "__cumetal_device_launch_queue") != std::string::npos,
+                     "PTX device launch takes the hidden queue arguments");
+    } else {
+        std::cerr << launch_ptx.error << "\n";
+    }
+
     // A Pair{double,double} return stored as two f64 words over a 4xu32
     // packed aggregate must split into u32 halves (bitcast, not convert).
     const std::string fp64_packed_return_ptx = R"ptx(

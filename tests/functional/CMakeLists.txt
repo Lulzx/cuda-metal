@@ -4234,6 +4234,19 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_device_launch_queue
         PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+    # Same probe through the typed PTX backend's hidden launch-queue
+    # channel, registered via the fatbin shim and drained by the runtime.
+    add_test(
+        NAME functional_typed_device_launch_queue
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_typed_device_launch_queue.sh
+                ${CMAKE_SOURCE_DIR}
+                ${CMAKE_CURRENT_BINARY_DIR}/typed_device_launch_queue_probe
+    )
+    set_tests_properties(functional_typed_device_launch_queue
+        PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 120
+        ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
     add_test(
         NAME functional_installed_cumetalc_link_executable
         COMMAND bash
