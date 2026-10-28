@@ -315,6 +315,7 @@ std::string_view opcode_name(OpCode opcode) {
         case OpCode::kDeviceFree: return "gpu.device_free";
         case OpCode::kDeviceParamBuffer: return "gpu.device_param_buffer";
         case OpCode::kDeviceLaunch: return "gpu.device_launch";
+        case OpCode::kDeviceMemcpyAsync: return "gpu.device_memcpy_async";
         case OpCode::kIndirectCall: return "gpu.indirect_call";
         case OpCode::kThreadId: return "gpu.thread_id";
         case OpCode::kThreadgroupId: return "gpu.threadgroup_id";

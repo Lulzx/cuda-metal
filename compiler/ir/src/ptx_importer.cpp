@@ -1404,7 +1404,8 @@ struct Importer {
                callee == "_ZdlPvm" || callee == "_ZdaPvm";
     }
     static bool is_launch_queue_callee(const std::string& callee) {
-        return callee == "cudaGetParameterBuffer" || callee == "cudaLaunchDevice";
+        return callee == "cudaGetParameterBuffer" || callee == "cudaLaunchDevice" ||
+               callee == "cudaMemcpyAsync";
     }
     // Registration resolves device-launch records by this exact token
     // (runtime/registration stable_device_kernel_token): FNV-1a 64 over
@@ -1451,6 +1452,15 @@ struct Importer {
                 Type::pointer(Type::integer(8), AddressSpace::kDevice),
                 Type::integer(64), Type::integer(64), Type::integer(32),
                 Type::integer(64)};
+            return signature;
+        }
+        if (callee == "cudaMemcpyAsync") {
+            BuiltinSignature signature;
+            signature.return_type = Type::integer(32);
+            signature.argument_types = {
+                Type::pointer(Type::integer(8), AddressSpace::kDevice),
+                Type::pointer(Type::integer(8), AddressSpace::kDevice),
+                Type::integer(64), Type::integer(32), Type::integer(64)};
             return signature;
         }
         const auto target = device_functions.find(callee);
@@ -6965,6 +6975,66 @@ struct Importer {
                     if (!has_return || destinations.empty()) {
                         return fail(&instruction,
                                     "cudaGetParameterBuffer result was not captured");
+                    }
+                    (*environment)[destinations.front()] = operation.results.front();
+                } else if (callee == "cudaMemcpyAsync") {
+                    if (queue_argument_names.size() != 5) {
+                        return fail(&instruction,
+                                    "device cudaMemcpyAsync expects five arguments");
+                    }
+                    const auto pointer_slot = [&](const std::string& name)
+                        -> std::optional<Operand> {
+                        const auto slot = call_parameter_slots.find(name);
+                        if (slot == call_parameter_slots.end()) return std::nullopt;
+                        Operand value = slot->second;
+                        call_parameter_slots.erase(name);
+                        if (value.type.kind != TypeKind::kPointer) return std::nullopt;
+                        return value;
+                    };
+                    const auto destination = pointer_slot(queue_argument_names[0]);
+                    const auto source = pointer_slot(queue_argument_names[1]);
+                    const auto count = slot_operand(queue_argument_names[2],
+                                                    Type::integer(64));
+                    const auto kind = slot_operand(queue_argument_names[3],
+                                                   Type::integer(32));
+                    // A cudaStream_t argument may arrive as a pointer slot;
+                    // its bits are the stream value. Check that shape first
+                    // because slot_operand consumes the slot either way.
+                    std::optional<Operand> stream;
+                    {
+                        const auto slot =
+                            call_parameter_slots.find(queue_argument_names[4]);
+                        if (slot != call_parameter_slots.end() &&
+                            slot->second.type.kind == TypeKind::kPointer) {
+                            Operand pointer_value = slot->second;
+                            call_parameter_slots.erase(slot);
+                            Operation cast;
+                            cast.opcode = OpCode::kConvert;
+                            cast.location = operation.location;
+                            cast.operands = {pointer_value};
+                            const ValueId casted = builder.next_value();
+                            cast.results = {casted};
+                            cast.result_types = {Type::integer(64)};
+                            value_types[casted] = Type::integer(64);
+                            block->operations.push_back(std::move(cast));
+                            stream = Operand::value_ref(casted, Type::integer(64));
+                        }
+                    }
+                    if (!stream) {
+                        stream = slot_operand(queue_argument_names[4],
+                                              Type::integer(64));
+                    }
+                    if (!destination || !source || !count || !kind || !stream) {
+                        return fail(&instruction,
+                                    "device cudaMemcpyAsync argument slots unavailable");
+                    }
+                    operation.opcode = OpCode::kDeviceMemcpyAsync;
+                    operation.operands = {*launch_queue_buffer, *destination, *source,
+                                          *count, *kind, *stream};
+                    operation.result_types = {Type::integer(32)};
+                    if (!has_return || destinations.empty()) {
+                        return fail(&instruction,
+                                    "device cudaMemcpyAsync result was not captured");
                     }
                     (*environment)[destinations.front()] = operation.results.front();
                 } else {
