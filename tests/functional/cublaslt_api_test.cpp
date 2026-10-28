@@ -483,6 +483,64 @@ static bool test_bf16_via_lt() {
     return true;
 }
 
+static bool test_int8_via_lt() {
+    // INT8 inputs, INT32 output: A (2x3) * B (3x2) with alpha=2, beta=3.
+    const int8_t A[] = {1, -2, 3, 4, 5, -6};
+    const int8_t B[] = {7, 8, -9, 10, 11, 12};
+    const int32_t C[] = {1, 2, 3, 4};
+    int32_t D[] = {0, 0, 0, 0};
+    // col-major: A = [1 3 5; -2 4 -6] rows... computed in col-major below.
+    auto at = [](const int8_t* m, int ld, int r, int c) {
+        return (int)m[c * ld + r];
+    };
+    int32_t expected[4];
+    for (int c = 0; c < 2; ++c)
+        for (int r = 0; r < 2; ++r) {
+            int acc = 0;
+            for (int k = 0; k < 3; ++k) acc += at(A, 2, r, k) * at(B, 3, k, c);
+            expected[c * 2 + r] = 2 * acc + 3 * C[c * 2 + r];
+        }
+    int32_t alpha = 2, beta = 3;
+
+    cublasLtHandle_t handle = nullptr;
+    cublasLtCreate(&handle);
+    cublasLtMatmulDesc_t desc = nullptr;
+    if (cublasLtMatmulDescCreate(&desc, CUBLAS_COMPUTE_32I, CUDA_R_32I) !=
+        CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: INT8 Lt desc create\n");
+        return false;
+    }
+    cublasLtMatrixLayout_t Adesc = nullptr, Bdesc = nullptr, Cdesc = nullptr,
+                           Ddesc = nullptr;
+    cublasLtMatrixLayoutCreate(&Adesc, CUDA_R_8I, 2, 3, 2);
+    cublasLtMatrixLayoutCreate(&Bdesc, CUDA_R_8I, 3, 2, 3);
+    cublasLtMatrixLayoutCreate(&Cdesc, CUDA_R_32I, 2, 2, 2);
+    cublasLtMatrixLayoutCreate(&Ddesc, CUDA_R_32I, 2, 2, 2);
+
+    cublasStatus_t st = cublasLtMatmul(handle, desc, &alpha, A, Adesc, B, Bdesc,
+                                       &beta, C, Cdesc, D, Ddesc, nullptr,
+                                       nullptr, 0, nullptr);
+    if (st != CUBLAS_STATUS_SUCCESS) {
+        std::fprintf(stderr, "FAIL: INT8 LtMatmul returned %d\n", st);
+        return false;
+    }
+    for (int i = 0; i < 4; ++i) {
+        if (D[i] != expected[i]) {
+            std::fprintf(stderr, "FAIL: INT8 D[%d] = %d, expected %d\n", i,
+                         D[i], expected[i]);
+            return false;
+        }
+    }
+
+    cublasLtMatrixLayoutDestroy(Ddesc);
+    cublasLtMatrixLayoutDestroy(Cdesc);
+    cublasLtMatrixLayoutDestroy(Bdesc);
+    cublasLtMatrixLayoutDestroy(Adesc);
+    cublasLtMatmulDescDestroy(desc);
+    cublasLtDestroy(handle);
+    return true;
+}
+
 static bool test_null_args() {
     if (cublasLtCreate(nullptr) != CUBLAS_STATUS_INVALID_VALUE) return false;
     if (cublasLtDestroy(nullptr) != CUBLAS_STATUS_INVALID_VALUE) return false;
@@ -500,7 +558,7 @@ static bool test_validation_and_stream_ordering() {
     cublasLtMatmulDesc_t unsupportedDesc = nullptr;
     if (cublasLtMatrixLayoutCreate(&invalid, CUDA_R_32F, 0, 2, 2) !=
             CUBLAS_STATUS_INVALID_VALUE ||
-        cublasLtMatrixLayoutCreate(&invalid, CUDA_R_8I, 2, 2, 2) !=
+        cublasLtMatrixLayoutCreate(&invalid, CUDA_C_32F, 2, 2, 2) !=
             CUBLAS_STATUS_NOT_SUPPORTED ||
         cublasLtMatrixLayoutCreate(&invalid, CUDA_R_32F, 2, 2, 1) !=
             CUBLAS_STATUS_INVALID_VALUE ||
@@ -668,6 +726,7 @@ int main() {
     if (!test_sgemm_via_lt()) return 1;
     if (!test_hgemm_via_lt()) return 1;
     if (!test_bf16_via_lt()) return 1;
+    if (!test_int8_via_lt()) return 1;
     if (!test_epilogue_device()) return 1;
     if (!test_epilogue_bias()) return 1;
     if (!test_null_args()) return 1;

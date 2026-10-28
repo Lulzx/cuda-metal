@@ -32,7 +32,9 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   FP16 Lt matmuls (16F compute/FP16 out, or 32F compute/FP32 out) run on
   MPS for single-batch device buffers and otherwise decode through a
   float-domain host path with epilogues; BF16 Lt inputs (32F compute,
-  BF16 or FP32 output) use the same float-domain host path. Single-batch
+  BF16 or FP32 output) use the same float-domain host path. INT8 Lt
+  matmuls (8I inputs, 32I compute/scales, 32I output, default epilogue)
+  run an exact integer host path. Single-batch
   FP32 Lt matmuls with BIAS/RELU/GELU epilogues on device buffers run
   fused on the GPU via a cached MPSGraph executable. Row-major/
   special layouts, TF32 Lt compute, broadcast batches, general algorithm objects,
