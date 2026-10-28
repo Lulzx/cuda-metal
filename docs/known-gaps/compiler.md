@@ -172,7 +172,7 @@ by the fallback, not blocking the typed default):
 | device `malloc`/`free` | typed PTX channel landed (hidden heap buffer, free-list/bump allocator in MSL; `functional_ptx_device_heap`); the probe fixture also needs device vtables, which remain a typed gap | `functional_device_heap` |
 | device-side kernel launch queue | typed gap | `functional_device_launch_queue` |
 | tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | closed: typed backend lowers both WMMA markers to `simdgroup_matrix` (unit-tested; GPU numeric gate still needs the Metal toolchain) | `functional_wmma_numeric` |
-| pointer loaded from a local pointer array by an unrolled cursor loop | typed gap | `reserved_bindings` (enrolled for legacy and native AOT only) |
+| pointer loaded from a local pointer array by an unrolled cursor loop | closed: widened cursor offsets are bounded to the depot extent and mutually dependent table loads are proven by a provisional round discharged on concrete device pointer types; enrolled for typed PTX | `functional_cuda_projects_reserved_bindings`, typed-PTX corpus |
 | string literal passed directly as a `vprintf` argument | nonstandard fixture PTX | `functional_runtime_registration_{printf,metadata_cache}` |
 | `ret`-only PTX body served by a name-matched workload template | legacy-only fixture | `functional_runtime_rope_neox` |
 

@@ -46,7 +46,7 @@ producers:
         - "scripts/claimwire_evidence.py"
     on_stale: error
     epochs:
-      current: coverage_manifest-c7de473d
+      current: coverage_manifest-a2a2096f
 
   cumetal.matmul:
     command: ["scripts/claimwire_evidence.py", "matmul"]
