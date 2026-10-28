@@ -6,6 +6,93 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-10-28
+
+### Added
+
+- **Tensor cores from raw PTX.** `wmma` (m16n16k16), `mma.sync` (m16n8k16) and
+  `ldmatrix` (m8n8 x1/x2/x4, including `.trans`) lower through threadgroup-staged
+  `simdgroup_matrix` fragments. Results are checked exactly against a host
+  oracle on the GPU.
+- **Typed device-side runtime channels.** Device `malloc`/`free`, launch queues
+  (`cudaGetParameterBuffer`/`cudaLaunchDevice`), device `cudaMemcpyAsync`
+  queue records, and immutable function-table vtables with indirect calls all
+  lower through `cumetal-ir`; mutable tables and unprovable targets are refused.
+- **CMake/nvcc drop-in.** `cumetalc` gains an nvcc-compatible driver surface
+  (`-gencode`, `-Xcompiler`, `--expt-relaxed-constexpr`, rdc detection) and the
+  build produces a `cumetal-toolkit` tree consumable as
+  `CMAKE_CUDA_COMPILER=cumetalc`, gated by `unit_cumetalc_cmake_toolkit`.
+- **cuBLASLt coverage.** FP32/FP16/BF16 map to MPS/MPSGraph in-stream, with
+  BIAS/RELU/GELU fused epilogues; INT8 uses an exact integer-accumulate path.
+  Epilogues beyond the supported set are refused.
+- **External workloads.** CuPy 14.2 with CCCL 3.1 CUB runs on CuMetal, and the
+  pinned LAMMPS Kokkos GPU unit tests pass 716 of 716.
+
+### Changed
+
+- **`cumetal-ir` is now the default backend on every entry point**: `cumetalc`
+  for `.cu` and `.ptx`, registration JIT, driver-API PTX JIT, and NVRTC. Typed
+  refusals in the JIT paths retry once through the legacy path with the refusal
+  named in the warning; `--backend=legacy` / `CUMETAL_PTX_BACKEND=legacy`
+  remains an explicit opt-in. The legacy lowering is no longer any default.
+- **Faster native builds.** The host frontend is a single `-O2 -S -emit-llvm`
+  pass with in-memory launch-stub extraction and `@symbol` rewrite; host and
+  device frontends run in parallel; the metallib is embedded with
+  `.incbin` / Mach-O section instead of a generated C byte array.
+- **Runtime fast paths.** `AllocationTable::resolve` and both kernel
+  registries use generation-validated thread-local MRU caches; `cudaMemcpy`
+  skips the embedded-pointer relocation scan when no relocation can apply;
+  native AOT kernels bypass the `.cumetal-abi` filesystem `stat()`.
+- **PSO and host-memory paths.** A disk-backed `MTLBinaryArchive` cache keyed
+  by `(metallib_hash, macOS_build, gpu_arch)` persists pipeline state across
+  processes (`CUMETAL_BINARY_ARCHIVE=0` disables it), and page-aligned
+  `cudaHostRegister` wraps host memory with `newBufferWithBytesNoCopy`.
+- **PTX proof performance.** Local-memory provenance proofs cache
+  target-independent per-block CFG facts across proofs, published only after
+  every cache-dependent phase succeeds within budget.
+
+### Compiler optimizations
+
+- **Warp reductions.** `__shfl_xor_sync` butterfly trees and `redux.sync`
+  lower to single `simd_sum`/`simd_min`/`simd_max` instructions.
+- **Warp-aggregated atomics.** Uniform-address 32-bit atomic add/min/max
+  combine in-warp (with exclusive-prefix reconstruction of per-lane old
+  values) so one leader lane issues the global atomic.
+- **Native 64-bit min/max.** Discarded-result unsigned device min/max use
+  Metal's native `atomic_min_explicit`/`atomic_max_explicit` on
+  `atomic_ulong`; live-result, signed, and all other 64-bit forms keep the
+  lock bank, because this Metal toolchain exposes no other 64-bit atomic form.
+- **Private-array scalarization on the PTX path.** Dynamically indexed
+  2..16-element private arrays become select-chain scalars threaded through
+  block arguments; escapes, byte-form offsets, mixed element types and guarded
+  accesses keep memory form.
+- **Threadgroup memory.** Four adjacent provably aligned 4-byte accesses
+  coalesce to `float4`, and single-stride power-of-two 2D tiles get bank-
+  conflict padding (a 32x32 float tile grows 4096 -> 4224 bytes). Layouts the
+  analysis cannot prove keep their original form.
+- **Register-pressure budgeting.** An IR-level estimator records
+  `estimated_register_pressure`, warns above 104 registers, and launch bounds
+  emit `[[max_total_threads_per_threadgroup(N)]]`.
+- **`txq`/`suq` dimension queries** lower in the typed importer from the
+  descriptor ABI (width/height/depth at byte offsets 8/16/24); other query
+  kinds remain refused.
+
+### Fixed
+
+- **Driver-JIT typed metallibs crashed `cuLaunchKernel`.** They carried no
+  argument-count metadata and no ABI sidecar, so launch scanned `kernelParams`
+  for a NULL terminator and walked off the caller's array. The driver JIT now
+  writes the `CUMETAL_ABI_V2` sidecar from the parsed PTX ABI.
+- **Torn JIT cache entries were served as hits.** The direct-MSL cache now
+  records artifact size and an FNV-1a digest in its metadata sidecar, verifies
+  both hit paths, removes and recompiles failed entries, and publishes
+  `.metal` files atomically.
+- **64-bit immediate shifts evaluated in 32 bits in MSL** (`1 >> 32` yielded
+  1). Bare i64 literals in shifts are now cast to the operand width.
+- Several silent wrong answers found by CuPy, CUB and Kokkos workloads,
+  including Philox scalar offsets, scalar-pointer-mode cuBLAS norms, and
+  lock-backed wide-access coherence.
+
 ## [0.6.0] - 2026-09-23
 
 ### Fixed

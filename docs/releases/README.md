@@ -2,6 +2,8 @@
 
 [Documentation index](../README.md)
 
+- [v0.7.0](v0.7.0.md) — cumetal-ir default everywhere, tensor cores from raw
+  PTX, warp hardware reductions, single-pass driver, and CuPy/LAMMPS workloads
 - [v0.6.0](v0.6.0.md) — typed PTX import stack, AMReX and PhysX PBD on the Apple GPU,
   smaller generated source for bit-heavy kernels, and five silent wrong answers fixed
 - [v0.5.0](v0.5.0.md) — NVIDIA Warp's CUDA sources compile end to end, an
