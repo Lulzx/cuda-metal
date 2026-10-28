@@ -175,13 +175,14 @@ by the fallback, not blocking the typed default):
 | device-side kernel launch queue | closed: typed channel mirrors the heap design (hidden queue buffer + capacity, `cm_device_param_buffer`/`cm_device_launch` record writers, stable name tokens, runtime drain); device `cudaMemcpyAsync` writes kind-1 records through `cm_device_memcpy_async` on the same queue | `functional_typed_device_launch_queue`, `functional_device_launch_queue` (legacy AOT) |
 | tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | closed: typed backend lowers both WMMA markers to `simdgroup_matrix` (unit-tested; GPU numeric gate still needs the Metal toolchain) | `functional_wmma_numeric` |
 | pointer loaded from a local pointer array by an unrolled cursor loop | closed: widened cursor offsets are bounded to the depot extent and mutually dependent table loads are proven by a provisional round discharged on concrete device pointer types; enrolled for typed PTX | `functional_cuda_projects_reserved_bindings`, typed-PTX corpus |
-| string literal passed directly as a `vprintf` argument | nonstandard fixture PTX | `functional_runtime_registration_{printf,metadata_cache}` |
+| string literal passed directly as a `vprintf` argument | closed: the fixture now uses the real clang PTX shape (global format string, local argument packing), which the typed printf path lowers; verified strict with `CUMETAL_PTX_BACKEND=cumetal-ir` | `functional_runtime_registration_{printf,metadata_cache}` |
 | `ret`-only PTX body served by a name-matched workload template | legacy-only fixture | `functional_runtime_rope_neox` |
 
 The device-heap, device-launch-queue and pointer-array rows are real
-typed-backend work (the WMMA row has since closed). The last two are fixtures written
-for the legacy path and need real PTX before legacy can be retired. None of the six was a
-wrong answer on the typed backend. Until they close, the legacy backend
+typed-backend work (the WMMA row has since closed). The printf row closed
+by giving the fixture real PTX; the rope row is a fixture written
+for the legacy path and needs real PTX before legacy can be retired. None of the six was a
+wrong answer on the typed backend. Until it closes, the legacy backend
 stays as the JIT's fallback and as an explicit driver selection; it is no
 longer any default.
 

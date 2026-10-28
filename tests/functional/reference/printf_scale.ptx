@@ -2,36 +2,53 @@
 .target sm_80
 .address_size 64
 
-// Square kernel with device printf (spec §5.3 registration-path test).
-// For each thread: prints "idx=%u\n" and writes output[i] = input[i] * input[i].
-// The runtime auto-injects the printf ring-buffer arguments (spec §6.5 step 10).
+.extern .func (.param .b32 func_retval0) vprintf
+(
+    .param .b64 vprintf_param_0,
+    .param .b64 vprintf_param_1
+)
+;
+.global .align 1 .b8 printf_fmt_str[8] = {105, 100, 120, 61, 37, 117, 10};
 .visible .entry printf_scale(
     .param .u64 param_input,
     .param .u64 param_output
 )
 {
-    .reg .u64  %rd<6>;
-    .reg .f32  %f<2>;
-    .reg .u32  %r<5>;
+    .local .align 8 .b8 __local_depot0[8];
+    .reg .b64 %SP;
+    .reg .b64 %SPL;
+    .reg .b32 %r<7>;
+    .reg .b64 %rd<12>;
+    .reg .f32 %f<2>;
 
-    ld.param.u64 %rd0, [param_input];
-    ld.param.u64 %rd1, [param_output];
-
-    // gid = ctaid.x * ntid.x + tid.x
+    mov.b64 %SPL, __local_depot0;
+    cvta.local.u64 %SP, %SPL;
+    ld.param.b64 %rd0, [param_input];
+    ld.param.b64 %rd1, [param_output];
     mov.u32 %r0, %tid.x;
     mov.u32 %r1, %ntid.x;
     mov.u32 %r2, %ctaid.x;
     mad.lo.u32 %r3, %r2, %r1, %r0;
-
-    // byte offset = gid * 4  (float32 element width)
     cvt.u64.u32 %rd2, %r3;
-    mul.lo.u64  %rd3, %rd2, 4;
-    add.u64     %rd4, %rd0, %rd3;
-    add.u64     %rd5, %rd1, %rd3;
-
-    ld.global.f32  %f0, [%rd4];
-    call.uni (%r4), vprintf, ("idx=%u\n", %r3);
-    mul.f32        %f1, %f0, %f0;
-    st.global.f32  [%rd5], %f1;
+    mul.lo.u64 %rd3, %rd2, 4;
+    add.u64 %rd4, %rd0, %rd3;
+    add.u64 %rd5, %rd1, %rd3;
+    add.u64 %rd6, %SP, 0;
+    add.u64 %rd7, %SPL, 0;
+    st.local.b32 [%rd7], %r3;
+    { // callseq 0
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b32 retval0;
+    st.param.b64 [param1], %rd6;
+    mov.b64 %rd8, printf_fmt_str;
+    cvta.global.u64 %rd9, %rd8;
+    st.param.b64 [param0], %rd9;
+    call.uni (retval0), vprintf, (param0, param1);
+    ld.param.b32 %r4, [retval0];
+    } // callseq 0
+    ld.global.f32 %f0, [%rd4];
+    mul.f32 %f1, %f0, %f0;
+    st.global.f32 [%rd5], %f1;
     ret;
 }
