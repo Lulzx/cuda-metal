@@ -32,6 +32,31 @@ bool synchronizes(ir::OpCode opcode) {
     }
 }
 
+// Direct callees plus every candidate of an indirect (token) call.
+std::vector<std::string> callee_names(const ir::Operation& operation) {
+    std::vector<std::string> names;
+    if (operation.opcode == ir::OpCode::kCall) {
+        if (const auto callee = operation.attributes.find("callee");
+            callee != operation.attributes.end())
+            names.push_back(callee->second);
+    } else if (operation.opcode == ir::OpCode::kIndirectCall) {
+        if (const auto callees = operation.attributes.find("callees");
+            callees != operation.attributes.end()) {
+            std::size_t begin = 0;
+            while (begin <= callees->second.size()) {
+                const std::size_t comma = callees->second.find(',', begin);
+                const std::size_t end =
+                    comma == std::string::npos ? callees->second.size() : comma;
+                if (end > begin)
+                    names.push_back(callees->second.substr(begin, end - begin));
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+        }
+    }
+    return names;
+}
+
 bool is_bounded_builtin(const ir::Operation& operation) {
     if (operation.opcode != ir::OpCode::kCall ||
         !operation.attributes.contains("builtin") ||
@@ -131,11 +156,10 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
                 continue;
             for (const BasicBlock& block : function.blocks) {
                 for (const Operation& operation : block.operations) {
-                    if (operation.opcode == OpCode::kCall &&
-                        operation.attributes.contains("callee") &&
-                        graph->trapping.contains(
-                            operation.attributes.at("callee"))) {
-                        changed |= graph->trapping.insert(function.name).second;
+                    for (const std::string& callee : callee_names(operation)) {
+                        if (graph->trapping.contains(callee)) {
+                            changed |= graph->trapping.insert(function.name).second;
+                        }
                     }
                 }
             }
@@ -166,6 +190,17 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
                 }
                 if (synchronizes(operation.opcode)) {
                     synchronizing.emplace(function->name, operation.location.str());
+                }
+                if (operation.opcode == OpCode::kIndirectCall) {
+                    for (const std::string& name : callee_names(operation)) {
+                        const auto target = functions.find(name);
+                        if (target != functions.end() &&
+                            !target->second->is_kernel &&
+                            !target->second->blocks.empty()) {
+                            pending.push_back(target->second);
+                        }
+                    }
+                    continue;
                 }
                 if (operation.opcode != OpCode::kCall)
                     continue;
@@ -209,9 +244,15 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
             for (const BasicBlock& block : function.blocks) {
                 for (const Operation& operation : block.operations) {
                     const auto callee = operation.attributes.find("callee");
-                    if (operation.opcode == OpCode::kCall &&
-                        callee != operation.attributes.end() &&
-                        synchronizing.contains(callee->second)) {
+                    if ((operation.opcode == OpCode::kCall &&
+                         callee != operation.attributes.end() &&
+                         synchronizing.contains(callee->second)) ||
+                        (operation.opcode == OpCode::kIndirectCall &&
+                         std::any_of(callee_names(operation).begin(),
+                                     callee_names(operation).end(),
+                                     [&](const std::string& name) {
+                                         return synchronizing.contains(name);
+                                     }))) {
                         changed |= synchronizing
                                        .emplace(function.name,
                                                 synchronizing.at(callee->second))
@@ -273,14 +314,11 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
             continue;
         for (const BasicBlock& block : function->blocks) {
             for (const Operation& operation : block.operations) {
-                if (operation.opcode != OpCode::kCall ||
-                    !operation.attributes.contains("callee")) {
-                    continue;
+                for (const std::string& name : callee_names(operation)) {
+                    const auto target = functions.find(name);
+                    if (target != functions.end())
+                        pending.push_back(target->second);
                 }
-                const auto target =
-                    functions.find(operation.attributes.at("callee"));
-                if (target != functions.end())
-                    pending.push_back(target->second);
             }
         }
     }

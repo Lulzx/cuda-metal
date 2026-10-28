@@ -779,6 +779,77 @@ MslFunction make_device_launch_helper() {
     return helper;
 }
 
+std::string indirect_dispatcher_name(const std::string& callees) {
+    std::uint64_t hash = 1469598103934665603ull;
+    for (const char c : callees) {
+        hash ^= static_cast<std::uint8_t>(c);
+        hash *= 1099511628211ull;
+    }
+    return "cm_indirect_" + std::to_string(hash & 0x7fffffffffffffffull);
+}
+
+// Token dispatch for indirect device calls (vtable entries): the token is
+// the candidate's stable name hash, materialized into function tables at
+// import time. Unknown tokens (a null or foreign function pointer) fall
+// through with a zero result, matching the undefined-behavior contract of
+// calling through an invalid CUDA function pointer.
+MslFunction make_indirect_dispatcher(const std::string& name,
+                                     const std::vector<std::string>& callees,
+                                     const std::vector<std::string>& tokens,
+                                     const std::vector<MslType>& argument_types,
+                                     const std::vector<MslType>& hidden_types,
+                                     const std::vector<std::vector<std::size_t>>& candidate_hidden,
+                                     const MslType& return_type) {
+    const MslType ulong_type = MslType::uint(64);
+    MslFunction dispatcher;
+    dispatcher.name = name;
+    dispatcher.return_type = return_type;
+    dispatcher.parameters.push_back({.type = ulong_type, .name = "cm_token"});
+    std::vector<MslExpr> arguments;
+    for (std::size_t i = 0; i < argument_types.size(); ++i) {
+        const std::string argument = "cm_arg" + std::to_string(i);
+        dispatcher.parameters.push_back({.type = argument_types[i], .name = argument});
+        arguments.push_back(MslExpression::identifier(argument, argument_types[i]));
+    }
+    std::vector<MslExpr> hidden;
+    for (std::size_t i = 0; i < hidden_types.size(); ++i) {
+        const std::string argument = "cm_hidden" + std::to_string(i);
+        dispatcher.parameters.push_back({.type = hidden_types[i], .name = argument});
+        hidden.push_back(MslExpression::identifier(argument, hidden_types[i]));
+    }
+    const bool has_result = return_type.kind != MslTypeKind::kVoid;
+    const MslExpr result = MslExpression::identifier("cm_result", return_type);
+    if (has_result) {
+        dispatcher.statements.push_back(MslStatement::variable(
+            return_type, "cm_result",
+            MslExpression::literal("0", return_type)));
+    }
+    std::vector<MslSwitchCase> cases;
+    for (std::size_t i = 0; i < callees.size(); ++i) {
+        std::vector<MslExpr> call_arguments = arguments;
+        if (i < candidate_hidden.size())
+            for (const std::size_t hidden_index : candidate_hidden[i])
+                call_arguments.push_back(hidden[hidden_index]);
+        MslExpr call = MslExpression::call(callees[i], call_arguments, return_type);
+        std::vector<MslStmt> body;
+        if (has_result) {
+            body.push_back(MslStatement::assignment(result, std::move(call)));
+        } else {
+            body.push_back(MslStatement::expression(std::move(call)));
+        }
+        body.push_back(MslStatement::break_statement());
+        cases.push_back({
+            .value = MslExpression::literal(tokens[i] + "ul", ulong_type),
+            .statements = std::move(body),
+        });
+    }
+    dispatcher.statements.push_back(MslStatement::switch_statement(
+        MslExpression::identifier("cm_token", ulong_type), std::move(cases)));
+    if (has_result)
+        dispatcher.statements.push_back(MslStatement::return_statement(result));
+    return dispatcher;
+}
+
 MslFunction make_cta_any_helper(bool count = false) {
     const auto pointer = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
     const auto uint3 = MslType::vector(MslType::uint(), 3);
@@ -2167,6 +2238,51 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsign
                         }
                     }
                 }
+                if (operation.opcode == ir::OpCode::kIndirectCall) {
+                    // Flow call-site spaces into every candidate's parameters
+                    // (skipping the token operand), as direct calls do.
+                    const auto callees = operation.attributes.find("callees");
+                    if (callees != operation.attributes.end()) {
+                        std::string_view list = callees->second;
+                        while (!list.empty()) {
+                            const std::size_t comma = list.find(',');
+                            const std::size_t end =
+                                comma == std::string_view::npos ? list.size() : comma;
+                            const auto callee_index =
+                                function_indices.find(std::string(list.substr(0, end)));
+                            if (callee_index != function_indices.end()) {
+                                ir::Function& callee =
+                                    module->functions[callee_index->second];
+                                const std::size_t count = std::min(
+                                    operation.operands.size() - 1,
+                                    callee.arguments.size());
+                                for (std::size_t i = 0; i < count; ++i) {
+                                    if (!callee.arguments[i].type.is_pointer())
+                                        continue;
+                                    if (!constrain_operand(
+                                            value_nodes.at(callee.arguments[i].value),
+                                            operation.operands[i + 1])) {
+                                        return {false, "device helper '" + callee.name +
+                                                           "' requires address-space specialization"};
+                                    }
+                                }
+                                if (!operation.results.empty() &&
+                                    value_nodes.contains(operation.results.front()) &&
+                                    return_nodes[callee_index->second].has_value()) {
+                                    std::vector<ir::Operand> shifted(
+                                        operation.operands.begin() + 1,
+                                        operation.operands.end());
+                                    pending_call_results.push_back(PendingCallResult{
+                                        function_index, callee_index->second,
+                                        value_nodes.at(operation.results.front()),
+                                        std::move(shifted)});
+                                }
+                            }
+                            if (comma == std::string_view::npos) break;
+                            list.remove_prefix(comma + 1);
+                        }
+                    }
+                }
                 if (operation.opcode == ir::OpCode::kCall) {
                     const auto callee_name = operation.attributes.find("callee");
                     const auto callee_index =
@@ -2366,11 +2482,32 @@ AddressSpaceResolution resolve_generic_address_spaces(ir::Module* module, unsign
         for (std::size_t i = 0; i < module->functions.size(); ++i) {
             for (const ir::BasicBlock& block : module->functions[i].blocks) {
                 for (const ir::Operation& operation : block.operations) {
-                    if (operation.opcode != ir::OpCode::kCall) continue;
-                    const auto callee = operation.attributes.find("callee");
-                    if (callee == operation.attributes.end()) continue;
-                    const auto found = function_indices.find(callee->second);
-                    if (found != function_indices.end()) callees_of[i].push_back(found->second);
+                    std::vector<std::string> names;
+                    if (operation.opcode == ir::OpCode::kCall) {
+                        const auto callee = operation.attributes.find("callee");
+                        if (callee != operation.attributes.end())
+                            names.push_back(callee->second);
+                    } else if (operation.opcode == ir::OpCode::kIndirectCall) {
+                        if (const auto callees = operation.attributes.find("callees");
+                            callees != operation.attributes.end()) {
+                            std::size_t begin = 0;
+                            while (begin <= callees->second.size()) {
+                                const std::size_t comma = callees->second.find(',', begin);
+                                const std::size_t end = comma == std::string::npos
+                                                            ? callees->second.size()
+                                                            : comma;
+                                if (end > begin)
+                                    names.push_back(callees->second.substr(begin, end - begin));
+                                if (comma == std::string::npos) break;
+                                begin = comma + 1;
+                            }
+                        }
+                    }
+                    for (const std::string& name : names) {
+                        const auto found = function_indices.find(name);
+                        if (found != function_indices.end())
+                            callees_of[i].push_back(found->second);
+                    }
                 }
             }
         }
@@ -4996,6 +5133,16 @@ struct AstLowerer {
                 left = MslExpression::cast(byte_pointer, left, true);
                 right = MslExpression::cast(byte_pointer, right, true);
             }
+            if ((left->type.kind == MslTypeKind::kPointer) !=
+                (right->type.kind == MslTypeKind::kPointer)) {
+                // A pointer compared against an integer (a saved device
+                // address crossing the host API as u64) compares addresses:
+                // spell the pointer side as its integer address.
+                if (left->type.kind == MslTypeKind::kPointer)
+                    left = MslExpression::cast(MslType::uint(64), left, true);
+                else
+                    right = MslExpression::cast(MslType::uint(64), right, true);
+            }
             if (operation.attributes.contains("fp64_mode")) {
                 const std::string predicate = operation.attributes.contains("predicate")
                                                   ? operation.attributes.at("predicate")
@@ -6217,6 +6364,29 @@ struct AstLowerer {
                                                   MslAddressSpace::kDevice),
                                  value_argument, true)},
                             MslType::void_type())));
+                }
+                continue;
+            }
+            if (operation.opcode == ir::OpCode::kIndirectCall) {
+                const auto callees = operation.attributes.find("callees");
+                if (callees == operation.attributes.end() ||
+                    operation.operands.empty()) {
+                    return fail(&operation, "malformed typed indirect call");
+                }
+                std::vector<MslExpr> arguments;
+                for (const auto& operand : operation.operands)
+                    arguments.push_back(expression_for(operand));
+                const MslType return_type = operation.result_types.empty()
+                                                ? MslType::void_type()
+                                                : lower_result_type(operation);
+                MslExpr dispatch = MslExpression::call(
+                    indirect_dispatcher_name(callees->second),
+                    std::move(arguments), return_type);
+                if (operation.result_types.empty()) {
+                    statements->push_back(MslStatement::expression(dispatch));
+                } else {
+                    statements->push_back(
+                        declare_result(operation, std::move(dispatch)));
                 }
                 continue;
             }
@@ -8093,12 +8263,30 @@ void prune_functions_unreachable_from_kernels(ir::Module* module) {
         reachable[index] = true;
         for (const ir::BasicBlock& block : module->functions[index].blocks) {
             for (const ir::Operation& operation : block.operations) {
-                if (operation.opcode != ir::OpCode::kCall) continue;
-                const auto callee = operation.attributes.find("callee");
-                if (callee == operation.attributes.end()) continue;
-                const auto found = indices.find(callee->second);
-                if (found != indices.end() && !reachable[found->second]) {
-                    worklist.push_back(found->second);
+                std::vector<std::string_view> names;
+                if (operation.opcode == ir::OpCode::kCall) {
+                    const auto callee = operation.attributes.find("callee");
+                    if (callee != operation.attributes.end())
+                        names.push_back(callee->second);
+                } else if (operation.opcode == ir::OpCode::kIndirectCall) {
+                    if (const auto callees = operation.attributes.find("callees");
+                        callees != operation.attributes.end()) {
+                        std::string_view list = callees->second;
+                        while (!list.empty()) {
+                            const std::size_t comma = list.find(',');
+                            const std::size_t end =
+                                comma == std::string_view::npos ? list.size() : comma;
+                            if (end > 0) names.push_back(list.substr(0, end));
+                            if (comma == std::string_view::npos) break;
+                            list.remove_prefix(comma + 1);
+                        }
+                    }
+                }
+                for (const std::string_view name : names) {
+                    const auto found = indices.find(std::string(name));
+                    if (found != indices.end() && !reachable[found->second]) {
+                        worklist.push_back(found->second);
+                    }
                 }
             }
         }
@@ -9173,6 +9361,90 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     if (needs_device_launch_queue) {
         result.ast.functions.push_back(make_device_param_buffer_helper());
         result.ast.functions.push_back(make_device_launch_helper());
+    }
+    {
+        std::unordered_set<std::string> dispatcher_names;
+        const auto split_list = [](const std::string& text) {
+            std::vector<std::string> items;
+            std::size_t begin = 0;
+            while (begin <= text.size()) {
+                const std::size_t comma = text.find(',', begin);
+                const std::size_t end =
+                    comma == std::string::npos ? text.size() : comma;
+                if (end > begin) items.push_back(text.substr(begin, end - begin));
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+            return items;
+        };
+        for (const ir::Function& function : metal_module.functions) {
+            for (const ir::BasicBlock& block : function.blocks) {
+                for (const ir::Operation& operation : block.operations) {
+                    if (operation.opcode != ir::OpCode::kIndirectCall) continue;
+                    const auto callees = operation.attributes.find("callees");
+                    const auto tokens = operation.attributes.find("callee_tokens");
+                    if (callees == operation.attributes.end() ||
+                        tokens == operation.attributes.end() ||
+                        operation.operands.empty())
+                        continue;
+                    const std::string name =
+                        indirect_dispatcher_name(callees->second);
+                    if (!dispatcher_names.insert(name).second) continue;
+                    // Hidden arguments follow the prototype arguments in
+                    // canonical heap/printf/queue group order.
+                    std::vector<std::string> hidden_names;
+                    if (const auto hidden = operation.attributes.find("hidden_args");
+                        hidden != operation.attributes.end()) {
+                        for (const std::string& group : split_list(hidden->second)) {
+                            if (group == "heap") {
+                                hidden_names.emplace_back("__cumetal_device_heap");
+                            } else if (group == "printf") {
+                                hidden_names.emplace_back("__cumetal_printf_buffer");
+                                hidden_names.emplace_back("__cumetal_printf_capacity");
+                            } else if (group == "queue") {
+                                hidden_names.emplace_back("__cumetal_device_launch_queue");
+                                hidden_names.emplace_back("__cumetal_device_launch_queue_capacity");
+                            }
+                        }
+                    }
+                    const std::size_t arity =
+                        operation.operands.size() - 1 - hidden_names.size();
+                    std::vector<MslType> argument_types;
+                    for (std::size_t i = 1; i <= arity; ++i)
+                        argument_types.push_back(lower_type(operation.operands[i].type));
+                    std::vector<MslType> hidden_types;
+                    for (std::size_t i = 0; i < hidden_names.size(); ++i)
+                        hidden_types.push_back(
+                            lower_type(operation.operands[1 + arity + i].type));
+                    std::vector<std::vector<std::size_t>> candidate_hidden;
+                    for (const std::string& callee_name : split_list(callees->second)) {
+                        std::vector<std::size_t> indices;
+                        const auto candidate = std::find_if(
+                            metal_module.functions.begin(), metal_module.functions.end(),
+                            [&](const ir::Function& f) { return f.name == callee_name; });
+                        if (candidate != metal_module.functions.end()) {
+                            for (const ir::FunctionArgument& argument : candidate->arguments) {
+                                if (!argument.name.starts_with("__cumetal_")) continue;
+                                const auto position = std::find(hidden_names.begin(),
+                                                                hidden_names.end(),
+                                                                argument.name);
+                                if (position != hidden_names.end())
+                                    indices.push_back(static_cast<std::size_t>(
+                                        position - hidden_names.begin()));
+                            }
+                        }
+                        candidate_hidden.push_back(std::move(indices));
+                    }
+                    const MslType return_type = operation.result_types.empty()
+                                                    ? MslType::void_type()
+                                                    : lower_type(operation.result_types.front());
+                    result.ast.functions.push_back(make_indirect_dispatcher(
+                        name, split_list(callees->second),
+                        split_list(tokens->second), argument_types, hidden_types,
+                        candidate_hidden, return_type));
+                }
+            }
+        }
     }
     for (const ir::Function& function : metal_module.functions) {
         const StructurizeResult structurized = check_structurizable(function);
