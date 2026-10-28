@@ -2016,10 +2016,12 @@ int main(int argc, char** argv) {
     // These are production-metallib compilation counts, not runtime correctness
     // counts. Legacy's direct-.cu mode is the qualifier-stripping prototype documented in
     // docs/known-gaps.md and lowers nothing in this corpus, so typed CuMetal IR is strictly
-    // better there. Typed PTX now exceeds the reviewed legacy count by one aggregate-call
-    // case, but the broader external compatibility workloads still use legacy by default.
-    // --backend overrides.
-    if (!backend_set_explicitly && lower_ext(options.input) == ".cu" && !cuda_device_frontend) {
+    // better there. Typed PTX also leads the reviewed count (52/52 vs 47/52),
+    // so every PTX-feeding input defaults to the typed backend as well; the
+    // registration JIT makes the same choice with a legacy retry on typed
+    // refusals. --backend=legacy remains the explicit compatibility escape.
+    if (!backend_set_explicitly &&
+        (lower_ext(options.input) == ".cu" || lower_ext(options.input) == ".ptx")) {
         backend = BackendKind::kCumetalIr;
     }
     // The typed backend cannot emit native AIR binary64 (it lowers through

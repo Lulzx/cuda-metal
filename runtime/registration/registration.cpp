@@ -131,7 +131,13 @@ const std::string& cumetal_binary_uuid() {
 std::string registration_lowering_policy() {
     const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
     std::string policy = "frontend=ptx;backend=";
-    policy += backend != nullptr && backend[0] != '\0' ? backend : "legacy";
+    if (backend == nullptr || backend[0] == '\0' ||
+        (std::string_view(backend) != "legacy" &&
+         std::string_view(backend) != "cumetal-ir")) {
+        policy += "cumetal-ir+legacy-fallback";
+    } else {
+        policy += backend;
+    }
     policy += ";fp64=";
     policy += cumetal::ptx::fp64_mode_name(cumetal::ptx::fp64_mode_from_env());
     policy += ";vf64_support_sha256=";
@@ -1127,13 +1133,32 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         cumetal::ptx::fp64_mode_from_env()));
     lower_to_metal_options.allow_workload_specializations =
         cumetal::diag_env_truthy("CUMETAL_ENABLE_WORKLOAD_SPECIALIZATIONS");
-    if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND");
-        backend != nullptr && std::string_view(backend) == "cumetal-ir") {
+    // Default: typed backend first, legacy only when the typed backend
+    // declines (reported in the lowering warnings). Explicit selection is
+    // strict: "cumetal-ir" never falls back, "legacy" never promotes.
+    if (const char* backend = std::getenv("CUMETAL_PTX_BACKEND")) {
+        if (std::string_view(backend) == "legacy") {
+            lower_to_metal_options.backend =
+                cumetal::ptx::PtxMetalBackend::kLegacy;
+        } else if (std::string_view(backend) == "cumetal-ir") {
+            lower_to_metal_options.backend =
+                cumetal::ptx::PtxMetalBackend::kCumetalIr;
+        } else {
+            lower_to_metal_options.backend =
+                cumetal::ptx::PtxMetalBackend::kCumetalIr;
+            lower_to_metal_options.allow_legacy_fallback = true;
+        }
+    } else {
         lower_to_metal_options.backend =
             cumetal::ptx::PtxMetalBackend::kCumetalIr;
+        lower_to_metal_options.allow_legacy_fallback = true;
     }
     const auto lowered_metal =
         cumetal::ptx::lower_ptx_to_metal_source(ptx_source, lower_to_metal_options);
+    for (const auto& warning : lowered_metal.warnings) {
+        REG_DEBUG("ptx lowering warning for kernel '%s': %s", kernel_name.c_str(),
+                  warning.c_str());
+    }
     if (!lowered_metal.ok) {
         // Carry the lowering diagnostic. Without it a refused kernel reports
         // only "registered kernel missing metallib", which reads as a missing
