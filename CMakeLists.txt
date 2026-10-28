@@ -191,6 +191,7 @@ add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/lower_to_msl.cpp
     compiler/metal/src/record_contexts.cpp
     compiler/metal/src/private_array_scalarize.cpp
+    compiler/metal/src/shared_memory_opt.cpp
 )
 
 target_include_directories(cumetal_metal_codegen
