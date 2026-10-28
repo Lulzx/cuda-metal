@@ -210,6 +210,15 @@ enum class OpCode : std::uint16_t {
     // kDeviceFree operands are the heap buffer and the pointer to release.
     kDeviceMalloc,
     kDeviceFree,
+    // Device-side kernel launch queue over the hidden queue buffer.
+    // kDeviceParamBuffer operands are the queue buffer (device u32
+    // pointer), queue capacity (i32), alignment (i64) and byte size (i64);
+    // the result is a device byte pointer into the queue (or null).
+    // kDeviceLaunch operands are the queue buffer, kernel token (i64),
+    // parameter buffer pointer, grid xyz (i32), block xyz (i32), shared
+    // bytes (i32) and stream (i64); the result is an i32 status.
+    kDeviceParamBuffer,
+    kDeviceLaunch,
     kThreadId,
     kThreadgroupId,
     kThreadgroupSize,

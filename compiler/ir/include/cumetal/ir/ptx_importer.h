@@ -26,6 +26,7 @@ struct PtxImportResult {
     std::vector<std::string> warnings;
     std::vector<std::string> printf_formats;
     bool uses_device_heap = false;
+    bool uses_device_launch_queue = false;
     std::string error;
 };
 

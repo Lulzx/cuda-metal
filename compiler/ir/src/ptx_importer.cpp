@@ -990,6 +990,8 @@ struct Importer {
         device_functions;
     std::unordered_set<std::string> printf_functions;
     std::unordered_set<std::string> heap_functions;
+    std::unordered_set<std::string> launch_queue_functions;
+    std::unordered_set<std::string> launchable_kernel_names;
     std::unordered_set<std::string> synchronizing_functions;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
@@ -1057,6 +1059,8 @@ struct Importer {
     std::optional<Operand> printf_buffer;
     std::optional<Operand> printf_capacity;
     std::optional<Operand> heap_buffer;
+    std::optional<Operand> launch_queue_buffer;
+    std::optional<Operand> launch_queue_capacity;
     std::optional<Operand> function_return;
     std::map<std::int64_t, Operand> function_return_fields;
 
@@ -1394,6 +1398,21 @@ struct Importer {
         return callee == "free" || callee == "_ZdlPv" || callee == "_ZdaPv" ||
                callee == "_ZdlPvm" || callee == "_ZdaPvm";
     }
+    static bool is_launch_queue_callee(const std::string& callee) {
+        return callee == "cudaGetParameterBuffer" || callee == "cudaLaunchDevice";
+    }
+    // Registration resolves device-launch records by this exact token
+    // (runtime/registration stable_device_kernel_token): FNV-1a 64 over
+    // the kernel's symbol name, masked to 63 bits, zero mapped to one.
+    static std::uint64_t device_kernel_token(std::string_view symbol) {
+        std::uint64_t hash = 1469598103934665603ull;
+        for (const char c : symbol) {
+            hash ^= static_cast<std::uint8_t>(c);
+            hash *= 1099511628211ull;
+        }
+        hash &= 0x7fffffffffffffffull;
+        return hash == 0 ? 1 : hash;
+    }
 
     std::optional<BuiltinSignature> call_signature(const Instruction& instruction,
                                                   const std::string& callee) {
@@ -1410,6 +1429,23 @@ struct Importer {
             signature.return_type = Type::void_type();
             signature.argument_types = {
                 Type::pointer(Type::integer(8), AddressSpace::kDevice)};
+            return signature;
+        }
+        if (callee == "cudaGetParameterBuffer") {
+            BuiltinSignature signature;
+            signature.return_type =
+                Type::pointer(Type::integer(8), AddressSpace::kDevice);
+            signature.argument_types = {Type::integer(64), Type::integer(64)};
+            return signature;
+        }
+        if (callee == "cudaLaunchDevice") {
+            BuiltinSignature signature;
+            signature.return_type = Type::integer(32);
+            signature.argument_types = {
+                Type::integer(64),
+                Type::pointer(Type::integer(8), AddressSpace::kDevice),
+                Type::integer(64), Type::integer(64), Type::integer(32),
+                Type::integer(64)};
             return signature;
         }
         const auto target = device_functions.find(callee);
@@ -3859,6 +3895,14 @@ struct Importer {
         if (const auto global = module_global_values.find(symbol);
             global != module_global_values.end()) {
             return global->second;
+        }
+        // A kernel symbol used as a value is a device-launch token, never a
+        // dereferenceable address: registration resolves records by the
+        // stable name token, so materialize that constant directly.
+        if (launchable_kernel_names.contains(symbol) ||
+            device_functions.contains(symbol)) {
+            return Operand::immediate(
+                std::to_string(device_kernel_token(symbol)), Type::integer(64));
         }
         if (module_initialized_symbols.contains(symbol)) {
             return Operand::symbol(
@@ -6670,6 +6714,109 @@ struct Importer {
                 block->operations.push_back(std::move(operation));
                 return true;
             }
+            if (is_launch_queue_callee(callee)) {
+                if (!launch_queue_buffer.has_value() ||
+                    !launch_queue_capacity.has_value()) {
+                    return fail(&instruction,
+                                "device launch queue call is missing its hidden queue binding");
+                }
+                const std::vector<std::string> queue_argument_names =
+                    grouped_names(instruction.operands[arguments_index]);
+                const auto slot_operand = [&](const std::string& name,
+                                              const Type& type) -> std::optional<Operand> {
+                    const auto slot = call_parameter_slots.find(name);
+                    if (slot == call_parameter_slots.end()) return std::nullopt;
+                    Operand value = slot->second;
+                    call_parameter_slots.erase(name);
+                    if (value.type == type) return value;
+                    if (value.type.kind != TypeKind::kInteger ||
+                        type.kind != TypeKind::kInteger)
+                        return std::nullopt;
+                    Operation widen;
+                    widen.opcode = OpCode::kConvert;
+                    widen.location = operation.location;
+                    widen.operands = {value};
+                    const ValueId widened = builder.next_value();
+                    widen.results = {widened};
+                    widen.result_types = {type};
+                    value_types[widened] = type;
+                    block->operations.push_back(std::move(widen));
+                    return Operand::value_ref(widened, type);
+                };
+                if (callee == "cudaGetParameterBuffer") {
+                    if (queue_argument_names.size() != 2) {
+                        return fail(&instruction,
+                                    "cudaGetParameterBuffer expects two arguments");
+                    }
+                    const auto alignment = slot_operand(queue_argument_names[0],
+                                                        Type::integer(64));
+                    const auto size = slot_operand(queue_argument_names[1],
+                                                   Type::integer(64));
+                    if (!alignment || !size) {
+                        return fail(&instruction,
+                                    "cudaGetParameterBuffer argument slots unavailable");
+                    }
+                    operation.opcode = OpCode::kDeviceParamBuffer;
+                    operation.operands = {*launch_queue_buffer,
+                                          *launch_queue_capacity, *alignment, *size};
+                    operation.result_types = {
+                        Type::pointer(Type::integer(8), AddressSpace::kDevice)};
+                    if (!has_return || destinations.empty()) {
+                        return fail(&instruction,
+                                    "cudaGetParameterBuffer result was not captured");
+                    }
+                    (*environment)[destinations.front()] = operation.results.front();
+                } else {
+                    if (queue_argument_names.size() != 6) {
+                        return fail(&instruction,
+                                    "cudaLaunchDevice expects six arguments");
+                    }
+                    const auto token = slot_operand(queue_argument_names[0],
+                                                    Type::integer(64));
+                    const auto params = slot_operand(
+                        queue_argument_names[1],
+                        Type::pointer(Type::integer(8), AddressSpace::kDevice));
+                    const auto shared = slot_operand(queue_argument_names[4],
+                                                     Type::integer(32));
+                    const auto stream = slot_operand(queue_argument_names[5],
+                                                     Type::integer(64));
+                    if (!token || !params || !shared || !stream) {
+                        return fail(&instruction,
+                                    "cudaLaunchDevice argument slots unavailable");
+                    }
+                    operation.opcode = OpCode::kDeviceLaunch;
+                    operation.operands = {*launch_queue_buffer, *token, *params};
+                    for (const std::size_t config_index : {2u, 3u}) {
+                        const auto fields =
+                            call_parameter_slot_fields.find(queue_argument_names[config_index]);
+                        if (fields == call_parameter_slot_fields.end()) {
+                            return fail(&instruction,
+                                        "cudaLaunchDevice launch configuration unavailable");
+                        }
+                        for (const std::int64_t byte_offset : {0, 4, 8}) {
+                            const auto field = fields->second.find(byte_offset);
+                            if (field == fields->second.end() ||
+                                field->second.type != Type::integer(32)) {
+                                return fail(&instruction,
+                                            "cudaLaunchDevice launch configuration field unavailable");
+                            }
+                            operation.operands.push_back(field->second);
+                        }
+                        call_parameter_slot_fields.erase(fields);
+                    }
+                    operation.operands.push_back(*shared);
+                    operation.operands.push_back(*stream);
+                    operation.result_types = {Type::integer(32)};
+                    if (!has_return || destinations.empty()) {
+                        return fail(&instruction,
+                                    "cudaLaunchDevice result was not captured");
+                    }
+                    (*environment)[destinations.front()] = operation.results.front();
+                }
+                if (!append_guard(&operation, instruction, *environment)) return false;
+                block->operations.push_back(std::move(operation));
+                return true;
+            }
             const bool builtin_call = cuda_builtin_signature(callee).has_value();
             const auto signature = call_signature(instruction, callee);
             if (!signature) return false;
@@ -6788,6 +6935,15 @@ struct Importer {
                 }
                 operation.operands.push_back(*printf_buffer);
                 operation.operands.push_back(*printf_capacity);
+            }
+            if (!builtin_call && launch_queue_functions.contains(callee)) {
+                if (!launch_queue_buffer.has_value() ||
+                    !launch_queue_capacity.has_value()) {
+                    return fail(&instruction,
+                                "missing transitive device launch queue binding for PTX device helper");
+                }
+                operation.operands.push_back(*launch_queue_buffer);
+                operation.operands.push_back(*launch_queue_capacity);
             }
             if (has_return) {
                 if (signature->return_type.kind == TypeKind::kVoid) {
@@ -7300,6 +7456,84 @@ struct Importer {
                     .size = 4,
                     .alignment = 4,
                     .hidden_role = "printf_capacity",
+                });
+            }
+        }
+
+        if (launch_queue_functions.contains(entry->name)) {
+            std::uint32_t binding_index =
+                static_cast<std::uint32_t>(function.arguments.size());
+            if (is_kernel && binding_index + 1 >= 29u) {
+                return fail(nullptr,
+                            "typed device launch queue hidden arguments conflict with reserved Metal bindings");
+            }
+            const Type buffer_type =
+                Type::pointer(Type::integer(32), AddressSpace::kDevice);
+            const Type capacity_type = Type::integer(32);
+            const ValueId buffer = builder.next_value();
+            const ValueId capacity = builder.next_value();
+            value_types[buffer] = buffer_type;
+            value_types[capacity] = capacity_type;
+            launch_queue_buffer = Operand::value_ref(buffer, buffer_type);
+            launch_queue_capacity = Operand::value_ref(capacity, capacity_type);
+            function.arguments.push_back({
+                .value = buffer,
+                .name = "__cumetal_device_launch_queue",
+                .type = buffer_type,
+            });
+            function.arguments.push_back({
+                .value = capacity,
+                .name = "__cumetal_device_launch_queue_capacity",
+                .type = capacity_type,
+            });
+            function.pointer_provenance[buffer] = {
+                .base_kind = PointerBaseKind::kAllocation,
+                .base_name = "__cumetal_device_launch_queue",
+                .known_byte_offset = 0,
+                .alignment = 4,
+            };
+            if (is_kernel) {
+                const std::uint32_t buffer_logical =
+                    static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+                function.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_device_launch_queue",
+                    .kind = ArgumentKind::kPointer,
+                    .type = buffer_type,
+                    .size = 8,
+                    .alignment = 8,
+                    .address_space = AddressSpace::kDevice,
+                    .binding_indices = {binding_index},
+                    .hidden_role = "device_launch_queue",
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBuffer,
+                    .binding_index = binding_index++,
+                    .logical_argument_index = buffer_logical,
+                    .type = buffer_type,
+                    .size = 0,
+                    .alignment = 4,
+                    .hidden_role = "device_launch_queue",
+                });
+                const std::uint32_t capacity_logical =
+                    static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
+                function.kernel_abi->arguments.push_back({
+                    .name = "__cumetal_device_launch_queue_capacity",
+                    .kind = ArgumentKind::kScalar,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .address_space = AddressSpace::kConstant,
+                    .binding_indices = {binding_index},
+                    .hidden_role = "device_launch_queue_capacity",
+                });
+                function.kernel_abi->bindings.push_back({
+                    .kind = BindingKind::kBytes,
+                    .binding_index = binding_index,
+                    .logical_argument_index = capacity_logical,
+                    .type = capacity_type,
+                    .size = 4,
+                    .alignment = 4,
+                    .hidden_role = "device_launch_queue_capacity",
                 });
             }
         }
@@ -7903,6 +8137,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
+    for (const cumetal::ptx::EntryFunction& candidate : parsed.module.entries)
+        importer.launchable_kernel_names.insert(candidate.name);
     for (const cumetal::ptx::EntryFunction& function : parsed.module.functions) {
         importer.device_functions.emplace(function.name, &function);
     }
@@ -7924,6 +8160,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         bool uses_printf = false;
         bool uses_heap = false;
+        bool uses_queue = false;
         for (const Instruction& instruction : function.instructions) {
             if (options.strict && !instruction.supported) {
                 importer.fail(&instruction, "unsupported opcode '" + instruction.opcode + "'");
@@ -7940,6 +8177,10 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                 uses_heap = true;
                 continue;
             }
+            if (Importer::is_launch_queue_callee(*target)) {
+                uses_queue = true;
+                continue;
+            }
             const auto callee = importer.device_functions.find(*target);
             if (callee == importer.device_functions.end()) continue;
             const std::optional<bool> child_uses_printf =
@@ -7947,11 +8188,13 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             if (!child_uses_printf.has_value()) return std::nullopt;
             uses_printf |= *child_uses_printf;
             uses_heap |= importer.heap_functions.contains(*target);
+            uses_queue |= importer.launch_queue_functions.contains(*target);
         }
         visiting.erase(function.name);
         visited.insert(function.name);
         if (uses_printf) importer.printf_functions.insert(function.name);
         if (uses_heap) importer.heap_functions.insert(function.name);
+        if (uses_queue) importer.launch_queue_functions.insert(function.name);
         if (!function.name.empty() && function.name != importer.entry->name &&
             importer.device_functions.contains(function.name)) {
             reachable_helpers.push_back(&function);
@@ -8189,6 +8432,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.device_functions = importer.device_functions;
         next.printf_functions = importer.printf_functions;
         next.heap_functions = importer.heap_functions;
+        next.launch_queue_functions = importer.launch_queue_functions;
+        next.launchable_kernel_names = importer.launchable_kernel_names;
         next.threadgroup_symbols = importer.threadgroup_symbols;
         next.promoted_global_symbols = importer.promoted_global_symbols;
         next.local_depots = importer.local_depots;
@@ -8362,6 +8607,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     }
     importer.result.uses_device_heap =
         importer.heap_functions.contains(selected_entry->name);
+    importer.result.uses_device_launch_queue =
+        importer.launch_queue_functions.contains(selected_entry->name);
     importer.result.ok = true;
     return importer.result;
 }
