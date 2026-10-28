@@ -237,6 +237,79 @@ InitializedByteArrayScan scan_initialized_byte_arrays(
             });
             continue;
         }
+        // A u64 table whose entries are integers or device function symbols
+        // (a C++ vtable). Function entries stay symbolic here; the importer
+        // materializes each as its stable device-launch token so indirect
+        // calls dispatch on the same value the runtime uses.
+        static const std::regex function_table_declaration(
+            R"(^\s*(?:(?:\.visible|\.extern|\.weak)\s+)?\.(const|global)\s+\.align\s+([0-9]+)\s+\.u64\s+([A-Za-z_.$][A-Za-z0-9_.$]*)\s*\[\s*([0-9]+)\s*\]\s*=\s*\{(.*)\}\s*;\s*$)");
+        if (std::regex_match(line, match, function_table_declaration)) {
+            std::uint64_t alignment = 0;
+            std::uint64_t declared_count = 0;
+            try {
+                alignment = std::stoull(match[2].str());
+                declared_count = std::stoull(match[4].str());
+            } catch (...) {
+                result.error = "invalid initialized PTX function table declaration";
+                return result;
+            }
+            if (alignment == 0 || alignment > UINT32_MAX || declared_count == 0 ||
+                declared_count > 4096) {
+                result.error = "initialized PTX function table has invalid size/alignment";
+                return result;
+            }
+            std::vector<std::uint8_t> bytes(
+                static_cast<std::size_t>(declared_count) * 8, 0);
+            std::vector<std::pair<std::uint64_t, std::string>> relocations;
+            const std::string initializer = trim(match[5].str());
+            std::size_t begin = 0;
+            std::uint64_t item_index = 0;
+            bool valid = true;
+            while (valid && begin <= initializer.size() && item_index < declared_count) {
+                const std::size_t comma = initializer.find(',', begin);
+                const std::size_t end =
+                    comma == std::string::npos ? initializer.size() : comma;
+                const std::string item =
+                    trim(std::string_view(initializer).substr(begin, end - begin));
+                static const std::regex symbol_name(R"([A-Za-z_.$][A-Za-z0-9_.$]*)");
+                if (std::regex_match(item, symbol_name)) {
+                    relocations.emplace_back(item_index * 8, item);
+                } else {
+                    try {
+                        std::size_t consumed = 0;
+                        const long long value = std::stoll(item, &consumed, 0);
+                        if (item.empty() || consumed != item.size()) valid = false;
+                        const std::uint64_t bits = static_cast<std::uint64_t>(value);
+                        for (int byte = 0; byte < 8; ++byte)
+                            bytes[static_cast<std::size_t>(item_index) * 8 + byte] =
+                                static_cast<std::uint8_t>(bits >> (byte * 8));
+                    } catch (...) {
+                        valid = false;
+                    }
+                }
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+                ++item_index;
+                if (begin > initializer.size()) valid = false;
+            }
+            if (!valid || item_index + 1 != declared_count) {
+                result.error = "initialized PTX function table has invalid entries: " +
+                               trim(line);
+                return result;
+            }
+            result.arrays.push_back({
+                .name = match[3].str(),
+                .bytes = std::move(bytes),
+                .alignment = static_cast<std::uint32_t>(alignment),
+                .constant_space = match[1].str() == "const",
+                .module_private =
+                    !starts_with(trim(line), ".visible") &&
+                    !starts_with(trim(line), ".extern") &&
+                    !starts_with(trim(line), ".weak"),
+                .function_relocations = std::move(relocations),
+            });
+            continue;
+        }
         if (!std::regex_match(line, match, declaration)) {
             result.error = "unsupported initialized PTX declaration: " +
                            trim(line);

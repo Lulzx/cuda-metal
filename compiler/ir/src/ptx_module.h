@@ -33,6 +33,9 @@ struct InitializedByteArray {
     bool module_private = false;
     // A complete little-endian address relocation, not placeholder zero bytes.
     std::string pointer_target;
+    // Byte offset -> device function symbol whose stable launch token is
+    // materialized into the bytes at import time (vtable entries).
+    std::vector<std::pair<std::uint64_t, std::string>> function_relocations;
 };
 
 struct InitializedByteArrayScan {

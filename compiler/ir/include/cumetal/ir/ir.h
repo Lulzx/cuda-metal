@@ -219,6 +219,10 @@ enum class OpCode : std::uint16_t {
     // bytes (i32) and stream (i64); the result is an i32 status.
     kDeviceParamBuffer,
     kDeviceLaunch,
+    // Indirect device call through a function token (vtable dispatch).
+    // Operands are the token (i64) followed by the call arguments;
+    // attributes "callees" and "callee_tokens" carry the candidate set.
+    kIndirectCall,
     kThreadId,
     kThreadgroupId,
     kThreadgroupSize,

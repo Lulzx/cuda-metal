@@ -992,6 +992,11 @@ struct Importer {
     std::unordered_set<std::string> heap_functions;
     std::unordered_set<std::string> launch_queue_functions;
     std::unordered_set<std::string> launchable_kernel_names;
+    struct CallPrototype {
+        std::vector<Type> returns;
+        std::vector<Type> parameters;
+    };
+    std::unordered_map<std::string, CallPrototype> call_prototypes;
     std::unordered_set<std::string> synchronizing_functions;
     std::unordered_map<std::string, Type> parameter_types;
     std::unordered_map<std::string, ValueId> parameter_values;
@@ -1478,7 +1483,16 @@ struct Importer {
     }
 
     static std::optional<std::string> defined_return_slot(const Instruction& instruction) {
-        if (root_opcode(instruction.opcode) != "call" || instruction.operands.size() != 3)
+        if (root_opcode(instruction.opcode) != "call")
+            return std::nullopt;
+        // Direct: (ret), callee, (args). Indirect: (ret), %target, (args),
+        // prototype -- four operands with a register target. The return
+        // group is parenthesized; an indirect target register is not.
+        if (instruction.operands.size() != 3 &&
+            !(instruction.operands.size() == 4 &&
+              instruction.operands[1].find('%') != std::string::npos))
+            return std::nullopt;
+        if (instruction.operands[0].find('(') == std::string::npos)
             return std::nullopt;
         const auto slots = grouped_names(instruction.operands[0]);
         return slots.size() == 1 ? std::optional(slots.front()) : std::nullopt;
@@ -1773,12 +1787,20 @@ struct Importer {
             Type inferred = ptx_scalar_type(instruction.opcode);
             bool ready = true;
             if (root == "call") {
-                const auto callee = trim(instruction.operands[1]);
                 inferred = Type::integer(32);
-                if (callee != "printf" && callee != "vprintf") {
-                    const auto signature = call_signature(instruction, callee);
-                    if (!signature) return false;
-                    inferred = signature->return_type;
+                if (instruction.operands.size() >= 3 &&
+                    call_prototypes.contains(trim(instruction.operands.back()))) {
+                    const CallPrototype& prototype =
+                        call_prototypes.at(trim(instruction.operands.back()));
+                    if (!prototype.returns.empty())
+                        inferred = prototype.returns.front();
+                } else {
+                    const auto callee = trim(instruction.operands[1]);
+                    if (callee != "printf" && callee != "vprintf") {
+                        const auto signature = call_signature(instruction, callee);
+                        if (!signature) return false;
+                        inferred = signature->return_type;
+                    }
                 }
                 if (inferred.kind == TypeKind::kVoid) return fail(&instruction, "void PTX call has a return slot");
             } else if (root == "clz" || root == "popc") inferred = Type::integer(32);
@@ -6618,6 +6640,185 @@ struct Importer {
             for (std::size_t i = 0; i < arity; ++i) {
                 operation.operands.push_back(bit_container_operand(i + 1, type));
             }
+        } else if (root == "call" && instruction.operands.size() >= 3 &&
+                   call_prototypes.contains(trim(instruction.operands.back()))) {
+            // Indirect call through a function token (vtable dispatch):
+            //   call %target, (args), prototype_N;
+            //   call (ret), %target, (args), prototype_N;
+            const CallPrototype& prototype =
+                call_prototypes.at(trim(instruction.operands.back()));
+            const bool indirect_has_return = instruction.operands.size() == 4;
+            if ((!indirect_has_return && instruction.operands.size() != 3) ||
+                prototype.returns.size() > 1 ||
+                (indirect_has_return && prototype.returns.empty()) ||
+                (!indirect_has_return && !prototype.returns.empty())) {
+                return fail(&instruction, "malformed PTX indirect call");
+            }
+            const std::string target_register =
+                first_register(instruction.operands[indirect_has_return ? 1 : 0]);
+            const auto target_found = environment->find(target_register);
+            if (target_found == environment->end() ||
+                value_types.at(target_found->second) != Type::integer(64)) {
+                return fail(&instruction,
+                            "indirect PTX call target is not a 64-bit function token");
+            }
+            operation.opcode = OpCode::kIndirectCall;
+            operation.operands = {Operand::value_ref(target_found->second,
+                                                     Type::integer(64))};
+            const std::vector<std::string> argument_names =
+                grouped_names(instruction.operands[indirect_has_return ? 2 : 1]);
+            if (argument_names.size() != prototype.parameters.size()) {
+                return fail(&instruction,
+                            "indirect PTX call argument count does not match its prototype");
+            }
+            std::vector<Operand> call_arguments;
+            for (std::size_t i = 0; i < argument_names.size(); ++i) {
+                const auto slot = call_parameter_slots.find(argument_names[i]);
+                if (slot == call_parameter_slots.end()) {
+                    return fail(&instruction,
+                                "indirect PTX call argument slot unavailable");
+                }
+                Operand argument = slot->second;
+                call_parameter_slots.erase(slot);
+                const std::uint32_t expected_bits =
+                    prototype.parameters[i].bit_width;
+                const std::uint32_t actual_bits = argument.type.is_pointer()
+                                                      ? 64
+                                                      : argument.type.bit_width;
+                if (actual_bits != expected_bits) {
+                    return fail(&instruction,
+                                "indirect PTX call argument width does not match its prototype");
+                }
+                call_arguments.push_back(argument);
+            }
+            // Candidate set: defined device functions whose PTX signature
+            // matches the prototype by arity and bit width.
+            std::vector<std::string> callees;
+            std::vector<std::string> callee_tokens;
+            const auto width_of = [](const std::string& ptx_type) -> unsigned {
+                unsigned bits = 0;
+                for (const char c : ptx_type)
+                    if (c >= '0' && c <= '9') bits = bits * 10 + (c - '0');
+                return bits;
+            };
+            for (const auto& [name, candidate] : device_functions) {
+                if (candidate->params.size() != prototype.parameters.size() ||
+                    candidate->return_params.size() != prototype.returns.size())
+                    continue;
+                bool matches = true;
+                for (std::size_t i = 0; i < prototype.parameters.size() && matches; ++i)
+                    matches = width_of(candidate->params[i].type) ==
+                              prototype.parameters[i].bit_width;
+                for (std::size_t i = 0; i < prototype.returns.size() && matches; ++i)
+                    matches = width_of(candidate->return_params[i].type) ==
+                              prototype.returns[i].bit_width;
+                if (!matches) continue;
+                callees.push_back(name);
+                callee_tokens.push_back(std::to_string(device_kernel_token(name)));
+            }
+            if (callees.empty()) {
+                return fail(&instruction,
+                            "indirect PTX call has no typed candidate for its prototype");
+            }
+            // Convert arguments to the candidates' agreed IR types, exactly
+            // as direct calls do (a saved device address arrives as i64 and
+            // becomes the candidate's pointer parameter).
+            for (std::size_t i = 0; i < call_arguments.size(); ++i) {
+                std::optional<Type> agreed;
+                for (const std::string& name : callees) {
+                    const auto found = std::find_if(
+                        result.module.functions.begin(), result.module.functions.end(),
+                        [&](const Function& function) { return function.name == name; });
+                    if (found == result.module.functions.end() ||
+                        i >= found->arguments.size()) {
+                        // Candidate not imported yet: keep the slot type.
+                        if (!agreed.has_value()) agreed = call_arguments[i].type;
+                        continue;
+                    }
+                    if (!agreed.has_value()) {
+                        agreed = found->arguments[i].type;
+                    } else if (*agreed != found->arguments[i].type) {
+                        agreed = std::nullopt;
+                        break;
+                    }
+                }
+                if (!agreed.has_value()) {
+                    return fail(&instruction,
+                                "indirect PTX call candidates disagree on an argument type");
+                }
+                Operand argument = call_arguments[i];
+                if (!(argument.type == *agreed)) {
+                    if (type_size(argument.type) != type_size(*agreed)) {
+                        return fail(&instruction,
+                                    "indirect PTX call argument does not fit the candidate type");
+                    }
+                    Operation conversion;
+                    conversion.opcode = OpCode::kConvert;
+                    conversion.location = operation.location;
+                    conversion.operands.push_back(argument);
+                    const ValueId converted = builder.next_value();
+                    conversion.results.push_back(converted);
+                    conversion.result_types.push_back(*agreed);
+                    conversion.attributes["bitcast"] = "true";
+                    value_types[converted] = *agreed;
+                    block->operations.push_back(std::move(conversion));
+                    argument = Operand::value_ref(converted, *agreed);
+                }
+                operation.operands.push_back(argument);
+            }
+            // Hidden arguments travel through the dispatch in the same
+            // canonical order direct helper calls append them.
+            const auto any_candidate = [&](const std::unordered_set<std::string>& set) {
+                return std::any_of(callees.begin(), callees.end(), [&](const std::string& name) {
+                    return set.contains(name);
+                });
+            };
+            std::string hidden_args;
+            if (any_candidate(heap_functions)) {
+                if (!heap_buffer.has_value())
+                    return fail(&instruction, "missing device heap binding for indirect PTX call");
+                operation.operands.push_back(*heap_buffer);
+                hidden_args = "heap";
+            }
+            if (any_candidate(printf_functions)) {
+                if (!printf_buffer.has_value() || !printf_capacity.has_value())
+                    return fail(&instruction, "missing printf binding for indirect PTX call");
+                operation.operands.push_back(*printf_buffer);
+                operation.operands.push_back(*printf_capacity);
+                if (!hidden_args.empty()) hidden_args += ',';
+                hidden_args += "printf";
+            }
+            if (any_candidate(launch_queue_functions)) {
+                if (!launch_queue_buffer.has_value() || !launch_queue_capacity.has_value())
+                    return fail(&instruction, "missing device launch queue binding for indirect PTX call");
+                operation.operands.push_back(*launch_queue_buffer);
+                operation.operands.push_back(*launch_queue_capacity);
+                if (!hidden_args.empty()) hidden_args += ',';
+                hidden_args += "queue";
+            }
+            if (!hidden_args.empty())
+                operation.attributes["hidden_args"] = hidden_args;
+            std::ostringstream callee_list;
+            std::ostringstream token_list;
+            for (std::size_t i = 0; i < callees.size(); ++i) {
+                if (i != 0) {
+                    callee_list << ',';
+                    token_list << ',';
+                }
+                callee_list << callees[i];
+                token_list << callee_tokens[i];
+            }
+            operation.attributes["callees"] = callee_list.str();
+            operation.attributes["callee_tokens"] = token_list.str();
+            if (indirect_has_return) {
+                operation.result_types = {prototype.returns.front()};
+                if (destinations.empty())
+                    return fail(&instruction, "indirect PTX call result was not captured");
+                (*environment)[destinations.front()] = operation.results.front();
+            }
+            if (!append_guard(&operation, instruction, *environment)) return false;
+            block->operations.push_back(std::move(operation));
+            return true;
         } else if (root == "call") {
             const bool has_return = instruction.operands.size() == 3;
             if ((!has_return && instruction.operands.size() != 2) ||
@@ -8135,6 +8336,50 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         common::CompileTrace trace("ptx_normalize_function", 0, entry.name);
         detail::normalize_vector_parameter_transfers(&entry);
     }
+    {
+        // Indirect-call prototypes are skipped by the PTX parser; recover
+        // their signatures from the source text for candidate matching.
+        static const std::regex prototype_pattern(
+            R"(([_.$A-Za-z][_.$A-Za-z0-9]*)\s*:\s*\.callprototype\s*\(([^)]*)\)\s*_\s*\(([^)]*)\))");
+        const auto parse_type_list = [](const std::string& text)
+            -> std::optional<std::vector<Type>> {
+            std::vector<Type> types;
+            std::size_t begin = 0;
+            while (begin <= text.size()) {
+                const std::size_t comma = text.find(',', begin);
+                const std::size_t end =
+                    comma == std::string::npos ? text.size() : comma;
+                const std::string item = trim(std::string_view(text).substr(begin, end - begin));
+                if (!item.empty()) {
+                    static const std::regex param_pattern(
+                        R"(\.param\s+(?:\.align\s+[0-9]+\s+)?\.([a-z])([0-9]+)\s+[_.$A-Za-z])");
+                    std::smatch param_match;
+                    if (!std::regex_search(item, param_match, param_pattern))
+                        return std::nullopt;
+                    const unsigned bits = std::stoul(param_match[2].str());
+                    if (param_match[1].str() == "f") {
+                        if (bits != 32 && bits != 64) return std::nullopt;
+                        types.push_back(Type::floating(bits));
+                    } else {
+                        if (bits != 8 && bits != 16 && bits != 32 && bits != 64)
+                            return std::nullopt;
+                        types.push_back(Type::integer(bits));
+                    }
+                }
+                if (comma == std::string::npos) break;
+                begin = comma + 1;
+            }
+            return types;
+        };
+        const std::string ptx_text(ptx);
+        for (std::sregex_iterator it(ptx_text.begin(), ptx_text.end(), prototype_pattern), end;
+             it != end; ++it) {
+            const auto returns = parse_type_list((*it)[2].str());
+            const auto parameters = parse_type_list((*it)[3].str());
+            if (returns && parameters)
+                importer.call_prototypes[(*it)[1].str()] = {*returns, *parameters};
+        }
+    }
     if (!importer.select_entry(parsed, options)) return importer.result;
     const cumetal::ptx::EntryFunction* selected_entry = importer.entry;
     for (const cumetal::ptx::EntryFunction& candidate : parsed.module.entries)
@@ -8165,6 +8410,42 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             if (options.strict && !instruction.supported) {
                 importer.fail(&instruction, "unsupported opcode '" + instruction.opcode + "'");
                 return std::nullopt;
+            }
+            if (root_opcode(instruction.opcode) == "call" &&
+                instruction.operands.size() >= 3 &&
+                importer.call_prototypes.contains(trim(instruction.operands.back()))) {
+                // Indirect call: every signature-matching defined device
+                // function is a potential target, so all are reachable and
+                // propagate their hidden-argument needs to the caller (the
+                // call site then refuses if any candidate needs them).
+                const Importer::CallPrototype& prototype =
+                    importer.call_prototypes.at(trim(instruction.operands.back()));
+                const auto width_of = [](const std::string& ptx_type) -> unsigned {
+                    unsigned bits = 0;
+                    for (const char c : ptx_type)
+                        if (c >= '0' && c <= '9') bits = bits * 10 + (c - '0');
+                    return bits;
+                };
+                for (const auto& [name, candidate] : importer.device_functions) {
+                    if (candidate->params.size() != prototype.parameters.size() ||
+                        candidate->return_params.size() != prototype.returns.size())
+                        continue;
+                    bool matches = true;
+                    for (std::size_t i = 0; i < prototype.parameters.size() && matches; ++i)
+                        matches = width_of(candidate->params[i].type) ==
+                                  prototype.parameters[i].bit_width;
+                    for (std::size_t i = 0; i < prototype.returns.size() && matches; ++i)
+                        matches = width_of(candidate->return_params[i].type) ==
+                                  prototype.returns[i].bit_width;
+                    if (!matches) continue;
+                    const std::optional<bool> child_uses_printf =
+                        self(self, *candidate);
+                    if (!child_uses_printf.has_value()) return std::nullopt;
+                    uses_printf |= *child_uses_printf;
+                    uses_heap |= importer.heap_functions.contains(name);
+                    uses_queue |= importer.launch_queue_functions.contains(name);
+                }
+                continue;
             }
             const std::optional<std::string> target = direct_call_target(instruction);
             if (!target.has_value()) continue;
@@ -8276,9 +8557,31 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
     for (const InitializedByteArray& array : initialized_arrays.arrays) {
         if (!array.pointer_target.empty()) continue;
         if (!symbol_is_referenced(array.name, !array.module_private)) continue;
+        // A function table (vtable) is embedded as an immutable constant
+        // with each function entry materialized as its stable device-launch
+        // token, which is the value indirect calls dispatch on. A table the
+        // module writes cannot take this path.
+        const bool function_table =
+            !array.function_relocations.empty() &&
+            !detail::symbol_is_written(parsed.module, array.name);
+        if (!array.function_relocations.empty() && !function_table) {
+            importer.result.error =
+                "mutable PTX function table is not supported: " + array.name;
+            return importer.result;
+        }
+        InitializedByteArray materialized = array;
+        if (function_table) {
+            for (const auto& [offset, symbol] : array.function_relocations) {
+                const std::uint64_t token = Importer::device_kernel_token(symbol);
+                for (int byte = 0; byte < 8; ++byte)
+                    materialized.bytes[static_cast<std::size_t>(offset) + byte] =
+                        static_cast<std::uint8_t>(token >> (byte * 8));
+            }
+        }
+        const InitializedByteArray& effective = materialized;
         const bool private_read_only =
             array.module_private && !detail::symbol_is_written(parsed.module, array.name);
-        if (!array.constant_space && !private_read_only) {
+        if (!array.constant_space && !private_read_only && !function_table) {
             if (array.module_private) {
                 // CUDA does not emit __cudaRegisterVar for translation-unit
                 // private device storage. Keep the same hidden-buffer ABI as
@@ -8291,7 +8594,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
                     .alignment = array.alignment,
                     .constant = false,
                     .module_private = true,
-                    .initializer = array.bytes,
+                    .initializer = effective.bytes,
                 });
             }
             // Ordinary initialized `.global` storage is mutable and must not
@@ -8309,7 +8612,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         }
         importer.result.module.global_constants.push_back({
             .name = array.name,
-            .bytes = array.bytes,
+            .bytes = effective.bytes,
             .alignment = array.alignment,
         });
         if (!array.constant_space) {
@@ -8434,6 +8737,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.heap_functions = importer.heap_functions;
         next.launch_queue_functions = importer.launch_queue_functions;
         next.launchable_kernel_names = importer.launchable_kernel_names;
+        next.call_prototypes = importer.call_prototypes;
         next.threadgroup_symbols = importer.threadgroup_symbols;
         next.promoted_global_symbols = importer.promoted_global_symbols;
         next.local_depots = importer.local_depots;
