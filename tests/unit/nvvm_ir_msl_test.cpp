@@ -3250,6 +3250,72 @@ $L__done:
     launch_options.source_name = "launch.ptx";
     const metal::PtxToMslResult launch_ptx =
         metal::compile_ptx_to_msl(kPtxDeviceLaunch, launch_options);
+    // A C++ vtable is an initialized u64 function table: entries are
+    // materialized as stable name tokens in a constant, and an indirect
+    // call through a loaded entry dispatches on that token.
+    const char* kPtxVtable = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.weak .global .align 8 .u64 _ZTV4Base[4] = {0, 0, _ZN4Base3addEi, _ZN4Base3subEi};
+.visible .func (.param .b32 func_retval0) _ZN4Base3addEi (.param .b64 _ZN4Base3addEi_param_0, .param .b32 _ZN4Base3addEi_param_1)
+{
+    .reg .b32 %r<3>;
+    ld.param.b32 %r0, [_ZN4Base3addEi_param_1];
+    add.s32 %r1, %r0, 1;
+    st.param.b32 [func_retval0], %r1;
+    ret;
+}
+.visible .func (.param .b32 func_retval0) _ZN4Base3subEi (.param .b64 _ZN4Base3subEi_param_0, .param .b32 _ZN4Base3subEi_param_1)
+{
+    .reg .b32 %r<3>;
+    ld.param.b32 %r0, [_ZN4Base3subEi_param_1];
+    sub.s32 %r1, %r0, 1;
+    st.param.b32 [func_retval0], %r1;
+    ret;
+}
+prototype_0 : .callprototype (.param .b32 _) _ (.param .b64 _, .param .b32 _);
+.visible .entry probe(.param .u64 .ptr probe_param_0, .param .u64 .ptr probe_param_1)
+{
+    .reg .b64 %rd<8>;
+    .reg .b32 %r<4>;
+    ld.param.b64 %rd0, [probe_param_0];
+    ld.param.b64 %rd1, [probe_param_1];
+    mov.b64 %rd2, _ZTV4Base;
+    ld.global.b64 %rd3, [%rd2+16];
+    { // callseq 0
+    .param .b64 param0;
+    .param .b32 param1;
+    .param .b32 retval0;
+    st.param.b64 [param0], %rd0;
+    st.param.b32 [param1], 41;
+    call.uni (retval0), %rd3, (param0, param1), prototype_0;
+    ld.param.b32 %r0, [retval0];
+    } // callseq 0
+    st.global.b32 [%rd1], %r0;
+    ret;
+}
+)ptx";
+    metal::PtxToMslOptions vtable_options;
+    vtable_options.entry_name = "probe";
+    vtable_options.source_name = "vtable.ptx";
+    const metal::PtxToMslResult vtable_ptx =
+        metal::compile_ptx_to_msl(kPtxVtable, vtable_options);
+    ok &= expect(vtable_ptx.ok, "PTX vtable indirect call lowers");
+    if (vtable_ptx.ok) {
+        ok &= expect(vtable_ptx.source.find("cm_indirect_") != std::string::npos &&
+                         vtable_ptx.source.find("_ZN4Base3addEi(cm_arg0") !=
+                             std::string::npos &&
+                         vtable_ptx.source.find("_ZN4Base3subEi(cm_arg0") !=
+                             std::string::npos,
+                     "PTX vtable dispatch switches over both candidates");
+        ok &= expect(vtable_ptx.source.find("constant uchar _ZTV4Base[32]") !=
+                         std::string::npos,
+                     "PTX vtable is embedded as a token constant");
+    } else {
+        std::cerr << vtable_ptx.error << "\n";
+    }
+
     ok &= expect(launch_ptx.ok, "PTX device launch lowers through typed IR");
     if (launch_ptx.ok) {
         ok &= expect(launch_ptx.uses_device_launch_queue,

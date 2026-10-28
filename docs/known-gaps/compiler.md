@@ -120,8 +120,9 @@ Remaining typed-path blockers include combinations of:
   aggregate-return ABI. The generic registration-JIT path additionally proves
   the bounded `cuda-samples/newdelete` virtual dispatch with one aligned
   16-byte by-value argument; nested/irregular aggregates, multi-result
-  signatures, general indirect calls, and general double-signature calls remain
-  open. A `__device__` function passed by value as a callback -- the classic
+  signatures, and general double-signature calls remain
+  open. (The typed PTX path separately lowers read-only vtable dispatch;
+  see the registration-default table below.) A `__device__` function passed by value as a callback -- the classic
   reduction-operator spelling, and the one NVIDIA Warp's `bvh.cu` uses for
   `cub::BlockReduce::Reduce` -- decays to a function pointer and lands in that
   gap: the native-AOT path rejects it with `indirect device calls are
@@ -169,7 +170,8 @@ by the fallback, not blocking the typed default):
 
 | Blocker | Kind | Test |
 | --- | --- | --- |
-| device `malloc`/`free` | typed PTX channel landed (hidden heap buffer, free-list/bump allocator in MSL; `functional_ptx_device_heap`); the probe fixture also needs device vtables, which remain a typed gap | `functional_device_heap` |
+| device `malloc`/`free` | typed PTX channel landed (hidden heap buffer, free-list/bump allocator in MSL; `functional_ptx_device_heap`) | `functional_device_heap` |
+| device vtables / indirect calls | closed for read-only tables: u64 function tables are embedded as token constants and `call %reg, ..., prototype_N` dispatches on the stable name token through a synthesized switch, with hidden arguments forwarded; mutable tables and candidate sets needing per-candidate specializations beyond the proven set remain refused | `functional_typed_device_heap` |
 | device-side kernel launch queue | closed: typed channel mirrors the heap design (hidden queue buffer + capacity, `cm_device_param_buffer`/`cm_device_launch` record writers, stable name tokens, runtime drain); device `cudaMemcpyAsync` records remain legacy-only | `functional_typed_device_launch_queue`, `functional_device_launch_queue` (legacy AOT) |
 | tf32 WMMA helper `__cumetal_wmma_f32_mma_8x8` | closed: typed backend lowers both WMMA markers to `simdgroup_matrix` (unit-tested; GPU numeric gate still needs the Metal toolchain) | `functional_wmma_numeric` |
 | pointer loaded from a local pointer array by an unrolled cursor loop | closed: widened cursor offsets are bounded to the depot extent and mutually dependent table loads are proven by a provisional round discharged on concrete device pointer types; enrolled for typed PTX | `functional_cuda_projects_reserved_bindings`, typed-PTX corpus |
