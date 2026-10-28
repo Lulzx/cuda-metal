@@ -5316,6 +5316,79 @@ struct Importer {
             }
             return true;
         }
+        if (root == "txq" || root == "suq") {
+            // Texture/surface dimension queries read the width/height/depth
+            // u64 fields of the public descriptor ABI (data, width, height,
+            // depth at byte offsets 8/16/24) and truncate to b32, matching
+            // the legacy lowering. Other query kinds stay unsupported.
+            if (!instruction.predicate.empty()) {
+                return fail(&instruction, "predicated texture/surface dimension query is unsupported");
+            }
+            if (!instruction.opcode.ends_with(".b32")) {
+                return fail(&instruction, root + " currently supports only .b32 queries");
+            }
+            std::int64_t field_offset = -1;
+            if (instruction.opcode == root + ".width.b32") {
+                field_offset = 8;
+            } else if (instruction.opcode == root + ".height.b32") {
+                field_offset = 16;
+            } else if (instruction.opcode == root + ".depth.b32") {
+                field_offset = 24;
+            } else {
+                return fail(&instruction, root + " currently supports only width, height, and depth queries");
+            }
+            if (destinations.size() != 1 || instruction.operands.size() != 2) {
+                return fail(&instruction, root + " requires a destination and an object operand");
+            }
+            if (memory_operand_offset(instruction.operands[1]) != 0) {
+                return fail(&instruction, root + " requires an unoffset object operand");
+            }
+            const std::string object_register = first_register(instruction.operands[1]);
+            const auto object_found = environment->find(object_register);
+            if (object_found == environment->end() ||
+                !value_types.contains(object_found->second) ||
+                !value_types.at(object_found->second).is_pointer()) {
+                return fail(&instruction, root + " requires a proven descriptor pointer operand");
+            }
+            const Type object_type = value_types.at(object_found->second);
+            const Operand object_operand =
+                Operand::value_ref(object_found->second, object_type);
+
+            Operation address_op;
+            address_op.opcode = OpCode::kPointerOffset;
+            address_op.location = operation.location;
+            const ValueId field_address = builder.next_value();
+            address_op.results = {field_address};
+            address_op.result_types = {object_type};
+            address_op.operands = {object_operand,
+                                   Operand::immediate(std::to_string(field_offset),
+                                                      Type::integer(64))};
+            address_op.attributes["offset_unit"] = "bytes";
+            address_op.attributes["ptx_opcode"] = instruction.opcode;
+            value_types[field_address] = object_type;
+            block->operations.push_back(std::move(address_op));
+
+            Operation load_op;
+            load_op.opcode = OpCode::kLoad;
+            load_op.location = operation.location;
+            const ValueId field_value = builder.next_value();
+            load_op.results = {field_value};
+            load_op.result_types = {Type::integer(64)};
+            load_op.operands = {Operand::value_ref(field_address, object_type)};
+            load_op.attributes["memory_bit_width"] = "64";
+            load_op.attributes["alignment"] = "8";
+            load_op.attributes["ptx_opcode"] = instruction.opcode;
+            value_types[field_value] = Type::integer(64);
+            block->operations.push_back(std::move(load_op));
+
+            operation.opcode = OpCode::kConvert;
+            operation.results = {instruction_results[&instruction][0]};
+            operation.result_types = {Type::integer(32)};
+            operation.operands = {Operand::value_ref(field_value, Type::integer(64))};
+            block->operations.push_back(std::move(operation));
+            (*environment)[destinations[0]] = instruction_results[&instruction][0];
+            return true;
+        }
         if (root == "mov" && instruction.opcode.find(".b64") != std::string::npos &&
             destinations.size() == 2 && instruction.operands.size() >= 2) {
             if (!instruction.predicate.empty()) {

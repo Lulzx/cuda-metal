@@ -3680,6 +3680,64 @@ $L__BB0_2:
                          std::string::npos,
                      "live-result u64 atomicMin keeps the lock-bank helper");
     }
+    // Texture/surface dimension queries (txq/suq width/height/depth)
+    // read the descriptor ABI fields at byte offsets 8/16/24.
+    const char* kPtxObjectQueries = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry object_dimension_queries(
+  .param .u64 tex,
+  .param .u64 surf,
+  .param .u64 out
+)
+{
+  .reg .b64 %rd<4>;
+  .reg .b32 %r<7>;
+  ld.param.u64 %rd1, [tex];
+  ld.param.u64 %rd2, [surf];
+  ld.param.u64 %rd3, [out];
+  cvta.to.global.u64 %rd3, %rd3;
+  txq.width.b32 %r1, [%rd1];
+  txq.height.b32 %r2, [%rd1];
+  txq.depth.b32 %r3, [%rd1];
+  suq.width.b32 %r4, [%rd2];
+  suq.height.b32 %r5, [%rd2];
+  suq.depth.b32 %r6, [%rd2];
+  st.global.u32 [%rd3], %r1;
+  st.global.u32 [%rd3+4], %r2;
+  st.global.u32 [%rd3+8], %r3;
+  st.global.u32 [%rd3+12], %r4;
+  st.global.u32 [%rd3+16], %r5;
+  st.global.u32 [%rd3+20], %r6;
+  ret;
+}
+)ptx";
+    metal::PtxToMslOptions query_options;
+    query_options.entry_name = "object_dimension_queries";
+    query_options.source_name = "object_dimension_queries.ptx";
+    const metal::PtxToMslResult query_ptx =
+        metal::compile_ptx_to_msl(kPtxObjectQueries, query_options);
+    ok &= expect(query_ptx.ok,
+                 "PTX object dimension queries lower: " + query_ptx.error);
+    if (query_ptx.ok) {
+        ok &= expect(ir::verify(query_ptx.metal_ir).ok,
+                     "object query IR verifies");
+    }
+    // Other query kinds stay refused, mirroring the legacy contract.
+    {
+        std::string refused_ptx(kPtxObjectQueries);
+        const std::string anchor = "txq.width.b32";
+        const std::size_t anchor_pos = refused_ptx.find(anchor);
+        ok &= expect(anchor_pos != std::string::npos, "object query fixture anchor");
+        if (anchor_pos != std::string::npos) {
+            refused_ptx.replace(anchor_pos, anchor.size(), "txq.channel_data_type.b32");
+            const metal::PtxToMslResult refused_ptx_result =
+                metal::compile_ptx_to_msl(refused_ptx, query_options);
+            ok &= expect(!refused_ptx_result.ok,
+                         "unsupported txq query kind is refused");
+        }
+    }
     // A C++ vtable is an initialized u64 function table: entries are
     // materialized as stable name tokens in a constant, and an indirect
     // call through a loaded entry dispatches on that token.
