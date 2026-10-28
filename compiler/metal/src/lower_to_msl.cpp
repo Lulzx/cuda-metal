@@ -215,6 +215,124 @@ MslFunction make_warp_aggregated_atomic_add_helper(MslAddressSpace space) {
     return helper;
 }
 
+std::string warp_aggregated_minmax_helper_name(const std::string& operation,
+                                                bool is_signed,
+                                                MslAddressSpace space) {
+    return "cm_atomic_" + operation + "_warp_aggregated_" +
+           (space == MslAddressSpace::kThreadgroup ? "threadgroup" : "device") +
+           (is_signed ? "_s32" : "_u32");
+}
+
+// Warp-aggregated atomic min/max: one leader atomic with the warp-wide
+// combined value, and per-lane old values reconstructed as
+// op(global_old, exclusive prefix op of earlier lanes' values), which is
+// exactly the old value under the lane-ordered serialization.
+MslFunction make_warp_aggregated_atomic_minmax_helper(const std::string& operation,
+                                                      bool is_signed,
+                                                      MslAddressSpace space) {
+    const MslType word_type = is_signed ? MslType::sint() : MslType::uint();
+    const MslType atomic_type = is_signed
+        ? MslType{.kind = MslTypeKind::kStruct, .struct_name = "atomic_int"}
+        : atomic_uint_type();
+    const MslType atomic_pointer = MslType::pointer(atomic_type, space);
+    const MslType uint_type = MslType::uint();
+    const MslExpr pointer = MslExpression::identifier("pointer", atomic_pointer);
+    const MslExpr value = MslExpression::identifier("value", word_type);
+    const MslExpr lane = MslExpression::identifier("lane", uint_type);
+    const MslExpr leader_old = MslExpression::identifier("leader_old", word_type);
+    const MslExpr relaxed = MslExpression::identifier(
+        "memory_order_relaxed", memory_order_type());
+    const std::string combine = operation == "min" ? "simd_min" : "simd_max";
+    const std::string fetch =
+        operation == "min" ? "atomic_fetch_min_explicit" : "atomic_fetch_max_explicit";
+    const MslExpr identity = MslExpression::literal(
+        is_signed
+            ? (operation == "min" ? "2147483647" : "(-2147483647 - 1)")
+            : (operation == "min" ? "4294967295u" : "0u"),
+        word_type);
+
+    MslFunction helper;
+    helper.name = warp_aggregated_minmax_helper_name(operation, is_signed, space);
+    helper.return_type = word_type;
+    helper.parameters = {
+        {.type = atomic_pointer, .name = "pointer"},
+        {.type = word_type, .name = "value"},
+        {.type = uint_type, .name = "lane"},
+    };
+    helper.statements.push_back(MslStatement::variable(
+        word_type, "combined",
+        MslExpression::call(combine, {value}, word_type)));
+    helper.statements.push_back(MslStatement::variable(
+        word_type, "leader_old", identity));
+    helper.statements.push_back(MslStatement::if_statement(
+        MslExpression::binary("==", lane,
+                              MslExpression::literal("0u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::assignment(
+            leader_old,
+            MslExpression::call(
+                fetch,
+                {pointer, MslExpression::identifier("combined", word_type),
+                 relaxed},
+                word_type))}));
+    helper.statements.push_back(MslStatement::variable(
+        word_type, "base",
+        MslExpression::call("simd_broadcast_first", {leader_old}, word_type)));
+    // Inclusive prefix op via shuffle doubling; the exclusive form is the
+    // inclusive value of the previous lane.
+    const MslExpr prefix = MslExpression::identifier("prefix", word_type);
+    const MslExpr offset = MslExpression::identifier("off", uint_type);
+    helper.statements.push_back(MslStatement::variable(word_type, "prefix", value));
+    helper.statements.push_back(MslStatement::variable(
+        uint_type, "off", MslExpression::literal("1u", uint_type)));
+    helper.statements.push_back(MslStatement::while_statement(
+        MslExpression::binary("<", offset,
+                              MslExpression::literal("32u", uint_type),
+                              MslType::boolean()),
+        {MslStatement::variable(
+             word_type, "other",
+             MslExpression::call(
+                 "simd_shuffle",
+                 {prefix,
+                  MslExpression::conditional(
+                      MslExpression::binary(">=", lane, offset, MslType::boolean()),
+                      MslExpression::binary("-", lane, offset, uint_type), lane,
+                      uint_type)},
+                 word_type)),
+         MslStatement::if_statement(
+             MslExpression::binary(">=", lane, offset, MslType::boolean()),
+             {MslStatement::assignment(
+                 prefix,
+                 MslExpression::call(operation == "min" ? "min" : "max",
+                                     {prefix,
+                                      MslExpression::identifier("other", word_type)},
+                                     word_type))}),
+         MslStatement::assignment(
+             offset,
+             MslExpression::binary("<<", offset,
+                                   MslExpression::literal("1u", uint_type),
+                                   uint_type))}));
+    const MslExpr exclusive = MslExpression::conditional(
+        MslExpression::binary("==", lane,
+                              MslExpression::literal("0u", uint_type),
+                              MslType::boolean()),
+        identity,
+        MslExpression::call(
+            "simd_shuffle",
+            {prefix,
+             MslExpression::binary("-", lane,
+                                   MslExpression::literal("1u", uint_type),
+                                   uint_type)},
+            word_type),
+        word_type);
+    helper.statements.push_back(MslStatement::return_statement(
+        MslExpression::call(operation == "min" ? "min" : "max",
+                            {MslExpression::identifier("base", word_type),
+                             exclusive},
+                            word_type)));
+    return helper;
+}
+
 MslFunction make_device_clock_helper() {
     const MslType atomic_uint = atomic_uint_type();
     const MslType pointer =
@@ -5653,10 +5771,34 @@ struct AstLowerer {
                         word_type)));
             }
             if (operation.attributes.contains("warp_aggregated")) {
-                // Legalizer-proven warp-uniform add: one atomic per warp
-                // via the aggregation helper. The lane id expression is
-                // the same builtin other warp operations use.
+                // Legalizer-proven warp-uniform atomic: one atomic per
+                // warp via the aggregation helper. The lane id expression
+                // is the same builtin other warp operations use.
                 needs_lane_id = true;
+                if (operation.attributes.contains("warp_aggregated_op")) {
+                    const std::string aggregated_op =
+                        operation.attributes.at("warp_aggregated_op");
+                    const MslType aggregated_word =
+                        is_signed ? MslType::sint() : MslType::uint();
+                    const MslType aggregated_atomic = is_signed
+                        ? MslType{.kind = MslTypeKind::kStruct,
+                                  .struct_name = "atomic_int"}
+                        : atomic_uint_type();
+                    const MslType aggregated_pointer =
+                        MslType::pointer(aggregated_atomic, address_space);
+                    const MslExpr aggregated = MslExpression::call(
+                        warp_aggregated_minmax_helper_name(aggregated_op,
+                                                           is_signed,
+                                                           address_space),
+                        {MslExpression::cast(aggregated_pointer, raw_pointer,
+                                             true),
+                         atomic_word(operation.operands[1]),
+                         MslExpression::identifier("cm_lane_id",
+                                                   MslType::uint())},
+                        aggregated_word);
+                    return declare_result(operation,
+                                          atomic_result(std::move(aggregated)));
+                }
                 const MslType aggregated_pointer = MslType::pointer(
                     atomic_uint_type(), address_space);
                 const MslExpr aggregated = MslExpression::call(
@@ -8340,7 +8482,9 @@ void mark_warp_aggregated_atomics(ir::Function& function) {
         for (ir::Operation& operation : function.blocks[i].operations) {
             if (operation.opcode != ir::OpCode::kAtomic) continue;
             const auto atomic_op = operation.attributes.find("atomic_op");
-            if (atomic_op == operation.attributes.end() || atomic_op->second != "add")
+            if (atomic_op == operation.attributes.end() ||
+                (atomic_op->second != "add" && atomic_op->second != "min" &&
+                 atomic_op->second != "max"))
                 continue;
             if (operation.results.size() != 1 || operation.result_types.size() != 1 ||
                 operation.result_types.front().kind != ir::TypeKind::kInteger ||
@@ -8351,6 +8495,9 @@ void mark_warp_aggregated_atomics(ir::Function& function) {
                 continue;
             if (operand_lane_dependent(operation.operands.front())) continue;
             operation.attributes["warp_aggregated"] = "true";
+            if (atomic_op->second != "add") {
+                operation.attributes["warp_aggregated_op"] = atomic_op->second;
+            }
         }
     }
 }
@@ -8610,6 +8757,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     bool needs_threadgroup_float_add = false;
     bool needs_warp_aggregated_device = false;
     bool needs_warp_aggregated_threadgroup = false;
+    std::unordered_set<std::string> warp_aggregated_minmax_helpers;
     std::unordered_set<std::string> wide_atomic_helpers;
     std::vector<MslFunction> wide_atomic_helper_functions;
     for (const ir::Function& function : metal_module.functions) {
@@ -8671,6 +8819,16 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                         space == MslAddressSpace::kDevice;
                     needs_warp_aggregated_threadgroup |=
                         space == MslAddressSpace::kThreadgroup;
+                    if (operation.attributes.contains("warp_aggregated_op")) {
+                        const std::string aggregated_op =
+                            operation.attributes.at("warp_aggregated_op");
+                        const bool aggregated_signed =
+                            operation.attributes.contains("signed") &&
+                            operation.attributes.at("signed") == "true";
+                        warp_aggregated_minmax_helpers.insert(
+                            warp_aggregated_minmax_helper_name(
+                                aggregated_op, aggregated_signed, space));
+                    }
                 }
                 if (operation.opcode != ir::OpCode::kMetalAtomic ||
                     !operation.attributes.contains("atomic_op") ||
@@ -8704,6 +8862,18 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     if (needs_warp_aggregated_threadgroup) {
         result.ast.functions.push_back(
             make_warp_aggregated_atomic_add_helper(MslAddressSpace::kThreadgroup));
+    }
+    for (const std::string& helper_name : warp_aggregated_minmax_helpers) {
+        const bool helper_signed = helper_name.size() >= 4 &&
+            helper_name.compare(helper_name.size() - 4, 4, "_s32") == 0;
+        const MslAddressSpace helper_space =
+            helper_name.find("threadgroup") != std::string::npos
+                ? MslAddressSpace::kThreadgroup
+                : MslAddressSpace::kDevice;
+        const std::string helper_op =
+            helper_name.find("cm_atomic_min_") == 0 ? "min" : "max";
+        result.ast.functions.push_back(make_warp_aggregated_atomic_minmax_helper(
+            helper_op, helper_signed, helper_space));
     }
     result.ast.functions.insert(result.ast.functions.end(),
                                 wide_atomic_helper_functions.begin(),
