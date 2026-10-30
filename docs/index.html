@@ -20,10 +20,10 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
 .cm-pill{background:rgba(242,240,235,.06);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
 .cm-pill:hover{background:rgba(242,240,235,.14);border-color:#6A6862 !important;color:#F2F0EB}
 .cm-btn:hover{background:#2A2926 !important;color:#F2F0EB !important}
-.cm-row{transition:background-color .25s cubic-bezier(.25,.1,.25,1),padding .4s cubic-bezier(0,0,.2,1)}
-.cm-row:hover{background:rgba(5,5,5,.05);padding-left:12px !important;padding-right:12px !important}
+.cm-card{transition:background-color .25s cubic-bezier(.25,.1,.25,1),border-color .25s cubic-bezier(.25,.1,.25,1)}
+.cm-card:hover{background:rgba(242,240,235,.4);border-color:#050505 !important;color:#050505}
 ::selection{background:#C4C1BA;color:#050505}
-@media (prefers-reduced-motion: reduce){a,button,.cm-row{transition:none}}
+@media (prefers-reduced-motion: reduce){a,button,.cm-card{transition:none}}
 </style>
 </helmet>
 
@@ -68,149 +68,137 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
     </div>
   </section>
 
-  <!-- MANIFESTO LIST -->
+  <!-- HOW IT'S BUILT -->
   <section>
-    <div style="max-width: 1400px; margin: 0 auto; padding: clamp(80px, 11vw, 160px) clamp(20px, 4vw, 56px)">
-      <p style="margin: 0 0 40px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #9C9A94">How it’s built</p>
-      <ol style="margin: 0; padding: 0; list-style: none; border-top: 1px solid #2A2926">
-        <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">No JIT at launch.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">The compiled Metal library ships inside the binary. On the direct CUDA C++ path, no PTX is JIT-compiled when the app first runs.</span>
+    <div style="max-width: 1400px; margin: 0 auto; padding: clamp(64px, 8vw, 120px) clamp(20px, 4vw, 56px)">
+      <p style="margin: 0 0 32px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #9C9A94">How it’s built</p>
+      <ol style="margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 260px), 1fr)); gap: 32px clamp(24px, 3vw, 48px)">
+        <li style="display: flex; flex-direction: column; gap: 14px; padding-top: 20px; border-top: 1px solid #2A2926">
+          <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #6A6862">01</span>
+          <span style="font-weight: 700; font-size: clamp(26px, 2.5vw, 36px); line-height: 1.05; letter-spacing: -0.02em">No JIT at launch.</span>
+          <span style="font-size: 16px; line-height: 1.55; color: #9C9A94">The compiled Metal library ships inside the binary. On the direct CUDA C++ path, no PTX is JIT-compiled when the app first runs.</span>
         </li>
-        <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">Typed IR end to end.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">CUDA C++ goes through a typed CuMetal IR. PTX import resolves every value from its SSA definition, with checked types.</span>
+        <li style="display: flex; flex-direction: column; gap: 14px; padding-top: 20px; border-top: 1px solid #2A2926">
+          <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #6A6862">02</span>
+          <span style="font-weight: 700; font-size: clamp(26px, 2.5vw, 36px); line-height: 1.05; letter-spacing: -0.02em">Typed IR end to end.</span>
+          <span style="font-size: 16px; line-height: 1.55; color: #9C9A94">CUDA C++ goes through a typed CuMetal IR. PTX import resolves every value from its SSA definition, with checked types.</span>
         </li>
-        <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em; color: #C4C1BA">Memory access is proved.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">Memory is lowered only where range and alignment proofs hold. Where a proof fails, the access keeps its barrier.</span>
+        <li style="display: flex; flex-direction: column; gap: 14px; padding-top: 20px; border-top: 1px solid #2A2926">
+          <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #6A6862">03</span>
+          <span style="font-weight: 700; font-size: clamp(26px, 2.5vw, 36px); line-height: 1.05; letter-spacing: -0.02em; color: #C4C1BA">Memory access is proved.</span>
+          <span style="font-size: 16px; line-height: 1.55; color: #9C9A94">Memory is lowered only where range and alignment proofs hold. Where a proof fails, the access keeps its barrier.</span>
         </li>
-        <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">Public APIs only.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">CuMetal calls only public, documented Metal APIs.</span>
+        <li style="display: flex; flex-direction: column; gap: 14px; padding-top: 20px; border-top: 1px solid #2A2926">
+          <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; color: #6A6862">04</span>
+          <span style="font-weight: 700; font-size: clamp(26px, 2.5vw, 36px); line-height: 1.05; letter-spacing: -0.02em">Public APIs only.</span>
+          <span style="font-size: 16px; line-height: 1.55; color: #9C9A94">CuMetal calls only public, documented Metal APIs.</span>
         </li>
       </ol>
     </div>
   </section>
 
-  <!-- DEMOS -->
+  <!-- WORKLOADS -->
   <section id="demos" style="background: #C4C1BA; color: #050505">
-    <div style="max-width: 1400px; margin: 0 auto; padding: clamp(72px, 10vw, 140px) clamp(20px, 4vw, 56px); display: flex; flex-direction: column; gap: clamp(32px, 4vw, 56px)">
-      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 24px clamp(40px, 6vw, 96px); align-items: end">
-        <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 6.4vw, 104px); line-height: 1; letter-spacing: -0.025em">Nine workloads, checked.</h2>
-        <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #2E2D2A">Each demo’s gate checks its numerical or domain output and confirms the work ran on the Apple GPU. A clean exit alone does not pass.</p>
+    <div style="max-width: 1400px; margin: 0 auto; padding: clamp(56px, 6.5vw, 96px) clamp(20px, 4vw, 56px); display: flex; flex-direction: column; gap: clamp(28px, 3vw, 40px)">
+      <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 20px clamp(40px, 6vw, 96px); align-items: end">
+        <h2 style="margin: 0; font-weight: 700; font-size: clamp(40px, 5vw, 80px); line-height: 1; letter-spacing: -0.025em">Workloads tested.</h2>
+        <div style="display: flex; flex-direction: column; align-items: flex-start; gap: 16px">
+          <p style="margin: 0; font-size: clamp(16px, 1.3vw, 19px); line-height: 1.5; font-weight: 500; color: #2E2D2A">Each demo’s gate checks its numerical or domain output and confirms the work ran on the Apple GPU. A clean exit alone does not pass.</p>
+          <a class="cm-btn" href="https://github.com/Lulzx/cuda-metal/blob/main/docs/demos.md" style="display: inline-flex; align-items: center; min-height: 44px; padding: 0 22px; border-radius: 999px; background: #050505; color: #F2F0EB; font-weight: 700; font-size: 15px">How to run every demo ↗</a>
+        </div>
       </div>
-      <ol style="margin: 0; padding: 0; list-style: none; border-top: 2px solid #050505">
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/apollo/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">01</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Apollo</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">The place to start. One command runs vector addition, a reduction, SGEMM and a path tracer in turn.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">vectorAdd → path tracer ↗</span>
+      <ol style="margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 340px), 1fr)); gap: 12px">
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/apollo/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M8 78h72"/><rect x="10" y="64" width="8" height="14"/><rect x="22" y="56" width="8" height="22"/><rect x="34" y="46" width="8" height="32"/><circle cx="62" cy="40" r="15"/><path d="M50 32a15 15 0 0 1 10-7" stroke-opacity=".5"/><path d="M30 8l22 20M76 10l-8 16" stroke-dasharray="3 3"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>01</span><span style="text-align: right">vectorAdd to path tracer ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">Apollo</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">The place to start. One command runs vector addition, a reduction, SGEMM and a path tracer in turn.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/matmul/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">02</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Matmul vs MPS</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">The matmul article’s kernel progression, with a tuned CUDA kernel compared against MPS and Accelerate.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">2.03 TFLOP/s / M4 Pro ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/matmul/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><rect x="14" y="29" width="60" height="15" fill="currentColor" fill-opacity=".14" stroke="none"/><rect x="44" y="14" width="15" height="60" fill="currentColor" fill-opacity=".14" stroke="none"/><rect x="44" y="29" width="15" height="15" fill="currentColor" fill-opacity=".6" stroke="none"/><path d="M14 14h60M14 14v60M14 29h60M29 14v60M14 44h60M44 14v60M14 59h60M59 14v60M14 74h60M74 14v60"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>02</span><span style="text-align: right">2.03 TFLOP/s, M4 Pro ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">Matmul vs MPS</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">A tuned CUDA SGEMM kernel compared against MPS and Accelerate.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/3dgs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">03</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">3D Gaussian Splatting</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Inria’s tile-based Gaussian rasterizer. Tile sorting and blending run on the GPU.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">renderCUDA + binning ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/3dgs/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><ellipse cx="34" cy="38" rx="22" ry="12" transform="rotate(-24 34 38)" fill="currentColor" fill-opacity=".1"/><ellipse cx="56" cy="50" rx="20" ry="9" transform="rotate(18 56 50)" fill="currentColor" fill-opacity=".22"/><ellipse cx="44" cy="62" rx="12" ry="7" transform="rotate(-8 44 62)" fill="currentColor" fill-opacity=".4"/><ellipse cx="62" cy="26" rx="10" ry="6" transform="rotate(30 62 26)" fill="currentColor" fill-opacity=".16"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>03</span><span style="text-align: right">renderCUDA + binning ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">3D Gaussian Splatting</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">Inria’s tile-based Gaussian rasterizer, with tile sorting and blending on the GPU.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">04</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">SPH dam break</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">A weakly compressible fluid simulation. Neighbour search, physics and rasterizer are all CUDA kernels.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">~200,000 particles ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M6 80h76"/><circle cx="12.2" cy="53.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="10.7" cy="49.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="13.0" cy="32.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="38.6" cy="69.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="16.9" cy="39.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="53.2" cy="75.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="30.2" cy="68.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="21.0" cy="57.1" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.3" cy="38.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="30.6" cy="57.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="25.6" cy="56.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="45.8" cy="71.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="38.1" cy="65.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.9" cy="52.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="10.8" cy="61.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="68.5" cy="75.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="42.1" cy="61.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.4" cy="63.1" r="1.3" fill="currentColor" stroke="none"/><circle cx="54.6" cy="77.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="35.8" cy="61.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="9.6" cy="51.1" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.2" cy="66.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="17.3" cy="40.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="36.1" cy="71.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="13.8" cy="50.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="47.6" cy="72.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="67.0" cy="71.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="28.0" cy="48.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="33.8" cy="72.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="20.7" cy="39.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="24.8" cy="52.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.3" cy="48.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="34.6" cy="56.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="45.1" cy="58.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="72.8" cy="67.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="71.0" cy="67.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="36.3" cy="47.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.5" cy="59.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="12.5" cy="31.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.0" cy="35.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.3" cy="46.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="9.8" cy="71.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="26.2" cy="45.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="69.1" cy="77.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="41.6" cy="52.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="14.2" cy="33.1" r="1.3" fill="currentColor" stroke="none"/><circle cx="9.7" cy="75.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="46.0" cy="76.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="26.8" cy="46.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="20.0" cy="66.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="46.3" cy="67.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="66.4" cy="77.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="69.4" cy="68.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="66.9" cy="65.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="24.3" cy="53.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="10.0" cy="42.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="26.7" cy="62.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="75.5" cy="77.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="23.9" cy="39.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="22.2" cy="38.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="52.9" cy="73.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="55.0" cy="68.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="14.1" cy="61.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="73.5" cy="67.1" r="1.3" fill="currentColor" stroke="none"/><circle cx="20.9" cy="67.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="31.9" cy="68.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="36.9" cy="75.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="17.1" cy="35.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="73.1" cy="68.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="18.5" cy="69.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="33.2" cy="55.4" r="1.3" fill="currentColor" stroke="none"/><circle cx="45.9" cy="74.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="39.2" cy="71.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="26.1" cy="42.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="25.3" cy="57.3" r="1.3" fill="currentColor" stroke="none"/><circle cx="26.7" cy="49.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="17.4" cy="73.5" r="1.3" fill="currentColor" stroke="none"/><circle cx="33.5" cy="50.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="50.0" cy="73.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="38.3" cy="73.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="44.1" cy="54.6" r="1.3" fill="currentColor" stroke="none"/><circle cx="8.3" cy="68.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="20.4" cy="51.7" r="1.3" fill="currentColor" stroke="none"/><circle cx="31.5" cy="53.9" r="1.3" fill="currentColor" stroke="none"/><circle cx="48.0" cy="67.2" r="1.3" fill="currentColor" stroke="none"/><circle cx="15.6" cy="56.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="25.9" cy="41.8" r="1.3" fill="currentColor" stroke="none"/><circle cx="48.4" cy="66.0" r="1.3" fill="currentColor" stroke="none"/><circle cx="44.9" cy="62.6" r="1.3" fill="currentColor" stroke="none"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>04</span><span style="text-align: right">~200,000 particles ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">SPH dam break</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">A weakly compressible fluid. Neighbour search, physics and rasterizer are all CUDA kernels.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/diffusion/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">05</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Tiny diffusion</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">A DDPM trained on MNIST, then sampled entirely by hand-written CUDA kernels over 1,000 denoising steps.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">5.2e-6 vs PyTorch ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/diffusion/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><rect x="4" y="32" width="24" height="24" rx="2"/><circle cx="15.0" cy="44.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="15.6" cy="52.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="20.0" cy="51.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="24.8" cy="39.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="17.2" cy="52.9" r="0.9" fill="currentColor" stroke="none"/><circle cx="22.8" cy="36.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="8.4" cy="42.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="38.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.5" cy="47.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="21.7" cy="51.9" r="0.9" fill="currentColor" stroke="none"/><circle cx="9.1" cy="48.3" r="0.9" fill="currentColor" stroke="none"/><circle cx="19.2" cy="36.9" r="0.9" fill="currentColor" stroke="none"/><circle cx="23.7" cy="53.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="10.4" cy="53.1" r="0.9" fill="currentColor" stroke="none"/><circle cx="14.0" cy="43.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="25.8" cy="50.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="9.2" cy="42.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="16.3" cy="40.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="9.9" cy="40.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="20.4" cy="34.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="17.1" cy="42.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="6.4" cy="40.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="18.5" cy="44.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.3" cy="53.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="21.8" cy="53.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="8.1" cy="39.3" r="0.9" fill="currentColor" stroke="none"/><circle cx="6.8" cy="49.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="11.4" cy="36.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="14.4" cy="52.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="22.4" cy="39.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="9.0" cy="52.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="17.4" cy="48.0" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.8" cy="35.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="19.8" cy="42.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.4" cy="52.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="18.7" cy="50.0" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.7" cy="51.1" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.3" cy="51.3" r="0.9" fill="currentColor" stroke="none"/><circle cx="15.1" cy="40.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="17.1" cy="52.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="11.4" cy="36.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="16.5" cy="38.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="8.2" cy="37.2" r="0.9" fill="currentColor" stroke="none"/><circle cx="7.0" cy="38.0" r="0.9" fill="currentColor" stroke="none"/><circle cx="12.2" cy="40.1" r="0.9" fill="currentColor" stroke="none"/><circle cx="21.2" cy="39.8" r="0.9" fill="currentColor" stroke="none"/><rect x="32" y="32" width="24" height="24" rx="2"/><circle cx="44.0" cy="37.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="40.9" cy="34.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="39.0" cy="34.3" r="0.9" fill="currentColor" stroke="none"/><circle cx="48.7" cy="45.0" r="0.9" fill="currentColor" stroke="none"/><circle cx="37.8" cy="43.5" r="0.9" fill="currentColor" stroke="none"/><circle cx="52.7" cy="36.1" r="0.9" fill="currentColor" stroke="none"/><circle cx="50.4" cy="42.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="43.9" cy="50.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="41.9" cy="44.1" r="0.9" fill="currentColor" stroke="none"/><circle cx="47.8" cy="53.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="40.9" cy="50.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="48.1" cy="46.7" r="0.9" fill="currentColor" stroke="none"/><circle cx="42.1" cy="41.0" r="0.9" fill="currentColor" stroke="none"/><circle cx="35.1" cy="36.6" r="0.9" fill="currentColor" stroke="none"/><circle cx="35.4" cy="48.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="39.1" cy="37.3" r="0.9" fill="currentColor" stroke="none"/><circle cx="35.7" cy="50.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="51.4" cy="47.4" r="0.9" fill="currentColor" stroke="none"/><circle cx="39.6" cy="38.8" r="0.9" fill="currentColor" stroke="none"/><circle cx="39.9" cy="43.2" r="0.9" fill="currentColor" stroke="none"/><rect x="60" y="32" width="24" height="24" rx="2"/><path d="M65 38h13l-7 14" stroke-width="2"/><path d="M41 39h10l-5 11" stroke-width="1.2" stroke-opacity=".5"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>05</span><span style="text-align: right">5.2e-6 vs PyTorch ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">Tiny diffusion</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">A DDPM trained on MNIST, sampled by hand-written CUDA kernels over 1,000 denoising steps.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/highs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">06</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">HiGHS / cuPDLP-C</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Linear programming on CPU and Apple GPU, gated on matching status, objective and residuals.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">afiro / LP solver ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/highs/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 76h66M12 76V10" stroke-opacity=".5"/><path d="M12 64l14-36 28-10 18 22-12 30z" fill="currentColor" fill-opacity=".12"/><path d="M40 82L82 30" stroke-dasharray="3 3"/><circle cx="72" cy="40" r="3.5" fill="currentColor"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>06</span><span style="text-align: right">afiro LP ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">HiGHS / cuPDLP-C</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">Linear programming on CPU and Apple GPU, gated on matching status, objective and residuals.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/gromacs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">07</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">GROMACS 2025.4</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Runs unmodified, with nonbonded and listed forces, the whole PME step with 3D FFT, and constraints on the GPU.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">24,040 atoms / 6.8e-5 ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/gromacs/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M20 58l18-14 20 8 14-20M38 44l-6-22M58 52l4 18"/><circle cx="20" cy="58" r="6" fill="currentColor" fill-opacity=".15"/><circle cx="38" cy="44" r="8" fill="currentColor" fill-opacity=".3"/><circle cx="58" cy="52" r="6" fill="currentColor" fill-opacity=".15"/><circle cx="72" cy="32" r="5"/><circle cx="32" cy="22" r="5"/><circle cx="62" cy="70" r="4"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>07</span><span style="text-align: right">24,040 atoms, 6.8e-5 ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">GROMACS 2025.4</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">Runs unmodified, with nonbonded and listed forces, the PME step with 3D FFT, and constraints on the GPU.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/amrex/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">08</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">AMReX 25.09</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Block-structured AMR through its unmodified CUDA backend, compared plotfile to plotfile.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">5.53e-9 after 200 steps ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/amrex/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><rect x="12" y="12" width="64" height="64"/><path d="M44 12v64M12 44h64"/><path d="M60 44v32M44 60h32" stroke-opacity=".8"/><path d="M52 60v16M44 68h16" stroke-opacity=".6"/><rect x="44" y="68" width="8" height="8" fill="currentColor" fill-opacity=".3" stroke="none"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>08</span><span style="text-align: right">5.53e-9 after 200 steps ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">AMReX 25.09</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">Block-structured AMR through its unmodified CUDA backend, compared plotfile to plotfile.</span>
             </span>
           </a>
         </li>
-        <li style="border-bottom: 1px solid #050505">
-          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/lammps/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
-            <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">09</span>
-              <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">LAMMPS / Kokkos</span>
-            </span>
-            <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Unmodified Lennard-Jones benchmark, full and half neighbour lists, against CPU double precision.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">32,000 atoms / 100 steps ↗</span>
+        <li style="display: flex">
+          <a class="cm-card" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/lammps/README.md" style="flex: 1; display: flex; gap: 18px; align-items: flex-start; padding: 18px; border: 1px solid rgba(5,5,5,0.22); border-radius: 12px; color: #050505">
+            <svg viewBox="0 0 88 88" width="80" height="80" aria-hidden="true" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="flex: none"><path d="M12 46h68" stroke-dasharray="3 3" stroke-opacity=".6"/><path d="M12 8v72" stroke-opacity=".5"/><path d="M22 8C25 52 30 68 36 68S58 50 80 47" stroke-width="2"/><circle cx="36.0" cy="68.0" r="2.6" fill="currentColor" stroke="none"/></svg>
+            <span style="display: flex; flex-direction: column; gap: 6px; min-width: 0">
+              <span style="display: flex; justify-content: space-between; gap: 12px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; font-weight: 700"><span>09</span><span style="text-align: right">32,000 atoms, 100 steps ↗</span></span>
+              <span style="font-weight: 700; font-size: 21px; line-height: 1.15; letter-spacing: -0.015em">LAMMPS / Kokkos</span>
+              <span style="font-size: 14px; line-height: 1.45; font-weight: 500; color: #2E2D2A">Unmodified Lennard-Jones benchmark with full and half neighbour lists, against CPU double precision.</span>
             </span>
           </a>
         </li>
       </ol>
-      <a class="cm-btn" href="https://github.com/Lulzx/cuda-metal/blob/main/docs/demos.md" style="align-self: flex-start; display: inline-flex; align-items: center; min-height: 52px; padding: 0 26px; border-radius: 999px; background: #050505; color: #F2F0EB; font-weight: 700; font-size: 16px">How to run every demo ↗</a>
     </div>
   </section>
 
