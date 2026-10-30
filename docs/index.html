@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>CuMetal — CUDA, re-formed as Metal</title>
+<title>CuMetal: CUDA on Apple Silicon</title>
 <script src="./assets/react.js"></script>
 <script src="./assets/react-dom.js"></script>
 <script src="./assets/support.js"></script>
@@ -15,7 +15,15 @@
 <style>
 body{margin:0;background:#050505}
 a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
+a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s cubic-bezier(.25,.1,.25,1),border-color .25s cubic-bezier(.25,.1,.25,1)}
+:focus-visible{outline:2px solid currentColor;outline-offset:3px;border-radius:4px}
+.cm-pill{background:rgba(242,240,235,.06);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px)}
+.cm-pill:hover{background:rgba(242,240,235,.14);border-color:#6A6862 !important;color:#F2F0EB}
+.cm-btn:hover{background:#2A2926 !important;color:#F2F0EB !important}
+.cm-row{transition:background-color .25s cubic-bezier(.25,.1,.25,1),padding .4s cubic-bezier(0,0,.2,1)}
+.cm-row:hover{background:rgba(5,5,5,.05);padding-left:12px !important;padding-right:12px !important}
 ::selection{background:#C4C1BA;color:#050505}
+@media (prefers-reduced-motion: reduce){a,button,.cm-row{transition:none}}
 </style>
 </helmet>
 
@@ -30,16 +38,16 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
         <a href="#top" style="pointer-events: auto; font-weight: 700; font-size: 20px; letter-spacing: -0.02em; min-height: 44px; display: inline-flex; align-items: center">CuMetal</a>
         <div style="display: flex; gap: 8px; flex-wrap: wrap; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px">
           <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/README.md" style="pointer-events: auto; min-height: 44px; display: inline-flex; align-items: center; padding: 0 14px">Docs</a>
-          <a href="https://github.com/Lulzx/cuda-metal" style="pointer-events: auto; min-height: 44px; display: inline-flex; align-items: center; padding: 0 18px; border: 1px solid #3A3936; border-radius: 999px">GitHub ↗</a>
+          <a class="cm-pill" href="https://github.com/Lulzx/cuda-metal" style="pointer-events: auto; min-height: 44px; display: inline-flex; align-items: center; padding: 0 18px; border: 1px solid #3A3936; border-radius: 999px">GitHub ↗</a>
         </div>
       </nav>
 
       <div style="display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; flex-wrap: wrap">
         <div style="display: flex; flex-direction: column; gap: 18px; max-width: 560px">
-          <h1 id="top" style="margin: 0; font-weight: 700; font-size: clamp(22px, 2.4vw, 32px); line-height: 1.15; letter-spacing: -0.02em">Run CUDA on Apple Silicon.<br><span style="color: #9C9A94">CuMetal compiles your kernels into Metal — no rewrite.</span></h1>
+          <h1 id="top" style="margin: 0; font-weight: 700; font-size: clamp(22px, 2.4vw, 32px); line-height: 1.15; letter-spacing: -0.02em">Run CUDA on Apple Silicon.<br><span style="color: #9C9A94">CuMetal compiles your CUDA kernels to Metal without rewriting them.</span></h1>
           <div style="pointer-events: auto; display: inline-flex; align-items: center; gap: 4px; align-self: flex-start; max-width: 100%; box-sizing: border-box; background: #F2F0EB; color: #050505; border-radius: 999px; padding: 4px 4px 4px 20px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 500">
             <code style="white-space: nowrap; overflow-x: auto; padding-right: 10px">brew install lulzx/tap/cumetal</code>
-            <button type="button" onClick="{{copyBrew}}" aria-label="Copy install command" style="min-height: 44px; min-width: 72px; padding: 0 16px; border: 0; border-radius: 999px; background: #050505; color: #F2F0EB; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer">{{copyLabel}}</button>
+            <button class="cm-btn" type="button" onClick="{{copyBrew}}" aria-label="Copy install command" style="min-height: 44px; min-width: 72px; padding: 0 16px; border: 0; border-radius: 999px; background: #050505; color: #F2F0EB; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer">{{copyLabel}}</button>
           </div>
         </div>
         <p aria-live="polite" style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #9C9A94; display: flex; align-items: center; gap: 10px">
@@ -52,10 +60,10 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
   <!-- STATEMENT (light) -->
   <section style="background: #F2F0EB; color: #050505">
     <div style="max-width: 1400px; margin: 0 auto; padding: clamp(80px, 12vw, 180px) clamp(20px, 4vw, 56px); display: flex; flex-direction: column; gap: clamp(48px, 7vw, 96px)">
-      <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 8.4vw, 136px); line-height: 0.98; letter-spacing: -0.025em; max-width: 12ch">CUDA goes in. Metal comes out.</h2>
+      <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 8.4vw, 136px); line-height: 0.98; letter-spacing: -0.025em; max-width: 12ch">Compile CUDA ahead of time.</h2>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 40px clamp(40px, 6vw, 96px); align-items: end">
         <p style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-weight: 700; font-size: clamp(26px, 4.2vw, 64px); line-height: 1.08; letter-spacing: -0.03em; word-break: break-word"><span style="color: #8A8780">$</span> cumetalc kernel.cu -o kernel</p>
-        <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #3B3A36">Supported CUDA C++ and PTX become Metal Shading Language, which Apple’s own tools build into a metallib. That metallib is embedded in your executable, so nothing is compiled when the app first launches.</p>
+        <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #3B3A36">Supported CUDA C++ and PTX become Metal Shading Language, which Apple’s own tools build into a metallib. The metallib is embedded in your executable, so the app compiles nothing when it first launches.</p>
       </div>
     </div>
   </section>
@@ -67,19 +75,19 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
       <ol style="margin: 0; padding: 0; list-style: none; border-top: 1px solid #2A2926">
         <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
           <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">No JIT at launch.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">The compiled Metal library ships inside the binary. There’s no first-launch PTX JIT on the direct CUDA C++ path.</span>
+          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">The compiled Metal library ships inside the binary. On the direct CUDA C++ path, no PTX is JIT-compiled when the app first runs.</span>
         </li>
         <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">Typed all the way.</span>
+          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">Typed IR end to end.</span>
           <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">CUDA C++ goes through a typed CuMetal IR. PTX import resolves every value from its SSA definition, with checked types.</span>
         </li>
         <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
-          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em; color: #C4C1BA">Proofs before pointers.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">Memory is lowered only where range and alignment proofs hold. Anything unproved stays a barrier, not a guess.</span>
+          <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em; color: #C4C1BA">Memory access is proved.</span>
+          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">Memory is lowered only where range and alignment proofs hold. Where a proof fails, the access keeps its barrier.</span>
         </li>
         <li style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 380px), 1fr)); gap: 12px 48px; align-items: baseline; padding: clamp(24px, 3vw, 40px) 0; border-bottom: 1px solid #2A2926">
           <span style="font-weight: 700; font-size: clamp(36px, 5.6vw, 84px); line-height: 1.02; letter-spacing: -0.02em">Public APIs only.</span>
-          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">CuMetal uses no private Apple APIs. It targets Metal the documented way.</span>
+          <span style="font-size: 17px; line-height: 1.55; color: #9C9A94; max-width: 46ch">CuMetal calls only public, documented Metal APIs.</span>
         </li>
       </ol>
     </div>
@@ -89,36 +97,36 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
   <section id="demos" style="background: #C4C1BA; color: #050505">
     <div style="max-width: 1400px; margin: 0 auto; padding: clamp(72px, 10vw, 140px) clamp(20px, 4vw, 56px); display: flex; flex-direction: column; gap: clamp(32px, 4vw, 56px)">
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 24px clamp(40px, 6vw, 96px); align-items: end">
-        <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 6.4vw, 104px); line-height: 1; letter-spacing: -0.025em">Nine real workloads.</h2>
-        <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #2E2D2A">Each demo’s gate checks numerical or domain-specific output and Apple-GPU provenance. A process that merely exits is not counted as evidence.</p>
+        <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 6.4vw, 104px); line-height: 1; letter-spacing: -0.025em">Nine workloads, checked.</h2>
+        <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #2E2D2A">Each demo’s gate checks its numerical or domain output and confirms the work ran on the Apple GPU. A clean exit alone does not pass.</p>
       </div>
       <ol style="margin: 0; padding: 0; list-style: none; border-top: 2px solid #050505">
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/apollo/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/apollo/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">01</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Apollo</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">The front door: one command climbs from vector addition through reduction and SGEMM to a path tracer.</span>
+              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">The place to start. One command runs vector addition, a reduction, SGEMM and a path tracer in turn.</span>
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">vectorAdd → path tracer ↗</span>
             </span>
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/matmul/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/matmul/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">02</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Matmul vs MPS</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
               <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">The matmul article’s kernel progression, with a tuned CUDA kernel compared against MPS and Accelerate.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">2.03 TFLOP/s · M4 Pro ↗</span>
+              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">2.03 TFLOP/s / M4 Pro ↗</span>
             </span>
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/3dgs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/3dgs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">03</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">3D Gaussian Splatting</span>
@@ -130,19 +138,19 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/sph/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">04</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">SPH dam break</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">A weakly-compressible fluid simulation. Neighbour search, physics and rasterizer are all CUDA kernels.</span>
+              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">A weakly compressible fluid simulation. Neighbour search, physics and rasterizer are all CUDA kernels.</span>
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">~200,000 particles ↗</span>
             </span>
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/diffusion/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/diffusion/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">05</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">Tiny diffusion</span>
@@ -154,31 +162,31 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/highs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/highs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">06</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">HiGHS / cuPDLP-C</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
               <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Linear programming on CPU and Apple GPU, gated on matching status, objective and residuals.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">afiro · LP solver ↗</span>
+              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">afiro / LP solver ↗</span>
             </span>
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/gromacs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/gromacs/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">07</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">GROMACS 2025.4</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
-              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Unmodified. Nonbonded, listed forces, the whole PME step with 3D FFT, and constraints on the GPU.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">24,040 atoms · 6.8e-5 ↗</span>
+              <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Runs unmodified, with nonbonded and listed forces, the whole PME step with 3D FFT, and constraints on the GPU.</span>
+              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">24,040 atoms / 6.8e-5 ↗</span>
             </span>
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/amrex/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/amrex/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">08</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">AMReX 25.09</span>
@@ -190,28 +198,28 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
           </a>
         </li>
         <li style="border-bottom: 1px solid #050505">
-          <a href="https://github.com/Lulzx/cuda-metal/blob/main/demos/lammps/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
+          <a class="cm-row" href="https://github.com/Lulzx/cuda-metal/blob/main/demos/lammps/README.md" style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 340px), 1fr)); gap: 10px 48px; align-items: baseline; padding: clamp(22px, 2.6vw, 34px) 0; color: #050505">
             <span style="display: flex; gap: 16px; align-items: baseline; min-width: 0">
               <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">09</span>
               <span style="font-weight: 700; font-size: clamp(28px, 3.6vw, 52px); line-height: 1.02; letter-spacing: -0.02em; overflow-wrap: anywhere">LAMMPS / Kokkos</span>
             </span>
             <span style="display: flex; flex-direction: column; gap: 8px">
               <span style="font-size: 16px; line-height: 1.5; font-weight: 500; color: #2E2D2A">Unmodified Lennard-Jones benchmark, full and half neighbour lists, against CPU double precision.</span>
-              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">32,000 atoms · 100 steps ↗</span>
+              <span style="font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; font-weight: 700">32,000 atoms / 100 steps ↗</span>
             </span>
           </a>
         </li>
       </ol>
-      <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/demos.md" style="align-self: flex-start; display: inline-flex; align-items: center; min-height: 52px; padding: 0 26px; border-radius: 999px; background: #050505; color: #F2F0EB; font-weight: 700; font-size: 16px">How to run every demo ↗</a>
+      <a class="cm-btn" href="https://github.com/Lulzx/cuda-metal/blob/main/docs/demos.md" style="align-self: flex-start; display: inline-flex; align-items: center; min-height: 52px; padding: 0 26px; border-radius: 999px; background: #050505; color: #F2F0EB; font-weight: 700; font-size: 16px">How to run every demo ↗</a>
     </div>
   </section>
 
   <!-- EDGES -->
   <section>
     <div style="max-width: 1400px; margin: 0 auto; padding: clamp(80px, 11vw, 160px) clamp(20px, 4vw, 56px); display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 440px), 1fr)); gap: 40px clamp(40px, 6vw, 96px)">
-      <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 6.4vw, 104px); line-height: 0.98; letter-spacing: -0.025em">Where it stops.</h2>
+      <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 6.4vw, 104px); line-height: 0.98; letter-spacing: -0.025em">Limitations.</h2>
       <div style="display: flex; flex-direction: column; gap: 22px; font-size: clamp(18px, 1.6vw, 22px); line-height: 1.5; font-weight: 500; color: #C9C6BE">
-        <p style="margin: 0">CuMetal is experimental: CUDA and its libraries are supported as <span style="color: #F2F0EB">tested subsets</span>, not drop-in replacements.</p>
+        <p style="margin: 0">CuMetal is experimental. It supports <span style="color: #F2F0EB">tested subsets</span> of CUDA and its libraries, so expect gaps when you port existing code.</p>
         <p style="margin: 0">Warp width is fixed at <span style="color: #F2F0EB">32</span>. FP64 is <span style="color: #F2F0EB">emulated</span>. SASS binaries don’t run. Multi-GPU, peer access and graphics interop are unsupported; cooperative grids, dynamic launch, graphs and textures are partial.</p>
         <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/known-gaps.md" style="color: #C4C1BA; font-weight: 700; min-height: 44px; display: inline-flex; align-items: center">Read the known gaps ↗</a>
       </div>
@@ -221,14 +229,14 @@ a{color:#F2F0EB;text-decoration:none}a:hover{color:#C4C1BA}
   <!-- START + FOOTER -->
   <section style="border-top: 1px solid #2A2926">
     <div style="max-width: 1400px; margin: 0 auto; padding: clamp(64px, 8vw, 120px) clamp(20px, 4vw, 56px) 0; display: flex; flex-direction: column; gap: 40px">
-      <p style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #9C9A94">Start · Apple Silicon · macOS 14+</p>
+      <p style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.08em; text-transform: uppercase; color: #9C9A94">Get started on Apple Silicon, macOS 14+</p>
       <ol style="margin: 0; padding: 0; list-style: none; display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 300px), 1fr)); gap: 24px; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: clamp(15px, 1.3vw, 18px)">
         <li style="display: flex; flex-direction: column; gap: 10px"><span style="color: #9C9A94; font-size: 12px">01 install</span><code style="overflow-x: auto; white-space: nowrap">brew install lulzx/tap/cumetal</code></li>
         <li style="display: flex; flex-direction: column; gap: 10px"><span style="color: #9C9A94; font-size: 12px">02 check</span><code>cumetal doctor</code></li>
         <li style="display: flex; flex-direction: column; gap: 10px"><span style="color: #9C9A94; font-size: 12px">03 run</span><code style="overflow-x: auto; white-space: nowrap">cumetalc kernel.cu -o kernel &amp;&amp; ./kernel</code></li>
       </ol>
       <div style="display: flex; flex-wrap: wrap; justify-content: space-between; gap: 8px 24px; padding-top: 32px; border-top: 1px solid #2A2926; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-size: 13px; color: #9C9A94">
-        <span>Apache 2.0 · <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/legal-notice.md" style="color: #9C9A94; text-decoration: underline">Legal notice</a></span>
+        <span>Apache 2.0 / <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/legal-notice.md" style="color: #9C9A94; text-decoration: underline">Legal notice</a></span>
         <div style="display: flex; gap: 24px; flex-wrap: wrap">
           <a href="https://github.com/Lulzx/cuda-metal/blob/main/docs/build.md" style="color: #9C9A94; min-height: 44px; display: inline-flex; align-items: center">Build from source</a>
           <a href="https://github.com/Lulzx/cuda-metal/blob/main/CONTRIBUTING.md" style="color: #9C9A94; min-height: 44px; display: inline-flex; align-items: center">Contribute</a>
@@ -370,7 +378,7 @@ class Component extends DCLogic {
     const phase = this.state.phase;
     return {
       setCanvas: this.setCanvas,
-      phaseLabel: phase ? 'Metal kernels · Apple GPU' : 'CUDA C++ / PTX · source',
+      phaseLabel: phase ? 'Metal kernels on the Apple GPU' : 'CUDA C++ and PTX source',
       dotColor: phase ? this.accent() : '#F2F0EB',
       copyLabel: this.state.copied ? 'COPIED' : 'COPY',
       copyBrew: () => {
