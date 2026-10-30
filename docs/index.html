@@ -11,7 +11,7 @@
 <body>
 <x-dc>
 <helmet>
-<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Inter+Tight:wght@400;500;600;700&amp;display=swap">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700&amp;display=swap">
 <style>
 @font-face{font-family:'Ioskeley Mono';src:url(./assets/fonts/IoskeleyMono-Regular.woff2) format('woff2');font-weight:400;font-style:normal;font-display:swap}
 @font-face{font-family:'Ioskeley Mono';src:url(./assets/fonts/IoskeleyMono-Medium.woff2) format('woff2');font-weight:500;font-style:normal;font-display:swap}
@@ -32,7 +32,7 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
 </style>
 </helmet>
 
-<div style="background: #050505; color: #F2F0EB; font-family: 'Inter Tight', 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden">
+<div style="background: #050505; color: #F2F0EB; font-family: Syne, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden">
 
   <!-- HERO: live particle morph -->
   <section style="position: relative; height: 100svh; min-height: 600px">
@@ -278,10 +278,10 @@ class Component extends DCLogic {
     off.width = w; off.height = h;
     const c = off.getContext('2d');
     let size = Math.min(h * 0.5, w * 0.3);
-    c.font = '700 ' + size + 'px "Inter Tight", Arial, sans-serif';
+    c.font = '700 ' + size + 'px Syne, Arial, sans-serif';
     const mt = c.measureText(word);
     const ink = Math.max(mt.width, (mt.actualBoundingBoxLeft || 0) + (mt.actualBoundingBoxRight || 0)) * 1.06;
-    if (ink > w * 0.84) { size = size * (w * 0.84) / ink; c.font = '700 ' + size + 'px "Inter Tight", Arial, sans-serif'; }
+    if (ink > w * 0.84) { size = size * (w * 0.84) / ink; c.font = '700 ' + size + 'px Syne, Arial, sans-serif'; }
     c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#fff';
     c.fillText(word, w / 2, h * 0.44);
     const data = c.getImageData(0, 0, w, h).data;
@@ -346,7 +346,7 @@ class Component extends DCLogic {
     };
     try {
       if (document.fonts && document.fonts.load) {
-        document.fonts.load('700 120px "Inter Tight"').then(go, go);
+        document.fonts.load('700 120px Syne').then(go, go);
       } else { go(); }
     } catch (e) { go(); }
   }
