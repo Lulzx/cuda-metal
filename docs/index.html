@@ -4,13 +4,6 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>CuMetal: CUDA on Apple Silicon</title>
-<script src="./assets/react.js"></script>
-<script src="./assets/react-dom.js"></script>
-<script src="./assets/support.js"></script>
-</head>
-<body>
-<x-dc>
-<helmet>
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Syne:wght@500;600;700&amp;display=swap">
 <style>
 @font-face{font-family:'Ioskeley Mono';src:url(./assets/fonts/IoskeleyMono-Regular.woff2) format('woff2');font-weight:400;font-style:normal;font-display:swap}
@@ -30,13 +23,14 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
 @media (max-width: 680px){.cm-grid{grid-template-columns:1fr !important}}
 @media (prefers-reduced-motion: reduce){a,button,.cm-card{transition:none}}
 </style>
-</helmet>
+</head>
+<body>
 
 <div style="background: #050505; color: #F2F0EB; font-family: Syne, 'Helvetica Neue', Arial, sans-serif; -webkit-font-smoothing: antialiased; overflow: hidden">
 
   <!-- HERO: live particle morph -->
   <section style="position: relative; height: 100svh; min-height: 600px">
-    <canvas id="cm-canvas" ref="{{setCanvas}}" aria-hidden="true" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y"></canvas>
+    <canvas id="cm-canvas" aria-hidden="true" style="position: absolute; inset: 0; width: 100%; height: 100%; display: block; touch-action: pan-y"></canvas>
 
     <div style="position: absolute; inset: 0; display: flex; flex-direction: column; justify-content: space-between; padding: clamp(18px, 3vw, 36px); pointer-events: none">
       <nav aria-label="Primary" style="display: flex; justify-content: space-between; align-items: center; gap: 16px; flex-wrap: wrap">
@@ -52,11 +46,11 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
           <h1 id="top" style="margin: 0; font-weight: 700; font-size: clamp(22px, 2.4vw, 32px); line-height: 1.15; letter-spacing: -0.02em">Run CUDA on Apple Silicon.<br><span style="color: #9C9A94">CuMetal compiles your CUDA kernels to Metal without rewriting them.</span></h1>
           <div style="pointer-events: auto; display: inline-flex; align-items: center; gap: 4px; max-width: 100%; box-sizing: border-box; background: #F2F0EB; color: #050505; border-radius: 999px; padding: 4px 4px 4px 20px; font-family: 'Ioskeley Mono', ui-monospace, Menlo, monospace; font-size: 14px; font-weight: 500">
             <code style="white-space: nowrap; overflow-x: auto; padding-right: 10px">brew install lulzx/tap/cumetal</code>
-            <button class="cm-btn" type="button" onClick="{{copyBrew}}" aria-label="Copy install command" style="min-height: 44px; min-width: 72px; padding: 0 16px; border: 0; border-radius: 999px; background: #050505; color: #F2F0EB; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer">{{copyLabel}}</button>
+            <button id="cm-copy" class="cm-btn" type="button" aria-label="Copy install command" style="min-height: 44px; min-width: 72px; padding: 0 16px; border: 0; border-radius: 999px; background: #050505; color: #F2F0EB; font-family: inherit; font-size: 12px; font-weight: 700; cursor: pointer">COPY</button>
           </div>
         </div>
         <p aria-live="polite" style="margin: 0; font-family: 'Ioskeley Mono', ui-monospace, Menlo, monospace; font-size: 12px; letter-spacing: 0.06em; text-transform: uppercase; color: #9C9A94; display: flex; align-items: center; gap: 10px">
-          <span style="width: 8px; height: 8px; border-radius: 50%; background: {{dotColor}}"></span>{{phaseLabel}}
+          <span id="cm-dot" style="width: 8px; height: 8px; border-radius: 50%; background: #F2F0EB"></span><span id="cm-phase">CUDA C++ and PTX source</span>
         </p>
       </div>
     </div>
@@ -248,148 +242,110 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
   </section>
 
 </div>
-</x-dc>
-<script type="text/x-dc" data-dc-script data-props='{"accent":{"editor":"color","default":"#C4C1BA","options":["#C4C1BA","#9E9B94","#FFFFFF"]},"$preview":{"width":1440,"height":6400}}'>
-class Component extends DCLogic {
-  constructor(props) {
-    super(props);
-    this.state = { copied: false, phase: 0 };
-    this.parts = [];
-    this.setCanvas = (el) => {
-      if (el && el !== this.canvas) { this.canvas = el; this.start(); }
-    };
+<script>
+(function () {
+  var ACCENT = '#C4C1BA';
+  var LABELS = ['CUDA C++ and PTX source', 'Metal kernels on the Apple GPU'];
+
+  var copyBtn = document.getElementById('cm-copy'), copyTimer;
+  copyBtn.addEventListener('click', function () {
+    try { if (navigator.clipboard) navigator.clipboard.writeText('brew install lulzx/tap/cumetal').catch(function () {}); } catch (e) {}
+    copyBtn.textContent = 'COPIED';
+    clearTimeout(copyTimer);
+    copyTimer = setTimeout(function () { copyBtn.textContent = 'COPY'; }, 1600);
+  });
+
+  var dot = document.getElementById('cm-dot'), phaseEl = document.getElementById('cm-phase');
+  var cv = document.getElementById('cm-canvas');
+  var ctx, w, h, gap, targets = [[], []], parts = [], phase = 0, mix = 0;
+  var mouse = { x: -9999, y: -9999 };
+
+  function setPhase(p) {
+    phase = p;
+    phaseEl.textContent = LABELS[p];
+    dot.style.background = p ? ACCENT : '#F2F0EB';
   }
-  componentDidMount() {
-    if (!this.canvas) {
-      const el = document.getElementById('cm-canvas');
-      if (el) { this.canvas = el; this.start(); }
-    }
-  }
-  componentWillUnmount() {
-    this.dead = true;
-    cancelAnimationFrame(this.raf);
-    clearInterval(this.iv);
-    clearTimeout(this._t);
-    if (this.ro) this.ro.disconnect();
-  }
-  accent() { return this.props.accent ?? '#C4C1BA'; }
-  sample(word, w, h, gap) {
-    const off = document.createElement('canvas');
+  function sample(word) {
+    var off = document.createElement('canvas');
     off.width = w; off.height = h;
-    const c = off.getContext('2d');
-    let size = Math.min(h * 0.5, w * 0.3);
+    var c = off.getContext('2d');
+    var size = Math.min(h * 0.5, w * 0.3);
     c.font = '700 ' + size + 'px Syne, Arial, sans-serif';
-    const mt = c.measureText(word);
-    const ink = Math.max(mt.width, (mt.actualBoundingBoxLeft || 0) + (mt.actualBoundingBoxRight || 0)) * 1.06;
+    var mt = c.measureText(word);
+    var ink = Math.max(mt.width, (mt.actualBoundingBoxLeft || 0) + (mt.actualBoundingBoxRight || 0)) * 1.06;
     if (ink > w * 0.84) { size = size * (w * 0.84) / ink; c.font = '700 ' + size + 'px Syne, Arial, sans-serif'; }
     c.textAlign = 'center'; c.textBaseline = 'middle'; c.fillStyle = '#fff';
     c.fillText(word, w / 2, h * 0.44);
-    const data = c.getImageData(0, 0, w, h).data;
-    const pts = [];
-    for (let y = 0; y < h; y += gap) {
-      for (let x = 0; x < w; x += gap) {
+    var data = c.getImageData(0, 0, w, h).data, pts = [];
+    for (var y = 0; y < h; y += gap) {
+      for (var x = 0; x < w; x += gap) {
         if (data[(y * w + x) * 4 + 3] > 128) pts.push([x, y]);
       }
     }
-    pts.sort((a, b) => a[0] - b[0] || a[1] - b[1]);
+    pts.sort(function (a, b) { return a[0] - b[0] || a[1] - b[1]; });
     return pts;
   }
-  layout() {
-    const cv = this.canvas; if (!cv) return;
-    const box = cv.parentElement.getBoundingClientRect();
-    const w = Math.max(1, Math.floor(box.width)), h = Math.max(1, Math.floor(box.height));
-    const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  function layout() {
+    var box = cv.parentElement.getBoundingClientRect();
+    w = Math.max(1, Math.floor(box.width)); h = Math.max(1, Math.floor(box.height));
+    var dpr = Math.min(window.devicePixelRatio || 1, 2);
     cv.width = w * dpr; cv.height = h * dpr;
-    this.ctx = cv.getContext('2d');
-    this.ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    this.w = w; this.h = h;
-    this.gap = Math.max(3, Math.round(Math.sqrt(w * h) / 210));
-    this.targets = [this.sample('CUDA', w, h, this.gap), this.sample('Metal', w, h, this.gap)];
-    const n = Math.max(this.targets[0].length, this.targets[1].length, 1);
-    const p = this.parts;
-    while (p.length < n) p.push({ x: Math.random() * w, y: Math.random() * h, vx: 0, vy: 0 });
-    p.length = n;
+    ctx = cv.getContext('2d');
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    gap = Math.max(3, Math.round(Math.sqrt(w * h) / 210));
+    targets = [sample('CUDA'), sample('Metal')];
+    var n = Math.max(targets[0].length, targets[1].length, 1);
+    while (parts.length < n) parts.push({ x: Math.random() * w, y: Math.random() * h, vx: 0, vy: 0 });
+    parts.length = n;
   }
-  start() {
-    if (this.started || !this.canvas) return;
-    this.started = true;
-    this.mouse = { x: -9999, y: -9999 };
-    this.mix = 0;
-    const reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const go = () => {
-      if (this.dead) return;
-      this.layout();
-      if (window.ResizeObserver) {
-        this.ro = new ResizeObserver(() => this.layout());
-        this.ro.observe(this.canvas.parentElement);
-      }
-      const cv = this.canvas;
-      cv.addEventListener('pointermove', (e) => { const r = cv.getBoundingClientRect(); this.mouse.x = e.clientX - r.left; this.mouse.y = e.clientY - r.top; });
-      cv.addEventListener('pointerleave', () => { this.mouse.x = -9999; this.mouse.y = -9999; });
-      if (reduce) {
-        const t = this.targets[1];
-        this.parts.forEach((q, i) => { const k = t[i % t.length]; q.x = k[0]; q.y = k[1]; });
-        this.mix = 1; this.draw(); this.setState({ phase: 1 });
-        return;
-      }
-      this.iv = setInterval(() => {
-        const next = this.state.phase ? 0 : 1;
-        this.parts.forEach((q) => { q.vx += (Math.random() - 0.5) * 14; q.vy += (Math.random() - 0.5) * 14; });
-        this.setState({ phase: next });
-      }, 3200);
-      const tick = () => {
-        if (this.dead) return;
-        this.step(); this.draw();
-        this.raf = requestAnimationFrame(tick);
-      };
-      tick();
-    };
-    try {
-      if (document.fonts && document.fonts.load) {
-        document.fonts.load('700 120px Syne').then(go, go);
-      } else { go(); }
-    } catch (e) { go(); }
-  }
-  step() {
-    const t = this.targets[this.state.phase] || [];
+  function step() {
+    var t = targets[phase];
     if (!t.length) return;
-    const m = this.mouse, R = 110, R2 = R * R;
-    this.mix += ((this.state.phase ? 1 : 0) - this.mix) * 0.05;
-    for (let i = 0; i < this.parts.length; i++) {
-      const q = this.parts[i], k = t[i % t.length];
+    var R = 110, R2 = R * R;
+    mix += (phase - mix) * 0.05;
+    for (var i = 0; i < parts.length; i++) {
+      var q = parts[i], k = t[i % t.length];
       q.vx += (k[0] - q.x) * 0.018;
       q.vy += (k[1] - q.y) * 0.018;
-      const dx = q.x - m.x, dy = q.y - m.y, d2 = dx * dx + dy * dy;
-      if (d2 < R2 && d2 > 0.01) { const f = (1 - d2 / R2) * 6 / Math.sqrt(d2); q.vx += dx * f; q.vy += dy * f; }
+      var dx = q.x - mouse.x, dy = q.y - mouse.y, d2 = dx * dx + dy * dy;
+      if (d2 < R2 && d2 > 0.01) { var f = (1 - d2 / R2) * 6 / Math.sqrt(d2); q.vx += dx * f; q.vy += dy * f; }
       q.vx *= 0.84; q.vy *= 0.84;
       q.x += q.vx; q.y += q.vy;
     }
   }
-  hex(c) { const v = parseInt(c.replace('#', ''), 16); return [(v >> 16) & 255, (v >> 8) & 255, v & 255]; }
-  draw() {
-    const c = this.ctx; if (!c) return;
-    c.clearRect(0, 0, this.w, this.h);
-    const a = [242, 240, 235], b = this.hex(this.accent()), m = this.mix;
-    c.fillStyle = 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * m) + ',' + Math.round(a[1] + (b[1] - a[1]) * m) + ',' + Math.round(a[2] + (b[2] - a[2]) * m) + ')';
-    const s = Math.max(1.5, this.gap * 0.55);
-    for (let i = 0; i < this.parts.length; i++) { const q = this.parts[i]; c.fillRect(q.x, q.y, s, s); }
+  function hex(c) { var v = parseInt(c.replace('#', ''), 16); return [(v >> 16) & 255, (v >> 8) & 255, v & 255]; }
+  function draw() {
+    ctx.clearRect(0, 0, w, h);
+    var a = [242, 240, 235], b = hex(ACCENT);
+    ctx.fillStyle = 'rgb(' + Math.round(a[0] + (b[0] - a[0]) * mix) + ',' + Math.round(a[1] + (b[1] - a[1]) * mix) + ',' + Math.round(a[2] + (b[2] - a[2]) * mix) + ')';
+    var s = Math.max(1.5, gap * 0.55);
+    for (var i = 0; i < parts.length; i++) ctx.fillRect(parts[i].x, parts[i].y, s, s);
   }
-  renderVals() {
-    const phase = this.state.phase;
-    return {
-      setCanvas: this.setCanvas,
-      phaseLabel: phase ? 'Metal kernels on the Apple GPU' : 'CUDA C++ and PTX source',
-      dotColor: phase ? this.accent() : '#F2F0EB',
-      copyLabel: this.state.copied ? 'COPIED' : 'COPY',
-      copyBrew: () => {
-        try { if (navigator.clipboard) navigator.clipboard.writeText('brew install lulzx/tap/cumetal').catch(() => {}); } catch (e) {}
-        this.setState({ copied: true });
-        clearTimeout(this._t);
-        this._t = setTimeout(() => this.setState({ copied: false }), 1600);
-      }
-    };
+  function go() {
+    layout();
+    if (window.ResizeObserver) new ResizeObserver(layout).observe(cv.parentElement);
+    cv.addEventListener('pointermove', function (e) { var r = cv.getBoundingClientRect(); mouse.x = e.clientX - r.left; mouse.y = e.clientY - r.top; });
+    cv.addEventListener('pointerleave', function () { mouse.x = -9999; mouse.y = -9999; });
+    if (window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+      var t = targets[1];
+      parts.forEach(function (q, i) { var k = t[i % t.length]; q.x = k[0]; q.y = k[1]; });
+      mix = 1; setPhase(1); draw();
+      return;
+    }
+    setInterval(function () {
+      parts.forEach(function (q) { q.vx += (Math.random() - 0.5) * 14; q.vy += (Math.random() - 0.5) * 14; });
+      setPhase(phase ? 0 : 1);
+    }, 3200);
+    (function tick() { step(); draw(); requestAnimationFrame(tick); })();
   }
-}
+
+  var started = false;
+  function start() { if (!started) { started = true; go(); } }
+  try {
+    if (document.fonts && document.fonts.load) document.fonts.load('700 120px Syne').then(start, start);
+    else start();
+  } catch (e) { start(); }
+})();
 </script>
 </body>
 </html>
