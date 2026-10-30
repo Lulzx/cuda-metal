@@ -26,6 +26,7 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
 /* Illustrations play once when scrolled into view. Without JS they stay in their final state. */
 .cm-js .cm-ill [class*="ax-"]{animation:var(--k) var(--t,.8s) var(--e,cubic-bezier(.23,1,.32,1)) calc(var(--b,0s) + var(--d,0s)) both paused;transform-box:fill-box;transform-origin:center}
 .cm-js .cm-ill.is-in [class*="ax-"]{animation-play-state:running}
+.cm-js .cm-ill{transition:opacity .3s ease}.cm-js .cm-ill.is-out{opacity:0}
 .cm-js .cm-ill .ax-draw{--k:ax-draw;stroke-dasharray:1}
 .ax-fade{--k:ax-fade}.ax-pop{--k:ax-pop}.ax-rise{--k:ax-rise}.ax-in{--k:ax-in}.ax-in-r{--k:ax-in-r}
 .ax-dam{--k:ax-dam;--t:1.4s}.ax-sweep{--k:ax-sweep;--e:cubic-bezier(.77,0,.175,1)}
@@ -285,9 +286,37 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
       p.style.setProperty('--d', (i * 0.025) + 's');
     });
     if (!window.IntersectionObserver) throw 0;
+    // Loop each illustration while it is on screen: play, hold the finished drawing, fade out, replay.
+    // Reduced motion plays once.
+    var reduce = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    var canLoop = !reduce && typeof Element.prototype.getAnimations === 'function';
+    function replay(svg) {
+      svg.classList.add('is-out');
+      setTimeout(function () {
+        svg.getAnimations({ subtree: true }).forEach(function (a) { a.currentTime = 0; });
+        svg.classList.remove('is-out');
+        loop(svg);
+      }, 300);
+    }
+    function loop(svg) {
+      var end = 0;
+      svg.getAnimations({ subtree: true }).forEach(function (a) { end = Math.max(end, a.effect.getComputedTiming().endTime); });
+      setTimeout(function () {
+        if (svg.cmVisible) replay(svg); else svg.cmWaiting = true;
+      }, end + 2500);
+    }
     var io = new IntersectionObserver(function (entries) {
       entries.forEach(function (e) {
-        if (e.isIntersecting) { show(e.target); io.unobserve(e.target); }
+        var svg = e.target;
+        svg.cmVisible = e.isIntersecting;
+        if (!e.isIntersecting) return;
+        if (!svg.classList.contains('is-in')) {
+          show(svg);
+          if (canLoop) loop(svg); else io.unobserve(svg);
+        } else if (svg.cmWaiting) {
+          svg.cmWaiting = false;
+          replay(svg);
+        }
       });
     }, { threshold: 0.5 });
     ills.forEach(function (svg) { io.observe(svg); });
