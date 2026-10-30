@@ -62,7 +62,7 @@ a,button{transition:color .25s cubic-bezier(.25,.1,.25,1),background-color .25s 
     <div style="max-width: 1400px; margin: 0 auto; padding: clamp(80px, 12vw, 180px) clamp(20px, 4vw, 56px); display: flex; flex-direction: column; gap: clamp(48px, 7vw, 96px)">
       <h2 style="margin: 0; font-weight: 700; font-size: clamp(44px, 8.4vw, 136px); line-height: 0.98; letter-spacing: -0.025em; max-width: 12ch">Compile CUDA ahead of time.</h2>
       <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 40px clamp(40px, 6vw, 96px); align-items: end">
-        <p style="margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-weight: 700; font-size: clamp(26px, 4.2vw, 64px); line-height: 1.08; letter-spacing: -0.03em; word-break: break-word"><span style="color: #8A8780">$</span> cumetalc kernel.cu -o kernel</p>
+        <p style="grid-column: 1 / -1; margin: 0; font-family: 'JetBrains Mono', ui-monospace, Menlo, monospace; font-weight: 700; font-size: clamp(14px, 4.6vw, 64px); line-height: 1.08; letter-spacing: -0.03em; white-space: nowrap"><span style="color: #8A8780">$</span> cumetalc kernel.cu -o kernel</p>
         <p style="margin: 0; font-size: clamp(17px, 1.5vw, 21px); line-height: 1.5; font-weight: 500; color: #3B3A36">Supported CUDA C++ and PTX become Metal Shading Language, which Apple’s own tools build into a metallib. The metallib is embedded in your executable, so the app compiles nothing when it first launches.</p>
       </div>
     </div>
