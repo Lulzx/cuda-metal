@@ -25,6 +25,12 @@ add_executable(cumetal_ir_test
     ir_test.cpp
 )
 
+add_executable(cumetal_ptx_prototype_scan_test ptx_prototype_scan_test.cpp)
+target_link_libraries(cumetal_ptx_prototype_scan_test PRIVATE cumetal_ir)
+target_compile_options(cumetal_ptx_prototype_scan_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_prototype_scan COMMAND cumetal_ptx_prototype_scan_test)
+set_tests_properties(unit_ptx_prototype_scan PROPERTIES TIMEOUT 10)
+
 add_executable(cumetal_dominance_test dominance_test.cpp)
 target_include_directories(cumetal_dominance_test PRIVATE ${CMAKE_SOURCE_DIR}/compiler/ir/src)
 target_link_libraries(cumetal_dominance_test PRIVATE cumetal_ir)
