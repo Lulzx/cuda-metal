@@ -2676,6 +2676,20 @@ int main() {
                          std::string::npos,
                  "LLVM aggregate allocas apply byte offsets after byte-pointer casts");
 
+    std::string templated_alloca_ir = kNvvmThreadAlloca;
+    for (std::size_t at = 0;
+         (at = templated_alloca_ir.find("%Pair", at)) != std::string::npos;) {
+        templated_alloca_ir.replace(at, 5, "%\"Pair<float>\"");
+        at += 14;
+    }
+    const metal::NvvmToMslResult templated_alloca = metal::compile_nvvm_to_msl(
+        templated_alloca_ir, "templated-alloca.ll", "thread_alloca");
+    ok &= expect(templated_alloca.ok &&
+                     templated_alloca.source.find("struct CuMetalAggregate_") !=
+                         std::string::npos &&
+                     templated_alloca.source.find("Pair<float>") == std::string::npos,
+                 "LLVM template-like aggregate names become Metal identifiers");
+
     const metal::NvvmToMslResult signed_narrow_to_float =
         metal::compile_nvvm_to_msl(kNvvmSignedNarrowToFloat,
                                    "signed-narrow-to-float.ll",

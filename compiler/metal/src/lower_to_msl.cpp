@@ -1307,7 +1307,8 @@ bool is_native_vector_aggregate(const ir::Type& type) {
 }
 
 std::string aggregate_type_name(const ir::Type& type) {
-    if (!type.name.empty()) return type.name;
+    if (!type.name.empty() && sanitize_identifier(type.name) == type.name)
+        return type.name;
     std::uint64_t hash = 1469598103934665603ull;
     for (const unsigned char byte : type.str()) {
         hash ^= byte;

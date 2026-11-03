@@ -4131,6 +4131,17 @@ add_test(
 # metallib and registers host launch stubs through the versioned CuMetal ABI.
 if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     add_test(
+        NAME functional_cumetalc_native_aot_cub_block_reduce
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_SOURCE_DIR}/tests/cuda_projects/cub_block_reduce/cub_block_reduce.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_cub_block_reduce
+    )
+    set_tests_properties(functional_cumetalc_native_aot_cub_block_reduce
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
         NAME functional_cumetalc_link_executable
         COMMAND bash
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
