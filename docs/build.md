@@ -142,6 +142,10 @@ cmake --build build-cuda
 
 Kernel-bearing objects still need the offline Metal toolchain for metallib
 emission; kernel-free translation units compile and link without it.
+Host compiler options accept `-Xcompiler FLAGS`, `-Xcompiler=FLAGS`, and
+`--compiler-options` in either form, including comma-separated lists. They
+apply to host compilation and executable linking, for example
+`-Xcompiler=-fopenmp` when the selected Clang has an OpenMP runtime.
 `unit_cumetalc_cmake_toolkit` covers configure, compiler identification,
 and a kernel-free build/run.
 

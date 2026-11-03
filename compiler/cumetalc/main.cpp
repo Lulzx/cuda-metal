@@ -1315,8 +1315,11 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             }
             return 0;
         }
-        const std::string host_link = quote_shell(compiler.string()) + " " +
-            quote_shell(object_file.string()) + " -L " +
+        std::string host_link = quote_shell(compiler.string());
+        for (const auto& flag : options.host_compiler_flags) {
+            host_link += " " + quote_shell(flag);
+        }
+        host_link += " " + quote_shell(object_file.string()) + " -L " +
             quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
             quote_shell(layout.lib_dir.string()) + " -o " +
             quote_shell(options.output.string()) + " 2>&1";
@@ -1425,13 +1428,16 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
 
     // Link with an rpath so the produced binary runs without the caller exporting
     // DYLD_LIBRARY_PATH first.
-    const std::string link = quote_shell(compiler.string()) + " " +
-                             quote_shell(object_file.string()) + " " +
-                             quote_shell(registration_object.string()) + " " +
-                             quote_shell(metallib_object.string()) + " -L " +
-                             quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
-                             quote_shell(layout.lib_dir.string()) + " -o " +
-                             quote_shell(options.output.string()) + " 2>&1";
+    std::string link = quote_shell(compiler.string());
+    for (const auto& flag : options.host_compiler_flags) {
+        link += " " + quote_shell(flag);
+    }
+    link += " " + quote_shell(object_file.string()) + " " +
+            quote_shell(registration_object.string()) + " " +
+            quote_shell(metallib_object.string()) + " -L " +
+            quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
+            quote_shell(layout.lib_dir.string()) + " -o " +
+            quote_shell(options.output.string()) + " 2>&1";
 
     const CommandResult link_result = run_command_capture(link);
     if (!link_result.output.empty()) {
@@ -1538,14 +1544,23 @@ int run_nvcc_compat(int argc, char** argv) {
         else if (arg == "-D") defines.push_back(next());
         else if (arg.rfind("-D", 0) == 0 && arg.size() > 2)
             defines.push_back(arg.substr(2));
-        else if (arg == "-Xcompiler") {
-            const std::string flags = next();
+        else if (arg == "-Xcompiler" || arg == "--compiler-options" ||
+                 arg.rfind("-Xcompiler=", 0) == 0 ||
+                 arg.rfind("--compiler-options=", 0) == 0) {
+            const std::string flags = arg.find('=') == std::string::npos
+                                          ? next() : arg.substr(arg.find('=') + 1);
+            if (flags.empty()) {
+                std::cerr << "cumetalc: " << arg
+                          << " expects a host compiler argument\n";
+                return 2;
+            }
             std::size_t begin = 0;
             while (begin <= flags.size()) {
                 const std::size_t comma = flags.find(',', begin);
-                host_flags.push_back(flags.substr(
+                const std::string flag = flags.substr(
                     begin, comma == std::string::npos ? std::string::npos
-                                                      : comma - begin));
+                                                      : comma - begin);
+                if (!flag.empty()) host_flags.push_back(flag);
                 if (comma == std::string::npos) break;
                 begin = comma + 1;
             }
