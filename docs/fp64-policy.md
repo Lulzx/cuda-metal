@@ -21,6 +21,12 @@ backend is selected and no mode is given explicitly, the default is `fast48`
 legacy PTX path keeps the historical `native` default. An explicit
 `--fp64=native` with the typed backend is rejected rather than reinterpreted.
 
+The toolkit's `nvcc` entry point accepts the same `--fp64=MODE` names for
+source-to-executable and compile-only (`-c`) builds, with `fast48` as its default.
+Select the mode when compiling each CUDA source; linking existing objects does
+not change their arithmetic mode. Empty, missing, and unknown mode arguments
+are rejected.
+
 | Mode | Contract | Range | Current role |
 | --- | --- | --- | --- |
 | `fast48` | FP32-pair arithmetic, approximately 48 significand bits | binary32 exponent envelope | Runtime default; `emulate` is a compatibility alias |

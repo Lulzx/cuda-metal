@@ -1524,6 +1524,7 @@ int run_nvcc_compat(int argc, char** argv) {
     std::vector<std::string> include_dirs;
     std::vector<std::string> defines;
     std::vector<std::string> host_flags;
+    cumetal::ptx::Fp64Mode fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
     bool compile_only = false;
     for (std::size_t i = 0; i < args.size(); ++i) {
         const std::string& arg = args[i];
@@ -1548,6 +1549,22 @@ int run_nvcc_compat(int argc, char** argv) {
                                                       : comma - begin));
                 if (comma == std::string::npos) break;
                 begin = comma + 1;
+            }
+        } else if (arg == "--fp64") {
+            std::cerr << "--fp64 expects =MODE\n";
+            return 2;
+        } else if (arg.rfind("--fp64=", 0) == 0) {
+            const std::string value = arg.substr(7);
+            if (value == "native") fp64_mode = cumetal::ptx::Fp64Mode::kNative;
+            else if (value == "emulate" || value == "fast48")
+                fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
+            else if (value == "wide48") fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
+            else if (value == "ieee64") fp64_mode = cumetal::ptx::Fp64Mode::kIEEE64;
+            else if (value == "warn") fp64_mode = cumetal::ptx::Fp64Mode::kWarn;
+            else {
+                std::cerr << "invalid --fp64 mode: " << value
+                          << " (valid: fast48, wide48, ieee64, native, emulate, warn)\n";
+                return 2;
             }
         } else if (arg == "-x") (void)next();
         else if (arg == "--keep-dir" || arg == "-MT" || arg == "-MF" ||
@@ -1614,6 +1631,7 @@ int run_nvcc_compat(int argc, char** argv) {
         driver.include_dirs.assign(include_dirs.begin(), include_dirs.end());
         driver.defines = defines;
         driver.host_compiler_flags = host_flags;
+        driver.fp64_mode = fp64_mode;
         const int driver_result = run_executable_driver(driver, argv[0]);
         if (driver_result == 0 && has("-v")) emit_nvcc_verbose(argv[0], output);
         return driver_result;
@@ -1625,6 +1643,7 @@ int run_nvcc_compat(int argc, char** argv) {
         driver.include_dirs.assign(include_dirs.begin(), include_dirs.end());
         driver.defines = defines;
         driver.host_compiler_flags = host_flags;
+        driver.fp64_mode = fp64_mode;
         const int driver_result = run_executable_driver(driver, argv[0]);
         if (driver_result == 0 && has("-v")) emit_nvcc_verbose(argv[0], output);
         return driver_result;
