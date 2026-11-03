@@ -247,10 +247,13 @@ private:
                     }
                     out_ << "}";
                 } else if constexpr (std::is_same_v<Node, MslCast>) {
-                    // Metal rejects `as_type` between pointer types. A bitcast
-                    // that lands on a pointer is a reinterpretation of the
-                    // address, which is what reinterpret_cast spells.
-                    if (node.bitcast && node.operand->type.kind == MslTypeKind::kPointer &&
+                    // Metal pointer casts preserve address spaces; nullptr
+                    // requires a conversion because it has no address to reinterpret.
+                    const auto* literal = std::get_if<MslLiteral>(&node.operand->value);
+                    if (node.target.kind == MslTypeKind::kPointer && literal != nullptr &&
+                        literal->spelling == "nullptr") {
+                        out_ << "static_cast<" << may_alias_spelling(node.target) << ">(nullptr)";
+                    } else if (node.bitcast && node.operand->type.kind == MslTypeKind::kPointer &&
                         node.target.kind != MslTypeKind::kPointer &&
                         node.target != MslType::uint(64) && node.target != MslType::sint(64)) {
                         errors_.push_back("pointer bitcast requires a pointer or 64-bit integer target");

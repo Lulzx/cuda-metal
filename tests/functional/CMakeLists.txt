@@ -4166,6 +4166,17 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
         PROPERTIES SKIP_RETURN_CODE 77)
 
     add_test(
+        NAME functional_cumetalc_native_aot_null_pointer
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/null_pointer_comparison.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_null_pointer
+    )
+    set_tests_properties(functional_cumetalc_native_aot_null_pointer
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    add_test(
         NAME functional_cumetalc_native_aot_symbols
         COMMAND bash
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
