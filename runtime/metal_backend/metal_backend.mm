@@ -342,6 +342,34 @@ struct ResourceFenceReservation {
     std::uint64_t signal_value = 0;
 };
 
+class EventMarkerImpl final : public EventMarker {
+public:
+    explicit EventMarkerImpl(id<MTLCommandBuffer> command_buffer) : command_buffer_(command_buffer) {}
+
+    cudaError_t gpu_timestamp(double* seconds, std::string* error_message) const override {
+        const auto status = [command_buffer_ status];
+        if (status != MTLCommandBufferStatusCompleted && status != MTLCommandBufferStatusError) {
+            return cudaErrorNotReady;
+        }
+        const cudaError_t result = check_command_buffer_status(command_buffer_, error_message);
+        if (result != cudaSuccess) {
+            return result;
+        }
+        *seconds = [command_buffer_ GPUEndTime];
+        if (*seconds <= 0.0) {
+            if (error_message != nullptr) {
+                *error_message = "Metal event marker has no GPU timestamp";
+            }
+            return cudaErrorNotSupported;
+        }
+        return cudaSuccess;
+    }
+
+private:
+    // Events outlive the stream's completed-command-buffer pruning.
+    id<MTLCommandBuffer> command_buffer_;
+};
+
 class StreamImpl final : public Stream {
 public:
     StreamImpl(id<MTLCommandQueue> queue,
@@ -2148,6 +2176,7 @@ cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
 
 cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
                                  std::uint64_t* out_ticket,
+                                 std::shared_ptr<EventMarker>* out_marker,
                                  std::string* error_message) {
     if (out_ticket == nullptr) {
         if (error_message != nullptr) {
@@ -2183,6 +2212,9 @@ cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
         const auto fences = encode_submission_waits(marker, stream_impl, {});
         encode_resource_signals(marker, fences);
         *out_ticket = stream_impl->add_pending(marker);
+        if (out_marker != nullptr) {
+            *out_marker = std::make_shared<EventMarkerImpl>(marker);
+        }
         [marker commit];
     }
     return cudaSuccess;
