@@ -563,6 +563,14 @@ add_test(
 )
 
 add_test(
+    NAME unit_cumetalc_nvcc_options_file
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_nvcc_options_file_test.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_BINARY_DIR}/nvcc_options_file_probe
+)
+
+add_test(
     NAME unit_cumetalc_cmake_toolkit
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_cmake_toolkit_test.sh
