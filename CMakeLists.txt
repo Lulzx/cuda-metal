@@ -634,6 +634,11 @@ target_compile_options(cumetal_fft_bench
 )
 
 if(APPLE)
+    # Installation must not rewrite the ad-hoc signed executable.
+    set_target_properties(cumetal_bench PROPERTIES
+        BUILD_WITH_INSTALL_RPATH TRUE
+        INSTALL_RPATH "@loader_path;@loader_path/../lib"
+    )
     foreach(cumetal_tool_target IN ITEMS
             cumetal_ptxas_shim
             cumetal_fatbinary_shim
