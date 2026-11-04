@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Compare CUDA event intervals with independent Metal command-buffer durations."""
 
+import math
 import os
 import re
 import subprocess
@@ -27,13 +28,16 @@ for line in result.stdout.splitlines():
         kernels = []
     elif interval and line.startswith("CUMETAL_PROVENANCE event=kernel_launch "):
         duration = re.search(r"duration_ns=(-?\d+)", line)
-        if "launch_success=true" not in line or duration is None or int(duration[1]) <= 0:
+        if ("device=apple_gpu" not in line or "launch_success=true" not in line
+                or duration is None or int(duration[1]) <= 0):
             raise SystemExit("FAIL: measured kernel lacks successful GPU timing")
         kernels.append(int(duration[1]))
     elif end:
         if interval != end[1] or len(kernels) != 1:
             raise SystemExit("FAIL: event interval must contain one measured GPU kernel")
         elapsed_ms = float(end[2])
+        if not math.isfinite(elapsed_ms) or elapsed_ms < 0:
+            raise SystemExit("FAIL: CUDA event interval must be finite and nonnegative")
         gpu_ms = sum(kernels) / 1e6
         # Float rounding and the GPU timestamp resolution must not hide missing GPU work.
         if elapsed_ms + max(0.001, gpu_ms * 0.001) < gpu_ms:
