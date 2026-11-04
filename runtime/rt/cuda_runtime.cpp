@@ -370,7 +370,7 @@ struct CUevent_st {
     bool timing_valid = false;
     std::shared_ptr<cumetal::metal_backend::Stream> stream;
     std::uint64_t ticket = 0;
-    std::chrono::steady_clock::time_point timestamp{};
+    std::shared_ptr<cumetal::metal_backend::EventMarker> marker;
     // During stream capture an event carries the graph frontier to a stream
     // that waits on it. CUDA uses this to join event-linked streams into the
     // same capture. The graph owns the event-independent node lifetime.
@@ -1802,10 +1802,6 @@ cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion)
     if (stream == nullptr || ticket == 0) {
         std::lock_guard<std::mutex> lock(event->mutex);
         event->complete = true;
-        if (!event->disable_timing && !event->timing_valid) {
-            event->timestamp = std::chrono::steady_clock::now();
-            event->timing_valid = true;
-        }
         return cudaSuccess;
     }
 
@@ -1830,10 +1826,6 @@ cudaError_t update_event_completion(cudaEvent_t event, bool wait_for_completion)
 
     std::lock_guard<std::mutex> lock(event->mutex);
     event->complete = true;
-    if (!event->disable_timing && !event->timing_valid) {
-        event->timestamp = std::chrono::steady_clock::now();
-        event->timing_valid = true;
-    }
     return cudaSuccess;
 }
 
@@ -5995,10 +5987,11 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
     }
 
     std::uint64_t marker_ticket = 0;
+    std::shared_ptr<cumetal::metal_backend::EventMarker> marker;
     (void)legacy_stream;
     std::string error;
     const cudaError_t marker_status =
-        cumetal::metal_backend::stream_record_marker(backend_stream, &marker_ticket, &error);
+        cumetal::metal_backend::stream_record_marker(backend_stream, &marker_ticket, &marker, &error);
     if (marker_status != cudaSuccess) {
         return fail(marker_status);
     }
@@ -6011,9 +6004,7 @@ cudaError_t cudaEventRecord(cudaEvent_t event, cudaStream_t stream) {
         event->complete = false;
         event->timing_valid = !event->disable_timing;
         event->capture_graph = nullptr;
-        if (!event->disable_timing) {
-            event->timestamp = std::chrono::steady_clock::now();
-        }
+        event->marker = std::move(marker);
     }
 
     return fail(cudaSuccess);
@@ -6053,24 +6044,38 @@ cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end) 
         return fail(end_status);
     }
 
-    std::chrono::steady_clock::time_point start_timestamp;
-    std::chrono::steady_clock::time_point end_timestamp;
+    std::shared_ptr<cumetal::metal_backend::EventMarker> start_marker;
+    std::shared_ptr<cumetal::metal_backend::EventMarker> end_marker;
     {
         std::lock_guard<std::mutex> lock(start->mutex);
         if (start->disable_timing || !start->recorded_once || !start->timing_valid) {
             return fail(cudaErrorInvalidValue);
         }
-        start_timestamp = start->timestamp;
+        start_marker = start->marker;
     }
     {
         std::lock_guard<std::mutex> lock(end->mutex);
         if (end->disable_timing || !end->recorded_once || !end->timing_valid) {
             return fail(cudaErrorInvalidValue);
         }
-        end_timestamp = end->timestamp;
+        end_marker = end->marker;
     }
 
-    *ms = std::chrono::duration<float, std::milli>(end_timestamp - start_timestamp).count();
+    if (start_marker == nullptr || end_marker == nullptr) {
+        return fail(cudaErrorInvalidValue);
+    }
+    double start_seconds = 0.0;
+    double end_seconds = 0.0;
+    std::string error;
+    cudaError_t status = start_marker->gpu_timestamp(&start_seconds, &error);
+    if (status != cudaSuccess) {
+        return fail(status);
+    }
+    status = end_marker->gpu_timestamp(&end_seconds, &error);
+    if (status != cudaSuccess) {
+        return fail(status);
+    }
+    *ms = static_cast<float>((end_seconds - start_seconds) * 1000.0);
     return fail(cudaSuccess);
 }
 

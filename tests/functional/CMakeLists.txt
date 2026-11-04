@@ -2615,7 +2615,8 @@ set_tests_properties(functional_runtime_async_memops PROPERTIES SKIP_RETURN_CODE
 
 add_test(
     NAME functional_runtime_event
-    COMMAND bash
+    COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_event.py
+            bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
             ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
             $<TARGET_FILE:cumetal_runtime_event_test>

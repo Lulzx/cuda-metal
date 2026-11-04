@@ -26,6 +26,12 @@ public:
     virtual ~Stream() = default;
 };
 
+class EventMarker {
+public:
+    virtual ~EventMarker() = default;
+    virtual cudaError_t gpu_timestamp(double* seconds, std::string* error_message) const = 0;
+};
+
 struct DeviceProperties {
     std::string name;
     std::size_t total_global_mem = 0;
@@ -129,6 +135,7 @@ cudaError_t stream_wait_ticket(const std::shared_ptr<Stream>& stream,
                                std::string* error_message);
 cudaError_t stream_record_marker(const std::shared_ptr<Stream>& stream,
                                  std::uint64_t* out_ticket,
+                                 std::shared_ptr<EventMarker>* out_marker,
                                  std::string* error_message);
 cudaError_t enqueue_host_function(const std::shared_ptr<Stream>& stream,
                                   std::function<void()> function,

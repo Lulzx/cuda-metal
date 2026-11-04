@@ -12,7 +12,7 @@
 
 namespace {
 
-constexpr std::size_t kElementCount = 1u << 16;
+constexpr std::size_t kElementCount = 1u << 24;
 constexpr std::size_t kThreadsPerBlock = 256;
 
 bool nearly_equal(float a, float b) {
@@ -90,6 +90,12 @@ int main(int argc, char** argv) {
         return 1;
     }
 
+    float fresh_elapsed_ms = 0.0f;
+    if (cudaEventElapsedTime(&fresh_elapsed_ms, start, end) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: elapsed time should reject unrecorded events\n");
+        return 1;
+    }
+
     cudaEvent_t legacy_marker = nullptr;
     std::atomic<bool> host_store_complete{false};
     if (cudaEventCreate(&legacy_marker) != cudaSuccess ||
@@ -106,11 +112,6 @@ int main(int argc, char** argv) {
     }
     if (cudaEventDestroy(legacy_marker) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaEventDestroy(legacy_marker) failed\n");
-        return 1;
-    }
-
-    if (cudaEventRecord(start, nullptr) != cudaSuccess) {
-        std::fprintf(stderr, "FAIL: cudaEventRecord(start) failed\n");
         return 1;
     }
 
@@ -137,6 +138,20 @@ int main(int argc, char** argv) {
                                                    kThreadsPerBlock),
                         1,
                         1);
+
+    // Warm the pipeline so event timing is compared with GPU work, without compilation.
+    if (cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, 0, stream) != cudaSuccess ||
+        cudaStreamSynchronize(stream) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: warmup launch failed\n");
+        return 1;
+    }
+
+    std::fprintf(stderr, "EVENT_TIMING_BEGIN cross_stream\n");
+    std::fflush(stderr);
+    if (cudaEventRecord(start, nullptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaEventRecord(start) failed\n");
+        return 1;
+    }
 
     if (cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, 0, stream) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaLaunchKernel failed\n");
@@ -172,6 +187,26 @@ int main(int argc, char** argv) {
     if (!(elapsed_ms >= 0.0f)) {
         std::fprintf(stderr, "FAIL: cudaEventElapsedTime produced negative time\n");
         return 1;
+    }
+
+    std::fprintf(stderr, "EVENT_TIMING_END cross_stream elapsed_ms=%.9g\n", elapsed_ms);
+    std::fflush(stderr);
+
+    for (cudaStream_t timing_stream : {stream, static_cast<cudaStream_t>(nullptr)}) {
+        const char* label = timing_stream ? "explicit_rerecord" : "default_rerecord";
+        std::fprintf(stderr, "EVENT_TIMING_BEGIN %s\n", label);
+        std::fflush(stderr);
+        if (cudaEventRecord(start, timing_stream) != cudaSuccess ||
+            cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, 0, timing_stream) != cudaSuccess ||
+            cudaEventRecord(end, timing_stream) != cudaSuccess ||
+            cudaEventSynchronize(end) != cudaSuccess ||
+            cudaEventQuery(start) != cudaSuccess || cudaEventQuery(end) != cudaSuccess ||
+            cudaEventElapsedTime(&elapsed_ms, start, end) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: re-recorded event timing failed\n");
+            return 1;
+        }
+        std::fprintf(stderr, "EVENT_TIMING_END %s elapsed_ms=%.9g\n", label, elapsed_ms);
+        std::fflush(stderr);
     }
 
     if (cudaEventRecord(disable_timing, stream) != cudaSuccess ||
