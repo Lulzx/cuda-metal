@@ -7023,7 +7023,7 @@ class GenericLlvmEmitter {
             {"__nv_floorf", "llvm.floor.f32", 1},
             {"__nv_ceilf", "llvm.ceil.f32", 1},
             {"__nv_truncf", "llvm.trunc.f32", 1},
-            {"__nv_roundf", "llvm.round.f32", 1},
+            {"__nv_roundf", "cm_libdevice_round", 1},
             {"__nv_rintf", "llvm.rint.f32", 1},
             {"__nv_nearbyintf", "llvm.nearbyint.f32", 1},
             {"__nv_powf", "air.fast_pow.f32", 2},

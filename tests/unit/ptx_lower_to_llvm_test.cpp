@@ -583,6 +583,7 @@ $L_done:
     st.b32 [%rd2], %r1;
     st.param.b32 [call_arg], %r1;
     call.uni (call_ret), __nv_sqrtf, (call_arg);
+    call.uni (call_ret), __nv_roundf, (call_arg);
     call.uni (call_ret), __nv_rsqrtf, (call_arg);
     call.uni (call_ret), __nv_acosf, (call_arg);
     ld.param.b32 %r1, [call_ret];
@@ -710,6 +711,14 @@ $L_done:
                     contains(vector_memory_lowered.llvm_ir, "frexp_exponent_ptr") &&
                     contains(vector_memory_lowered.llvm_ir, "4602678819172646912"),
                 "__nv_frexp decomposes binary64 bits and stores the exponent")) {
+        return 1;
+    }
+    if (!expect(contains(vector_memory_lowered.llvm_ir,
+                         "declare float @cm_libdevice_round(float)") &&
+                    contains(vector_memory_lowered.llvm_ir,
+                             "call float @cm_libdevice_round(float") &&
+                    !contains(vector_memory_lowered.llvm_ir, "@llvm.round.f32"),
+                "__nv_roundf uses the linked Metal helper instead of llvm.round")) {
         return 1;
     }
     if (!expect(contains(vector_memory_lowered.llvm_ir, "@air.fast_sin.f32") &&
