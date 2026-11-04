@@ -1491,7 +1491,7 @@ void emit_nvcc_verbose(const char* argv0, const std::string& output) {
     std::cout << "#$ LIBRARIES= -L" << (toolkit / "lib64").string()
               << " -lcudart\n";
     std::cout << "#$ INCLUDES= -I" << (toolkit / "include").string() << "\n";
-    std::cout << "#$ SYSTEM_INCLUDES= -I" << (toolkit / "include").string()
+    std::cout << "#$ SYSTEM_INCLUDES= -isystem" << (toolkit / "include").string()
               << "\n";
     std::cout << "#$ TARGET= -arch compute_80\n";
     std::cout << "#$ " << compiler.string() << " -o " << output << " -L"

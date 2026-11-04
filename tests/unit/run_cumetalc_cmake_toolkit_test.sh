@@ -27,7 +27,10 @@ mkdir -p "${work}/src"
 cat > "${work}/src/CMakeLists.txt" <<'EOF'
 cmake_minimum_required(VERSION 3.24)
 project(cumetal_cmake_sample CUDA CXX)
+find_package(CUDAToolkit REQUIRED)
 add_executable(host_only host_only.cu)
+add_executable(toolkit_link EXCLUDE_FROM_ALL host_only.cu)
+target_link_libraries(toolkit_link PRIVATE CUDA::cudart)
 add_executable(vadd main.cu)
 EOF
 cat > "${work}/src/host_only.cu" <<'EOF'
