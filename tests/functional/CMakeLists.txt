@@ -4395,3 +4395,13 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
             RESOURCE_LOCK cumetal_install_manifest
     )
 endif()
+
+add_test(
+    NAME functional_cumetalc_nvcc_host_options
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_nvcc_host_options.sh
+            ${CMAKE_BINARY_DIR}/cumetal-toolkit/bin/nvcc
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/nvcc_host_openmp.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_nvcc_host_options
+)
+set_tests_properties(functional_cumetalc_nvcc_host_options PROPERTIES SKIP_RETURN_CODE 77)
