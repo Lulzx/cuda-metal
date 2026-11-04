@@ -1079,6 +1079,13 @@ MslFunction make_grid_sync_helper() {
             "atomic_load_explicit",
             {generation, order("memory_order_relaxed")}, MslType::uint()),
         true));
+    // The generation snapshot must complete before this group's arrival is
+    // visible. Relaxed atomics to different addresses may be reordered; if
+    // the increment lands first, the last group can flip the generation
+    // before this load, the snapshot then already holds the new value and
+    // the spin below never ends. The fence pairs with the last group's fence
+    // before its generation flip.
+    leader.push_back(device_fence());
     leader.push_back(MslStatement::variable(
         MslType::uint(), "arrived",
         MslExpression::binary(

@@ -3111,6 +3111,19 @@ int main() {
     } else if (!ok) {
         std::cerr << clock_grid.source << "\n";
     }
+    {
+        // A grid-sync leader that publishes its arrival before snapshotting
+        // the generation can miss the flip and spin forever (#175).
+        const std::string& source = clock_grid.source;
+        const std::size_t snapshot = source.find(
+            "observed_generation = atomic_load_explicit(&barrier[1u]");
+        const std::size_t arrival = source.find(
+            "atomic_fetch_add_explicit(&barrier[0u]", snapshot);
+        const std::size_t fence = source.find("atomic_thread_fence", snapshot);
+        ok &= expect(snapshot != std::string::npos && arrival != std::string::npos &&
+                         fence != std::string::npos && fence < arrival,
+                     "grid-sync leader fences its generation snapshot before arriving");
+    }
 
     const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(
         kNvvmOversizedExternalConstant, "oversized-constant.ll", "read_large");
