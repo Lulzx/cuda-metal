@@ -8479,7 +8479,7 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         common::CompileTrace trace("ptx_normalize_function", 0, entry.name);
         detail::normalize_vector_parameter_transfers(&entry);
     }
-    {
+    if (ptx.find(".callprototype") != std::string_view::npos) {
         // Indirect-call prototypes are skipped by the PTX parser; recover
         // their signatures from the source text for candidate matching.
         static const std::regex prototype_pattern(
