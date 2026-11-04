@@ -30,6 +30,12 @@
   thread. Kernels that only read it, such as large functors, keep reading the
   shared bytes.
 - Stream priorities are reported as zero and are not Metal priority queues.
+- `cudaEventElapsedTime` subtracts the GPU end times of the empty Metal
+  command buffers that `cudaEventRecord` commits. Intervals cover GPU work
+  between the two records, including any idle gap between command buffers,
+  and use Metal's command-buffer timestamps rather than per-kernel counters.
+  A record whose command buffer reports no GPU timestamp makes the query
+  return `cudaErrorNotSupported`.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
   but values are not GPU cycles and cannot be used for cycle-accurate timing.

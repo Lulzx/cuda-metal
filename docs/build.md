@@ -146,6 +146,10 @@ Host compiler options accept `-Xcompiler FLAGS`, `-Xcompiler=FLAGS`, and
 `--compiler-options` in either form, including comma-separated lists. They
 apply to host compilation and executable linking, for example
 `-Xcompiler=-fopenmp` when the selected Clang has an OpenMP runtime.
+`-isystem DIR` reaches both the host and device compiles, and
+`--options-file`/`-optf` files (CMake's response files) are expanded before
+any other argument is parsed. `--fp64=MODE` selects the FP64 policy per
+translation unit; see [fp64-policy.md](fp64-policy.md).
 `unit_cumetalc_cmake_toolkit` covers configure, compiler identification,
 and a kernel-free build/run.
 
