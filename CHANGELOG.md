@@ -6,6 +6,43 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-04
+
+### Fixed
+
+- **CUDA event timing measures GPU execution.** `cudaEventElapsedTime`
+  subtracted CPU timestamps taken while work was being submitted, so a
+  benchmark reported 0.09 ms for ~112 ms of GPU work. Intervals now come from
+  the GPU end times of each record's Metal command buffer (#199).
+- **Cooperative grid sync could hang.** The typed backend's `grid.sync()`
+  leader published its arrival before snapshotting the barrier generation,
+  with no fence between the relaxed atomics. If reordered, it could miss the
+  release and spin forever (#175; awaiting confirmation on M1 Pro).
+- **System atomics compile from source.** Clang 22's 32-bit
+  `llvm.nvvm.atomic.*.sys` intrinsics import into the coherent-UMA system
+  atomic lowering, and unsigned `atomicMin_system`/`atomicMax_system` keep
+  unsigned comparisons instead of Clang's signed intrinsics (#177).
+- **`roundf` keeps its edge cases.** Legacy `__nv_roundf` no longer emits
+  `llvm.round.f32`, which could fail Metal pipeline creation, and the typed
+  path no longer loses negative zero. Both route through one bit-exact
+  helper (#178).
+- **Valid Metal source** for null-pointer comparisons (#191) and for LLVM
+  aggregates with template-like names such as CUB `BlockReduce` (#197).
+- **nvcc drop-in for real CMake projects.** The nvcc driver now accepts
+  `--fp64=MODE` (#192), `-isystem` (#195), `-Xcompiler=`/`--compiler-options`
+  with flags forwarded to linking too (#194), and `--options-file`/`-optf`
+  response files (#196). It also reports `SYSTEM_INCLUDES` as `-isystem`, so
+  `CUDA::cudart` no longer imports an invalid include path (#193).
+- **Installed `cumetal_bench` runs.** Installation no longer rewrites its
+  RPATH and invalidates its ad-hoc signature (#190).
+
+### Changed
+
+- PTX import skips the indirect-call prototype scan when no
+  `.callprototype` is present, which was slow on long generated names (#200).
+- `--fp64` mode names are parsed in one place for `cumetalc`, the nvcc
+  driver and `CUMETAL_FP64_MODE`.
+
 ## [0.7.0] - 2026-10-28
 
 ### Added

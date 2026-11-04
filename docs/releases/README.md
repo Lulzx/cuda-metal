@@ -2,6 +2,8 @@
 
 [Documentation index](../README.md)
 
+- [v0.7.1](v0.7.1.md) — GPU-timed CUDA events, a grid-sync fence, system
+  atomics and `roundf` on both backends, and nvcc options from real CMake builds
 - [v0.7.0](v0.7.0.md) — cumetal-ir default everywhere, tensor cores from raw
   PTX, warp hardware reductions, single-pass driver, and CuPy/LAMMPS workloads
 - [v0.6.0](v0.6.0.md) — typed PTX import stack, AMReX and PhysX PBD on the Apple GPU,
