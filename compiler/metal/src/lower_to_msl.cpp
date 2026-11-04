@@ -5281,7 +5281,9 @@ struct AstLowerer {
                 const std::string prefix =
                     operation.attributes.at("fp64_mode") == "fast48"
                         ? "cm_fp64_fast_"
-                        : "vf64_";
+                        : operation.attributes.at("fp64_mode") == "wide48"
+                            ? "cm_fp64_wide_"
+                            : "vf64_";
                 const auto boolean = [&](const char* op, MslExpr a, MslExpr b) {
                     return MslExpression::binary(op, std::move(a), std::move(b), MslType::boolean());
                 };

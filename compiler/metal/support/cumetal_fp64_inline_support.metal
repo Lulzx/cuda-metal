@@ -257,6 +257,36 @@ inline ulong vf64_fma_round(ulong a, ulong b, ulong c, uint mode) {
     return soft_fma64_status(a, b, c, mode, flags);
 }
 
+// Normalize before comparing scales: rounding can carry a significand to 2.
+inline bool cm_fp64_wide_eq(ulong a, ulong b) {
+    wide_f64 left = wide_normalize(wide_unpack64(a));
+    wide_f64 right = wide_normalize(wide_unpack64(b));
+    return left.exponent == right.exponent &&
+        vf64_eq(pack_binary64(left.significand), pack_binary64(right.significand));
+}
+
+inline bool cm_fp64_wide_less(ulong a, ulong b, bool or_equal) {
+    wide_f64 left = wide_normalize(wide_unpack64(a));
+    wide_f64 right = wide_normalize(wide_unpack64(b));
+    ulong ls = pack_binary64(left.significand);
+    ulong rs = pack_binary64(right.significand);
+    if (wide_is_special(left) || wide_is_special(right) ||
+        wide_is_zero(left) || wide_is_zero(right) || left.exponent == right.exponent) {
+        return or_equal ? vf64_le(ls, rs) : vf64_lt(ls, rs);
+    }
+    bool negative = (ls >> 63) != 0;
+    if (((ls ^ rs) >> 63) != 0) return negative;
+    return negative ? left.exponent > right.exponent : left.exponent < right.exponent;
+}
+
+inline bool cm_fp64_wide_lt(ulong a, ulong b) {
+    return cm_fp64_wide_less(a, b, false);
+}
+
+inline bool cm_fp64_wide_le(ulong a, ulong b) {
+    return cm_fp64_wide_less(a, b, true);
+}
+
 inline ulong vf64_wide_add(ulong a, ulong b) {
     return wide_pack64(wide_add(wide_unpack64(a), wide_unpack64(b)));
 }

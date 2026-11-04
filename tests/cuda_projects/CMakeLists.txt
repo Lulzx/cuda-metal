@@ -621,6 +621,28 @@ foreach(fp64_mode fast48 wide48 ieee64)
     )
 endforeach()
 
+foreach(fp64_mode fast48 wide48 ieee64)
+    add_test(
+        NAME functional_cuda_projects_fp64_comparison_${fp64_mode}
+        COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+            ${CMAKE_SOURCE_DIR}
+            ${CMAKE_CURRENT_BINARY_DIR}
+            fp64_comparison
+            fp64_comparison.cu
+            fp64_comparison_${fp64_mode}
+            "PASS: fp64 comparisons and endpoint progress on Apple GPU"
+    )
+    set_tests_properties(
+        functional_cuda_projects_fp64_comparison_${fp64_mode}
+        PROPERTIES
+            SKIP_RETURN_CODE 77
+            RUN_SERIAL TRUE
+            ENVIRONMENT
+                "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=${fp64_mode}"
+    )
+endforeach()
+
 # Double libdevice transcendentals call VF64's correctly rounded functions
 # under ieee64 (the PTX path; tests/functional covers the NVVM path).
 add_test(
