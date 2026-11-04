@@ -2794,14 +2794,28 @@ static __device__ __forceinline__ int atomicMin_system(int* ptr, int val) {
 }
 static __device__ __forceinline__ unsigned int atomicMin_system(unsigned int* ptr,
                                                                  unsigned int val) {
-    return __uAtomicMin_system(ptr, val);
+    // Older Clang maps unsigned scoped min/max to signed NVVM intrinsics
+    // (llvm-project#200735). Keep the unsigned comparison in source instead.
+    unsigned int old = __uAtomicCAS_system(ptr, 0u, 0u);
+    unsigned int assumed;
+    do {
+        assumed = old;
+        old = __uAtomicCAS_system(ptr, assumed, assumed < val ? assumed : val);
+    } while (old != assumed);
+    return old;
 }
 static __device__ __forceinline__ int atomicMax_system(int* ptr, int val) {
     return __iAtomicMax_system(ptr, val);
 }
 static __device__ __forceinline__ unsigned int atomicMax_system(unsigned int* ptr,
                                                                  unsigned int val) {
-    return __uAtomicMax_system(ptr, val);
+    unsigned int old = __uAtomicCAS_system(ptr, 0u, 0u);
+    unsigned int assumed;
+    do {
+        assumed = old;
+        old = __uAtomicCAS_system(ptr, assumed, assumed > val ? assumed : val);
+    } while (old != assumed);
+    return old;
 }
 static __device__ __forceinline__ int atomicCAS_system(int* ptr, int cmp, int val) {
     return __iAtomicCAS_system(ptr, cmp, val);

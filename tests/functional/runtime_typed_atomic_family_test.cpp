@@ -61,7 +61,55 @@ int run_device_atomics(const std::string& metallib_path) {
     return 0;
 }
 
+int run_system_atomic_values(const std::string& metallib_path) {
+    constexpr std::array<unsigned, 22> initial = {
+        0xfffffff7u, 0xfffffffdu, 0xfffffff5u, 0x80000001u,
+        4, 0xfffffffcu, 0x80000001u, 3,
+        2, 3, 8, 2, 0, 8, 19, 19, 0xffu, 0x80000000u,
+        0xffffffffu, 0x80000001u, 0x80000001u, 3,
+    };
+    constexpr std::array<unsigned, 22> expected = {
+        0xfffffffbu, 2, 0xfffffff9u, 0xfffffffdu,
+        0xfffffffbu, 5, 2, 0x80000003u,
+        3, 0, 0, 1, 3, 3, 23, 19, 0x3cu, 0x80000012u,
+        0xffffffaau, 0x80000003u, 0x80000001u, 2,
+    };
+    unsigned* slots = nullptr;
+    if (cudaMallocManaged(reinterpret_cast<void**>(&slots),
+                          2 * sizeof(initial)) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: system atomic values allocation failed\n");
+        return 1;
+    }
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        slots[i] = initial[i];
+        slots[initial.size() + i] = 0xdeadbeefu;
+    }
+    if (!launch(metallib_path, "system_atomic_values", slots, dim3(1), dim3(1)) ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: system atomic values launch failed\n");
+        cudaFree(slots);
+        return 1;
+    }
+    bool ok = true;
+    for (std::size_t i = 0; i < initial.size(); ++i) {
+        if (slots[i] != expected[i] || slots[initial.size() + i] != initial[i]) {
+            std::fprintf(stderr,
+                         "FAIL: system atomic %zu final 0x%08x expected 0x%08x, "
+                         "old 0x%08x expected 0x%08x\n",
+                         i, slots[i], expected[i], slots[initial.size() + i], initial[i]);
+            ok = false;
+        }
+    }
+    cudaFree(slots);
+    if (!ok) return 1;
+    std::printf("PASS: typed system atomics return old values and handle wrap and CAS edges\n");
+    return 0;
+}
+
 int run_system_atomics(const std::string& metallib_path) {
+    constexpr int kBlocks = 32;
+    constexpr int kThreads = 64;
+    constexpr int kTotal = kBlocks * kThreads;
     int* slots = nullptr;
     if (cudaMallocManaged(reinterpret_cast<void**>(&slots), 10 * sizeof(int)) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaMallocManaged failed\n");
@@ -72,7 +120,7 @@ int run_system_atomics(const std::string& metallib_path) {
     slots[3] = 999;
     slots[7] = 0xff;
     if (!launch(metallib_path, "_Z20system_atomic_kernelPi", slots,
-                dim3(1, 1, 1), dim3(32, 1, 1))) {
+                dim3(kBlocks, 1, 1), dim3(kThreads, 1, 1))) {
         std::fprintf(stderr, "FAIL: typed system atomic launch failed\n");
         return 1;
     }
@@ -82,8 +130,14 @@ int run_system_atomics(const std::string& metallib_path) {
         return 1;
     }
 
-    const std::array<int, 10> expected = {103, 0, 31, 0, 14, 106, 77, 0x3c, 0x12, 0x55};
-    bool ok = slots[1] >= 0 && slots[1] < 32;
+    const std::array<int, 10> expected = {
+        3 * kTotal + 7, 0, kTotal - 1, 0, kTotal % 18,
+        (138 - kTotal % 138) % 138, 77, 0x3c, 0x12, 0x55,
+    };
+    bool ok = slots[1] >= 0 && slots[1] < kTotal;
+    if (!ok) {
+        std::fprintf(stderr, "FAIL: typed system exchange got invalid thread id %d\n", slots[1]);
+    }
     for (std::size_t i = 0; i < expected.size(); ++i) {
         if (i == 1) continue;
         if (slots[i] != expected[i]) {
@@ -95,7 +149,7 @@ int run_system_atomics(const std::string& metallib_path) {
     }
     cudaFree(slots);
     if (!ok) return 1;
-    std::printf("PASS: typed system atomics interoperate with host atomic access\n");
+    std::printf("PASS: typed system atomics handle multi-block contention and host atomic access\n");
     return 0;
 }
 
@@ -141,7 +195,7 @@ int run_fence(const std::string& metallib_path) {
 
 int main(int argc, char** argv) {
     if (argc != 3) {
-        std::fprintf(stderr, "usage: %s <metallib> <device|system|fence>\n", argv[0]);
+        std::fprintf(stderr, "usage: %s <metallib> <device|system|system-values|fence>\n", argv[0]);
         return 64;
     }
     if (!std::filesystem::exists(argv[1])) {
@@ -155,6 +209,7 @@ int main(int argc, char** argv) {
     const std::string mode = argv[2];
     if (mode == "device") return run_device_atomics(argv[1]);
     if (mode == "system") return run_system_atomics(argv[1]);
+    if (mode == "system-values") return run_system_atomic_values(argv[1]);
     if (mode == "fence") return run_fence(argv[1]);
     std::fprintf(stderr, "invalid mode: %s\n", argv[2]);
     return 64;

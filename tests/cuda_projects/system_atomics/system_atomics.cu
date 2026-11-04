@@ -3,7 +3,7 @@
 #include <cstdio>
 
 __global__ void system_atomic_kernel(int* slots) {
-    const int tid = static_cast<int>(threadIdx.x);
+    const int tid = static_cast<int>(blockIdx.x * blockDim.x + threadIdx.x);
     atomicAdd_system(&slots[0], 3);
     atomicExch_system(&slots[1], tid);
     atomicMax_system(&slots[2], tid);
@@ -16,6 +16,35 @@ __global__ void system_atomic_kernel(int* slots) {
         atomicOr_system(&slots[8], 0x12);
         atomicXor_system(&slots[9], 0x55);
     }
+}
+
+// One thread records each old value separately from the updated word. The
+// runtime family test initializes the first 22 words and checks both halves.
+extern "C" __global__ void system_atomic_values(unsigned* slots) {
+    int* signed_slots = reinterpret_cast<int*>(slots);
+    unsigned* old = slots + 22;
+    old[0] = atomicAdd_system(&signed_slots[0], 4);
+    old[1] = atomicAdd_system(&slots[1], 5u);
+    old[2] = atomicExch_system(&signed_slots[2], -7);
+    old[3] = atomicExch_system(&slots[3], 0xfffffffdu);
+    old[4] = atomicMin_system(&signed_slots[4], -5);
+    old[5] = atomicMax_system(&signed_slots[5], 5);
+    old[6] = atomicMin_system(&slots[6], 2u);
+    old[7] = atomicMax_system(&slots[7], 0x80000003u);
+    old[8] = atomicInc_system(&slots[8], 3);
+    old[9] = atomicInc_system(&slots[9], 3);
+    old[10] = atomicInc_system(&slots[10], 3);
+    old[11] = atomicDec_system(&slots[11], 3);
+    old[12] = atomicDec_system(&slots[12], 3);
+    old[13] = atomicDec_system(&slots[13], 3);
+    old[14] = atomicCAS_system(&signed_slots[14], 19, 23);
+    old[15] = atomicCAS_system(&signed_slots[15], 18, 23);
+    old[16] = atomicAnd_system(&signed_slots[16], 0x3c);
+    old[17] = atomicOr_system(&slots[17], 0x12u);
+    old[18] = atomicXor_system(&slots[18], 0x55u);
+    old[19] = atomicCAS_system(&slots[19], 0x80000001u, 0x80000003u);
+    old[20] = atomicCAS_system(&slots[20], 1u, 0x80000003u);
+    old[21] = atomicDec_system(&slots[21], 3);
 }
 
 int main() {
