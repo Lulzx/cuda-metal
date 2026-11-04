@@ -1514,8 +1514,96 @@ void emit_nvcc_verbose(const char* argv0, const std::string& output) {
               << (toolkit / "lib64").string() << " -lcudart\n";
 }
 
+bool tokenize_nvcc_options(std::string_view text, std::vector<std::string>* args,
+                           std::string* error) {
+    std::string token;
+    char quote = 0;
+    bool escaped = false;
+    bool started = false;
+    for (const char c : text) {
+        if (escaped) {
+            token += c;
+            escaped = false;
+        } else if (c == '\\' && quote != '\'') {
+            escaped = true;
+            started = true;
+        } else if (quote != 0) {
+            if (c == quote) quote = 0;
+            else token += c;
+        } else if (c == '\'' || c == '"') {
+            quote = c;
+            started = true;
+        } else if (std::isspace(static_cast<unsigned char>(c))) {
+            if (started) args->push_back(token);
+            token.clear();
+            started = false;
+        } else {
+            token += c;
+            started = true;
+        }
+    }
+    if (quote != 0 || escaped) {
+        *error = "unterminated quote or escape in options file";
+        return false;
+    }
+    if (started) args->push_back(token);
+    return true;
+}
+
+bool expand_nvcc_options(const std::vector<std::string>& input,
+                         std::vector<std::string>* output, std::string* error,
+                         unsigned depth = 0) {
+    if (depth > 16) {
+        *error = "options-file nesting exceeds 16 levels";
+        return false;
+    }
+    for (std::size_t i = 0; i < input.size(); ++i) {
+        const std::string& arg = input[i];
+        std::string files;
+        if (arg == "--options-file" || arg == "-optf") {
+            if (i + 1 == input.size()) {
+                *error = arg + " expects a file";
+                return false;
+            }
+            files = input[++i];
+        } else if (arg.rfind("--options-file=", 0) == 0 ||
+                   arg.rfind("-optf=", 0) == 0) {
+            files = arg.substr(arg.find('=') + 1);
+        } else {
+            output->push_back(arg);
+            continue;
+        }
+        std::size_t begin = 0;
+        do {
+            const auto comma = files.find(',', begin);
+            const std::string file = files.substr(begin, comma - begin);
+            if (file.empty()) {
+                *error = arg + " expects nonempty file names";
+                return false;
+            }
+            const auto bytes = cumetal::common::read_file_bytes(file, error);
+            if (!error->empty()) return false;
+            std::vector<std::string> nested;
+            const std::string text(bytes.begin(), bytes.end());
+            if (!tokenize_nvcc_options(text, &nested, error) ||
+                !expand_nvcc_options(nested, output, error, depth + 1)) {
+                *error = file + ": " + *error;
+                return false;
+            }
+            if (comma == std::string::npos) break;
+            begin = comma + 1;
+        } while (true);
+    }
+    return true;
+}
+
 int run_nvcc_compat(int argc, char** argv) {
-    std::vector<std::string> args(argv + 1, argv + argc);
+    std::vector<std::string> args;
+    std::string options_error;
+    if (!expand_nvcc_options({argv + 1, argv + argc}, &args, &options_error)) {
+        std::cerr << "cumetalc: " << options_error << "\n";
+        return 2;
+    }
     const auto has = [&](const std::string& flag) {
         return std::find(args.begin(), args.end(), flag) != args.end();
     };
