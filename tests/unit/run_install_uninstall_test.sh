@@ -43,6 +43,10 @@ test ! -e "$PREFIX/share/cumetal/shell_config_path"
 test ! -e "$HOME_DIR/.zshrc"
 "$PREFIX/bin/cumetal" version | grep -q "^cumetal "
 "$PREFIX/bin/cumetal" run /usr/bin/true
+env -u DYLD_LIBRARY_PATH -u DYLD_FALLBACK_LIBRARY_PATH DYLD_PRINT_LIBRARIES=1 \
+  "$PREFIX/bin/cumetal_bench" --help > "$TMP_ROOT/bench-help" 2> "$TMP_ROOT/bench-libraries"
+grep -q "^usage:" "$TMP_ROOT/bench-help"
+grep -qF "$PREFIX/lib/libcumetal.dylib" "$TMP_ROOT/bench-libraries"
 
 env -u CUMETAL_SHELL_RC HOME="$HOME_DIR" SHELL=/bin/zsh \
   bash "$PREFIX/uninstall.sh" "$PREFIX"
