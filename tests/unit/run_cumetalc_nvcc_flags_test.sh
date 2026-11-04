@@ -65,4 +65,38 @@ if "$cumetalc" "$cu" --definitely-not-an-nvcc-flag \
     fail "unknown flag should be rejected"
 fi
 
+# System include paths must reach the native host frontend as system paths.
+mkdir -p "$workdir/system include"
+cat > "$workdir/system include/value.h" <<'EOF'
+static int unused_in_system_header() { return 17; }
+#define HEADER_VALUE 19
+EOF
+cat > "$workdir/system.cu" <<'EOF'
+#include <value.h>
+#include <cstdio>
+int main() {
+    const int value = HEADER_VALUE + 23;
+    std::printf("system value=%d\n", value);
+    return value == 42 ? 0 : 1;
+}
+EOF
+for form in separate equals; do
+    system_option=(-isystem "$workdir/system include")
+    if [[ "$form" == equals ]]; then
+        system_option=("-isystem=$workdir/system include")
+    fi
+    CUMETAL_NVCC_COMPAT=1 "$cumetalc" "$workdir/system.cu" "${system_option[@]}" \
+        -Xcompiler -Wall,-Werror -o "$workdir/system" \
+        || fail "system include path was rejected"
+    [[ "$("$workdir/system")" == 'system value=42' ]] \
+        || fail "system include produced wrong output"
+done
+for option in -isystem -isystem=; do
+    if CUMETAL_NVCC_COMPAT=1 "$cumetalc" "$option" > "$workdir/system-error.log" 2>&1; then
+        fail "missing system include path was accepted"
+    fi
+    grep -Fq -- '-isystem expects a path' "$workdir/system-error.log" \
+        || fail "missing system include path diagnostic"
+done
+
 echo "PASS: cumetalc nvcc flag compatibility"
