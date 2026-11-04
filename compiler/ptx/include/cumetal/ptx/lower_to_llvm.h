@@ -21,16 +21,24 @@ enum class Fp64Mode {
     kWarn,     // same as kNative but emit a per-instruction warning for .f64 ops
 };
 
+// Parses an --fp64=/CUMETAL_FP64_MODE name; `emulate` is an alias of fast48.
+inline std::optional<Fp64Mode> parse_fp64_mode(std::string_view mode) {
+    if (mode == "native") return Fp64Mode::kNative;
+    if (mode == "emulate" || mode == "fast48") return Fp64Mode::kEmulate;
+    if (mode == "wide48") return Fp64Mode::kWide48;
+    if (mode == "ieee64") return Fp64Mode::kIEEE64;
+    if (mode == "warn") return Fp64Mode::kWarn;
+    return std::nullopt;
+}
+
+inline constexpr std::string_view kFp64ModeNames =
+    "fast48, wide48, ieee64, native, emulate, warn";
+
 // Runtime/driver/registration default: emulate unless CUMETAL_FP64_MODE=native|warn.
 inline Fp64Mode fp64_mode_from_env() {
     const char* env = std::getenv("CUMETAL_FP64_MODE");
     if (env != nullptr) {
-        const std::string_view mode(env);
-        if (mode == "native") return Fp64Mode::kNative;
-        if (mode == "emulate" || mode == "fast48") return Fp64Mode::kEmulate;
-        if (mode == "wide48") return Fp64Mode::kWide48;
-        if (mode == "ieee64") return Fp64Mode::kIEEE64;
-        if (mode == "warn") return Fp64Mode::kWarn;
+        if (const auto mode = parse_fp64_mode(env)) return *mode;
     }
     return Fp64Mode::kEmulate;
 }

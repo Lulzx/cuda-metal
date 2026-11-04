@@ -1681,17 +1681,13 @@ int run_nvcc_compat(int argc, char** argv) {
             return 2;
         } else if (arg.rfind("--fp64=", 0) == 0) {
             const std::string value = arg.substr(7);
-            if (value == "native") fp64_mode = cumetal::ptx::Fp64Mode::kNative;
-            else if (value == "emulate" || value == "fast48")
-                fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
-            else if (value == "wide48") fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
-            else if (value == "ieee64") fp64_mode = cumetal::ptx::Fp64Mode::kIEEE64;
-            else if (value == "warn") fp64_mode = cumetal::ptx::Fp64Mode::kWarn;
-            else {
-                std::cerr << "invalid --fp64 mode: " << value
-                          << " (valid: fast48, wide48, ieee64, native, emulate, warn)\n";
+            const auto parsed = cumetal::ptx::parse_fp64_mode(value);
+            if (!parsed) {
+                std::cerr << "invalid --fp64 mode: " << value << " (valid: "
+                          << cumetal::ptx::kFp64ModeNames << ")\n";
                 return 2;
             }
+            fp64_mode = *parsed;
         } else if (arg == "-x") (void)next();
         else if (arg == "--keep-dir" || arg == "-MT" || arg == "-MF" ||
                  arg == "-odir" || arg == "--output-dir" || arg == "-t") {
@@ -2122,21 +2118,13 @@ int main(int argc, char** argv) {
             cuda_forced_includes.emplace_back(argv[++i]);
         } else if (arg.size() > 7 && arg.substr(0, 7) == "--fp64=") {
             const std::string fp64_mode_str = arg.substr(7);
-            if (fp64_mode_str == "native") {
-                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kNative;
-            } else if (fp64_mode_str == "emulate" || fp64_mode_str == "fast48") {
-                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kEmulate;
-            } else if (fp64_mode_str == "wide48") {
-                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kWide48;
-            } else if (fp64_mode_str == "ieee64") {
-                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kIEEE64;
-            } else if (fp64_mode_str == "warn") {
-                ptx_fp64_mode = cumetal::ptx::Fp64Mode::kWarn;
-            } else {
-                std::cerr << "invalid --fp64 mode: " << fp64_mode_str
-                          << " (valid: fast48, wide48, ieee64, native, emulate, warn)\n";
+            const auto parsed = cumetal::ptx::parse_fp64_mode(fp64_mode_str);
+            if (!parsed) {
+                std::cerr << "invalid --fp64 mode: " << fp64_mode_str << " (valid: "
+                          << cumetal::ptx::kFp64ModeNames << ")\n";
                 return 2;
             }
+            ptx_fp64_mode = *parsed;
             fp64_mode_set_explicitly = true;
         } else if (arg == "--link") {
             link_executable = true;
