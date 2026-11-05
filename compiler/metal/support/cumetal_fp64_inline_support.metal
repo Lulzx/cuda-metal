@@ -170,8 +170,7 @@ inline ulong vf64_mul_rne(ulong a, ulong b) {
 }
 
 inline ulong vf64_div_rne(ulong a, ulong b) {
-    uint flags = 0;
-    return soft_div64_status(a, b, soft_round_near_even, flags);
+    return soft_div64_rne(a, b);
 }
 
 inline ulong vf64_sqrt_rne(ulong a) {
@@ -275,6 +274,10 @@ inline ulong vf64_wide_div(ulong a, ulong b) {
 
 inline ulong vf64_wide_sqrt(ulong a) {
     return wide_pack64(wide_sqrt(wide_unpack64(a)));
+}
+
+inline ulong vf64_wide_hypot(ulong a, ulong b) {
+    return wide_pack64(wide_hypot(wide_unpack64(a), wide_unpack64(b)));
 }
 
 inline ulong vf64_wide_fma(ulong a, ulong b, ulong c) {

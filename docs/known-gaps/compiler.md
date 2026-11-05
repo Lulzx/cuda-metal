@@ -268,8 +268,12 @@ warning. Under `ieee64` the typed PTX and NVVM paths call VF64's correctly
 rounded binary64 functions for the 22 functions VF64 provides (`exp`, `log`,
 `pow`, trigonometric and hyperbolic families, `cbrt`, `hypot`, ...; see
 [FP64 policy](../fp64-policy.md)) and do not warn for them; `powi`, `exp10`,
-`log10`, the `erf` and gamma families, and every call under `fast48`/`wide48`
-or the legacy path remain binary32. The double
+`log10`, the `erf` and gamma families, and calls under `fast48` or the legacy
+path remain binary32. `wide48` double `hypot` uses the pinned VF64 fork's
+reduced-precision helper, preserving internal exponent range through the
+squared sum and square root; its other transcendentals remain binary32.
+This helper has the documented reduced codec, rounding and special-value
+limits, and does not supply correctly rounded binary64 or exception flags. The double
 pointer-out builtins `sincos`, `modf`, `frexp`, and `sincospi` follow the
 same fallback on all paths: out-params keep their ABI (`int` exponent for
 `frexp`, binary64 storage elsewhere), and `modf`'s integral part is

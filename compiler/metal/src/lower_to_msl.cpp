@@ -4174,6 +4174,12 @@ struct AstLowerer {
                         arguments.push_back(MslExpression::literal(
                             "false", MslType::boolean()));
                     }
+                } else if (mode == "wide48" && callee->second == "hypot" &&
+                           std::all_of(operation.operands.begin(), operation.operands.end(),
+                                       [](const ir::Operand& operand) {
+                                           return operand.type == ir::Type::floating(64);
+                                       })) {
+                    target = "vf64_wide_hypot";
                 } else if (mode == "ieee64" &&
                            ir::is_vf64_correctly_rounded_math(callee->second) &&
                            std::all_of(operation.operands.begin(), operation.operands.end(),
@@ -4182,7 +4188,7 @@ struct AstLowerer {
                                        })) {
                     // VF64's correctly rounded binary64 transcendentals over raw
                     // bits. They are an ieee64 contract; the other modes keep
-                    // the binary32 evaluation below.
+                    // the binary32 evaluation below, except wide48 hypot.
                     target = "vf64_" + callee->second + "_rne";
                 } else {
                     // No software-ALU primitive exists for transcendental
@@ -9856,6 +9862,7 @@ ulong vf64_wide_sub(ulong, ulong);
 ulong vf64_wide_mul(ulong, ulong);
 ulong vf64_wide_div(ulong, ulong);
 ulong vf64_wide_sqrt(ulong);
+ulong vf64_wide_hypot(ulong, ulong);
 ulong vf64_wide_fma(ulong, ulong, ulong);
 uint vf64_f64_to_f32(ulong, uint);
 ulong vf64_f32_to_f64(uint);

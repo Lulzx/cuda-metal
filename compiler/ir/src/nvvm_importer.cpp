@@ -2339,15 +2339,24 @@ struct Importer {
                 "__nv_erfinv",  "__nv_erfcinv",
                 "__nv_tgamma",  "__nv_lgamma",
             };
-            // Under ieee64 lower_to_msl calls VF64's correctly rounded
-            // binary64 function instead (powi keeps its integer exponent on
-            // the binary32 path).
+            // Preserve the mode-specific VF64 implementation's contract;
+            // powi retains its integer exponent on the binary32 path.
             const auto mode = result.module.attributes.find("fp64_mode");
             const bool vf64_math = mode != result.module.attributes.end() &&
-                mode->second == "ieee64" &&
-                is_vf64_correctly_rounded_math(cuda_builtin->second) &&
+                has_vf64_math_support(mode->second, cuda_builtin->second) &&
                 std::all_of(operation->operands.begin(), operation->operands.end(),
                             [](const Operand& operand) { return operand.type == Type::floating(64); });
+            if (vf64_math && mode->second == "wide48") {
+                if (result.module.semantic_quality == SemanticQuality::kExact) {
+                    result.module.semantic_quality = SemanticQuality::kToleranceBounded;
+                }
+                const std::string caveat = kWide48HypotCaveat;
+                if (std::find(result.module.semantic_caveats.begin(),
+                              result.module.semantic_caveats.end(), caveat) ==
+                    result.module.semantic_caveats.end()) {
+                    result.module.semantic_caveats.push_back(caveat);
+                }
+            }
             if (kFp64ViaF32.contains(name) && !vf64_math) {
                 const std::string caveat = kFp64LibdeviceViaF32Caveat;
                 if (std::find(result.module.semantic_caveats.begin(),

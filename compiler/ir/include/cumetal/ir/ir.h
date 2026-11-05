@@ -372,7 +372,8 @@ inline constexpr const char* kFp64LibdeviceViaF32Caveat =
 // Metal builtin names (as both importers spell double libdevice calls) that
 // VF64's support ABI implements as correctly rounded binary64 functions,
 // `vf64_<name>_rne` over raw bits. They carry an ieee64 contract only; under
-// fast48 and wide48 these calls still evaluate through binary32.
+// fast48 these calls still evaluate through binary32; wide48 provides a
+// reduced hypot helper and otherwise uses binary32.
 inline bool is_vf64_correctly_rounded_math(std::string_view name) {
     static const std::unordered_set<std::string_view> kNames = {
         "exp",  "exp2", "expm1", "log",  "log2", "log1p", "cbrt",  "hypot",
@@ -380,6 +381,14 @@ inline bool is_vf64_correctly_rounded_math(std::string_view name) {
         "sinh", "cosh", "tanh",  "asinh", "acosh", "atanh",
     };
     return kNames.contains(name);
+}
+
+inline constexpr const char* kWide48HypotCaveat =
+    "wide48 hypot uses reduced-precision VF64 arithmetic";
+
+inline bool has_vf64_math_support(std::string_view mode, std::string_view name) {
+    return (mode == "ieee64" && is_vf64_correctly_rounded_math(name)) ||
+           (mode == "wide48" && name == "hypot");
 }
 
 struct Module {

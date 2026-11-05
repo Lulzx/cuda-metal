@@ -743,6 +743,12 @@ install(TARGETS
     RUNTIME DESTINATION bin
 )
 
+install(FILES
+    third_party/VF64-metal/LICENSE
+    third_party/VF64-metal/docs/softfloat-license.txt
+    DESTINATION share/licenses/cumetal/VF64-metal
+)
+
 # `cumetalc foo.cu -o foo` execs these from PATH while clang compiles device code, so an
 # installed cumetalc is useless without them. They live in libexec (not bin) because they
 # shadow real NVIDIA tool names and must never land on a user's PATH by accident.
