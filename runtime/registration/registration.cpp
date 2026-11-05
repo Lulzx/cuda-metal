@@ -72,6 +72,7 @@ struct RegistrationCacheMetadata {
     bool uses_device_launch_queue = false;
     // A double libdevice call runs in binary32; kept so warm cache hits warn too.
     bool fp64_libdevice_via_f32 = false;
+    bool wide48_hypot = false;
     // Integrity digest of the cached artifact itself (size + FNV-1a of
     // its bytes), so a torn .metal/.metallib entry is detected on the
     // next hit instead of failing every launch until deleted by hand.
@@ -370,6 +371,7 @@ bool write_registration_metadata(const std::filesystem::path& artifact_path,
     if (metadata.uses_device_heap) flags |= 1u;
     if (metadata.uses_device_launch_queue) flags |= 2u;
     if (metadata.fp64_libdevice_via_f32) flags |= 4u;
+    if (metadata.wide48_hypot) flags |= 8u;
     append_u32_le(&bytes, flags);
     append_u32_le(&bytes, static_cast<std::uint32_t>(metadata.printf_formats.size()));
     for (const std::string& format : metadata.printf_formats) {
@@ -418,7 +420,7 @@ bool read_registration_metadata(const std::filesystem::path& artifact_path,
     std::uint32_t count = 0;
     if (!consume_u32_le(bytes, &offset, &flags) ||
         !consume_u32_le(bytes, &offset, &count) ||
-        (flags & ~7u) != 0 || count > kMaxRegistrationPrintfFormats) {
+        (flags & ~15u) != 0 || count > kMaxRegistrationPrintfFormats) {
         return false;
     }
 
@@ -426,6 +428,7 @@ bool read_registration_metadata(const std::filesystem::path& artifact_path,
     parsed.uses_device_heap = (flags & 1u) != 0;
     parsed.uses_device_launch_queue = (flags & 2u) != 0;
     parsed.fp64_libdevice_via_f32 = (flags & 4u) != 0;
+    parsed.wide48_hypot = (flags & 8u) != 0;
     parsed.printf_formats.reserve(count);
     for (std::uint32_t i = 0; i < count; ++i) {
         std::uint32_t size = 0;
@@ -1110,6 +1113,9 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     REG_DEBUG("emit kernel '%s' ptx_size=%zu", kernel_name.c_str(), ptx_source.size());
 
     const auto publish_metadata = [&](const RegistrationCacheMetadata& metadata) {
+        if (metadata.wide48_hypot) {
+            generic_ptx_provenance = "generic_ptx_lowering_fp64_wide48";
+        }
         if (out_printf_formats != nullptr) {
             *out_printf_formats = metadata.printf_formats;
         }
@@ -1258,6 +1264,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         .uses_device_heap = lowered_metal.uses_device_heap,
     };
     metadata.fp64_libdevice_via_f32 = lowered_metal.fp64_libdevice_via_f32;
+    // Libdevice signatures can encode doubles as .b64, so use typed metadata.
+    metadata.wide48_hypot =
+        lowered_metal.metal_source.find(
+            "cumetal-semantic-caveat: wide48 hypot uses reduced-precision VF64 arithmetic") !=
+        std::string::npos;
     // The typed backend reports its own queue usage; only legacy-lowered
     // kernels need the LLVM metadata probe below.
     metadata.uses_device_launch_queue = lowered_metal.uses_device_launch_queue;
@@ -1541,6 +1552,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
     }
     REG_DEBUG("emit success: %s", final_output.c_str());
     *out_path = final_output.string();
+    publish_metadata(metadata);
     if (out_provenance != nullptr) {
         // A real translation of this kernel's PTX, via LLVM IR and AIR. It is
         // emitted as a .metallib, which the Metal backend would otherwise
@@ -1549,7 +1561,6 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
         // to distinguish "we translated this" from "we loaded this".
         *out_provenance = generic_ptx_provenance;
     }
-    publish_metadata(metadata);
     if (!cached_metallib.empty()) {
         (void)write_registration_metadata(final_output, metadata);
     }

@@ -3725,6 +3725,15 @@ set_tests_properties(functional_fp64_vf64_math_nvvm PROPERTIES
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
 
 add_test(
+    NAME functional_fp64_hypot_wide48_nvvm
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_fp64_vf64_math_nvvm.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR} wide48
+)
+set_tests_properties(functional_fp64_hypot_wide48_nvvm PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+add_test(
     NAME functional_driver_jit_compiler_missing
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_driver_jit_compiler_missing.sh

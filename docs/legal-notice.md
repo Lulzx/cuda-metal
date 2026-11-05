@@ -85,6 +85,26 @@ path is source recompilation, and binary compatibility remains bounded and opt-i
 
 ---
 
+## VF64 Software Arithmetic
+
+The pinned `third_party/VF64-metal` submodule is
+[VF64-metal](https://github.com/Lulzx/VF64-metal), copyright 2026 Lulzx,
+under the [BSD 3-Clause license](../third_party/VF64-metal/LICENSE).
+The pinned dependency obtains the reduced-precision `wide48` hypot helper from
+[krystophny/VF64-metal](https://github.com/krystophny/VF64-metal), with the
+same license and original copyright notice retained. Its implementation uses
+VF64's existing floating-point expansion arithmetic; no NVIDIA implementation
+or SASS is incorporated.
+
+The integer reciprocal seed uses constants and a formula adapted from
+[Berkeley SoftFloat Release 3e](https://github.com/ucb-bar/berkeley-softfloat-3/tree/07ebd29db0cfb55723a79fbbffe99103ef38e305),
+copyright The Regents of the University of California, under the retained
+[BSD 3-Clause notice](../third_party/VF64-metal/docs/softfloat-license.txt).
+Binary installations include both VF64 and SoftFloat notices under
+`share/licenses/cumetal/VF64-metal`; redistributors must retain them.
+
+---
+
 ## Contributor License Agreement
 
 The full text is in [docs/cla.md](cla.md), and [CONTRIBUTING.md](../CONTRIBUTING.md) explains
