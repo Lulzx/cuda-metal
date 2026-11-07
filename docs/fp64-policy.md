@@ -115,6 +115,12 @@ where the binary64 intermediate can double-round). The `_rn` arithmetic and
 the `*2double_*`/`double2*_*` conversion spellings map to the same IR
 operations as their PTX instruction forms.
 
+In `wide48`, comparisons use each operand's canonical wide48 value, as
+arithmetic does. Distinct binary64 inputs can therefore compare equal when
+their reduced significands coincide. Signed zeros compare equal and NaNs
+retain ordered/unordered comparison semantics. Raw moves and storage still
+preserve the original binary64 bits; select `ieee64` for binary64 comparisons.
+
 Round-to-nearest-even and PTX's directed arithmetic modes are preserved in
 `ieee64`. `wide48` intentionally accepts round-to-nearest-even arithmetic only.
 The support runtime itself also exports classification, exception-status, and
