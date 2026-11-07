@@ -27,6 +27,7 @@ tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu fail pass p
 tests/cuda_projects/dynamic_cooperative_groups/dynamic_cooperative_groups.cu fail pass pass pass
 tests/cuda_projects/flash_attn/flash_standalone.cu fail pass pass pass
 tests/cuda_projects/float_atomics/float_atomics.cu fail pass pass pass
+tests/cuda_projects/fp64/fp64_division_benchmark.cu fail pass pass pass
 tests/cuda_projects/fp64/fp64_precision.cu fail pass pass pass
 tests/cuda_projects/fp64_atomic_add/fp64_atomic_add.cu fail pass pass pass
 tests/cuda_projects/fp64_comparison/fp64_comparison.cu fail pass fail pass
