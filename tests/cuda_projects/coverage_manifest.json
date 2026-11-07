@@ -214,6 +214,34 @@
       "expect_pattern": "OK: GPU render matches CPU reference."
     },
     {
+      "name": "fp64_comparison",
+      "subdir": "fp64_comparison",
+      "source": "fp64_comparison.cu",
+      "binary": "fp64_comparison",
+      "harness": "strict",
+      "expect_pattern": "PASS: fp64 comparisons and endpoint progress on Apple GPU",
+      "backends": [
+        "cumetal-ir"
+      ],
+      "env": {
+        "CUMETAL_FP64_MODE": "wide48"
+      }
+    },
+    {
+      "name": "fp64_division_benchmark",
+      "subdir": "fp64",
+      "source": "fp64_division_benchmark.cu",
+      "binary": "fp64_division_benchmark",
+      "harness": "strict",
+      "expect_pattern": "PASS: exact binary64 division benchmark verified",
+      "backends": [
+        "cumetal-ir"
+      ],
+      "env": {
+        "CUMETAL_FP64_MODE": "ieee64"
+      }
+    },
+    {
       "name": "fp64_precision",
       "subdir": "fp64",
       "source": "fp64_precision.cu",
