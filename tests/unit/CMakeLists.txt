@@ -533,6 +533,8 @@ add_test(
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
             ${_exp_metallib}
 )
+set_tests_properties(unit_metallib_parser PROPERTIES
+    FIXTURES_REQUIRED air_abi_reference_metallib)
 
 add_test(
     NAME unit_ptx_parser
