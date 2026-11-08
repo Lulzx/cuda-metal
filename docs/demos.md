@@ -33,6 +33,20 @@ path already calls MPS. See [the matmul demo guide](../demos/matmul/README.md)
 for runnable modes and [the study](matmul-performance.md) for raw evidence,
 article corrections, and hardware-specific limits.
 
+## COLMAP dense reconstruction
+
+Unmodified COLMAP 4.2.1 built with `CUDA_ENABLED=ON` runs its dense
+PatchMatch stereo and fusion on the Apple GPU. A synthetic scene with exact
+depth is the reference, since COLMAP has no CPU PatchMatch:
+
+```bash
+bash demos/colmap/run.sh
+```
+
+The recorded M4 Pro run has 0.05-0.09% median depth error per view and 98.0%
+of fused points within 1 cm of the true surface. It is correct but slow (about
+19 minutes for ten 640x480 views). See [the COLMAP guide](../demos/colmap/README.md).
+
 ## 3D Gaussian Splatting
 
 The Inria tile-based Gaussian rasterizer (`renderCUDA` plus binning kernels)
