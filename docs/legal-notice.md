@@ -91,8 +91,8 @@ The pinned `third_party/VF64-metal` submodule is
 [VF64-metal](https://github.com/Lulzx/VF64-metal), copyright 2026 Lulzx,
 under the [BSD 3-Clause license](../third_party/VF64-metal/LICENSE).
 Its reduced-precision `wide48` hypot helper uses VF64's own expansion
-arithmetic. Its certified round-to-nearest division is generated from VF64's
-own description of the published reciprocal-division construction, citing
+arithmetic. Its certified round-to-nearest division is VF64's independent adaptation of
+the published reciprocal-division construction, citing
 [CCCL](https://github.com/NVIDIA/cccl) (Apache-2.0 WITH LLVM-exception),
 Berkeley SoftFloat and Lefèvre and Zimmermann; see
 [certified-division.md](../third_party/VF64-metal/docs/certified-division.md).
