@@ -17,7 +17,13 @@ if ! (command -v xcrun >/dev/null 2>&1 && xcrun --find metal >/dev/null 2>&1 &&
   fi
 fi
 
-rm -f "$REFERENCE_METALLIB"
+# Rebuild the reference kernel privately. About twenty tests use this script and
+# used to delete and regenerate the shared path in place, so under parallel
+# ctest one test loaded a library another was rewriting and failed at random.
+# The shared path is only the toolchain-missing fallback above.
+PRIVATE_DIR="$(mktemp -d "${TMPDIR:-/tmp}/cumetal-reference.XXXXXX")"
+trap 'rm -rf "$PRIVATE_DIR"' EXIT
+REFERENCE_METALLIB="$PRIVATE_DIR/reference.metallib"
 
 if ! command -v xcrun >/dev/null 2>&1; then
   echo "SKIP: xcrun not installed"
@@ -34,7 +40,7 @@ if ! xcrun --find metallib >/dev/null 2>&1; then
   exit 77
 fi
 
-"$GENERATE_SCRIPT"
+REF_OUT_DIR="$PRIVATE_DIR" "$GENERATE_SCRIPT"
 
 if [[ ! -s "$REFERENCE_METALLIB" ]]; then
   echo "SKIP: reference metallib not available at $REFERENCE_METALLIB"
