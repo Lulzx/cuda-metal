@@ -195,6 +195,10 @@ patch_marker_is_present() {
                 "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt" &&
                 test -f "${PHYSX_REPO}/physx/snippets/snippetpbdcloth/CuMetalCloth.cu"
             ;;
+        0032-cumetal-legacy-for-typed-refusals.patch)
+            grep -q 'kernel_name STREQUAL "ps_reorderDataAndFindCellStartLaunch"' \
+                "${PHYSX_REPO}/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt"
+            ;;
         *)
             return 1
             ;;

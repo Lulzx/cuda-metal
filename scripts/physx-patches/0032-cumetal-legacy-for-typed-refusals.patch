@@ -1,0 +1,26 @@
+diff --git a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+--- a/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
++++ b/physx/source/compiler/cmakegpu/cumetal/CMakeLists.txt
+@@ -200,6 +200,22 @@
+ 	SET(kernel_frontend_args --cuda-device --cuda-inline-threshold 1000000)
+ 	IF(kernel_name STREQUAL "convexConvexNphase_stage2Kernel")
+ 		SET(kernel_frontend_args --backend=cumetal-ir)
++	ENDIF()
++	# cumetal-ir is the default since CuMetal 0.7.0, and these kernels keep
++	# the legacy lowering that the GRB and PBD conformance gates validated.
++	# The typed path refuses compressContactStage2 and updateFrictionPatches
++	# (pointer subtraction with unrelated provenance) and
++	# ps_reorderDataAndFindCellStartLaunch (a shared-memory pointer joined
++	# with a loaded integer). For the radix-rank kernels it keeps all four
++	# static shared arrays, 39,104 bytes, beyond Metal's 32 KB threadgroup
++	# limit, so their pipelines cannot be created.
++	IF(kernel_name STREQUAL "compressContactStage2" OR
++	   kernel_name STREQUAL "updateFrictionPatches" OR
++	   kernel_name STREQUAL "ps_reorderDataAndFindCellStartLaunch" OR
++	   kernel_name STREQUAL "radixSortMultiCalculateRanksLaunch" OR
++	   kernel_name STREQUAL "radixSortMultiCalculateRanksLaunchWithCount" OR
++	   kernel_name STREQUAL "radixSortMultiCalculateRanksLaunchWithoutCount")
++		LIST(APPEND kernel_frontend_args --backend=legacy)
+ 	ENDIF()
+ 	SET(kernel_source "${PHYSX_SOURCE_DIR}/${kernel_source_rel}")
+ 	SET(kernel_output "${PX_CUMETAL_KERNEL_OUTPUT_DIR}/${kernel_name}.metallib")
