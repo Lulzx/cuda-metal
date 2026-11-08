@@ -20,8 +20,8 @@ is split by subsystem.
   both its device residual and independent host equation error.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
   **55/55**, typed PTX **55/55**, legacy PTX **49/55**.
-- Exact in-tree numerical corpus: typed PTX **40/40** and direct native AOT
-  **43/43** on Apple M4 Pro with workload specializations disabled (2026-10-04).
+- Exact in-tree numerical corpus: typed PTX **51/51** and direct native AOT
+  **49/49** on Apple M4 Pro with workload specializations disabled (2026-11-08).
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,
   STREAM triad, and reduction—meets the recorded 2x native-Metal ceiling on
   Apple M4 Pro.

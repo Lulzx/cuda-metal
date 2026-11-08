@@ -1,7 +1,7 @@
 # LAMMPS / Kokkos GPU demo
 
 <!-- cw:block lammps.status -->
-**Status: numerical GPU gate passed on 2026-10-04.** The unmodified CUDA
+**Status: numerical GPU gate passed on 2026-11-08.** The unmodified CUDA
 application compiles, links, and completes the stock 32,000-atom, 100-step
 Lennard-Jones benchmark on Apple M4 Pro in both neighbour modes. The fixed
 `5e-4` CPU-double, cross-mode, and analytic initial-energy checks pass.
@@ -15,20 +15,21 @@ clean-room toolkit, one process, C++20, `KOKKOS_PREC=single`, CUDA architecture
 the `libcuda.dylib` binary alias is not required.
 
 <!-- cw:block lammps.recorded_result -->
-The [recorded result](results/2026-10-04-m4-pro.json) reports maximum scaled
-CPU-double error `5.91e-6`, cross-mode difference `1.27e-6`, and analytic initial
-pair-energy error `1.26e-7`. Full/Newton-off records 826 successful Apple-GPU
+The [recorded result](results/2026-11-08-m4-pro.json) reports maximum scaled
+CPU-double error `4.49e-6`, cross-mode difference `3.25e-7`, and analytic initial
+pair-energy error `2.00e-7`. Full/Newton-off records 826 successful Apple-GPU
 launches; half/Newton-on records 1,534. Workload specializations are disabled.
 FP64 uses reduced-precision software emulation, identified in the trace.
-Raw logs are retained locally in `out/gpu.CHtxEp`, with CPU-double reference
-`out/reference.aKdfsP` and earlier failed attempts in separate directories.
+Raw logs are retained locally in `out/gpu.P8GW6P`, with CPU-double reference
+`out/reference.8u9LfX`. The previous gate (2026-10-04) is kept in
+[its own record](results/2026-10-04-m4-pro.json).
 
 <!-- cw:block lammps.loops -->
-The measured simulation loops took 4.67 seconds (full) and 6.77 seconds (half),
-but regression runs were concurrent, so these are completion receipts rather
+The measured simulation loops took 1.84 seconds (full) and 1.94 seconds (half),
+but GPU tracing was enabled, so these are completion receipts rather
 than performance comparisons. Cold half-neighbour pipeline compilation took
-minutes; total wall time was 9 minutes 14 seconds versus 18 seconds for full.
-All 396 CuMetal CTest gates passed with zero skips across the final partitioned
+minutes; total wall time was 2 minutes 39 seconds versus 22 seconds for full.
+All 465 CuMetal CTest gates passed with zero skips across the final partitioned
 runs, including the Clang 21/22/23 matrix, 83 enrolled CUDA samples, and typed
 PTX/native-AOT numerical corpora. The demo validator's 11 tests also pass.
 

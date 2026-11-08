@@ -35,12 +35,12 @@ external revisions, assets, models, or build systems. Each result applies only
 to its pinned revision and command. Focused success is not whole-project
 compatibility.
 
-The pinned LAMMPS `stable_30Sep2026` / Kokkos 5.2.1 GPU gate passed on 2026-10-04.
+The pinned LAMMPS `stable_30Sep2026` / Kokkos 5.2.1 GPU gate passed on 2026-11-08.
 <!-- cw:block known_gaps_verification.lammps -->
 The unmodified CUDA application compiles and links, and completes the stock
 32,000-atom, 100-step LJ benchmark in both full and half neighbour modes on
-Apple M4 Pro. Maximum scaled CPU-double error is `5.91e-6`, cross-mode
-difference `1.27e-6`, and analytic initial pair-energy error `1.26e-7`, all below
+Apple M4 Pro. Maximum scaled CPU-double error is `4.49e-6`, cross-mode
+difference `3.25e-7`, and analytic initial pair-energy error `2.00e-7`, all below
 the unchanged `5e-4` tolerance. Launches use generic typed PTX lowering with
 workload specializations disabled. FP64 emulation remains reduced precision;
 cold half-neighbour pipeline compilation takes minutes, and performance

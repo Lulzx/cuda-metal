@@ -80,6 +80,12 @@ remapped through the injective offset function
 lanes striding down a column land in different banks; the reported
 static threadgroup size grows accordingly. Escapes, atomics, undescribed
 threadgroup accesses, or mixed element sizes keep the original layout.
+
+Static shared memory above Metal's 32 KB threadgroup limit (CUDA allows 48 KB)
+is declared as written on the typed path, so pipeline creation fails at launch
+with `cudaErrorInvalidValue`. PhysX's radix-rank kernels declare 39,104 bytes
+and use the legacy lowering, which fits them, through PhysX patch 0032 along
+with three kernels the typed path refuses.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers

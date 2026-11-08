@@ -1,0 +1,21 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "phase4_manifest-2f0da2be",
+  "producer": "cumetal.phase4_manifest",
+  "timestamp": "2026-11-08T16:08:50Z",
+  "git_commit": "7f3f805",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "phase4-manifest"
+  ],
+  "input_set_digest": "blake3:2f0da2be7ae62f581bec3cbc3f84a52a6dcec63abc63792abe0f3c26af07c193",
+  "input_files": {
+    "scripts/claimwire_evidence.py": "blake3:2387a416e05adf0378063adc7f5d0df8c4553765157ed2ec4ad082fe19fb187e",
+    "tests/conformance/phase4_functional_manifest.txt": "blake3:2654f3594c72d1997395caf76a95a77c0ea3ef92a37d3491e5508f485d888556"
+  },
+  "scalars": {
+    "total": 192.0
+  }
+}

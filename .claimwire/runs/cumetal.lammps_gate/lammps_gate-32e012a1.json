@@ -1,0 +1,38 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "lammps_gate-32e012a1",
+  "producer": "cumetal.lammps_gate",
+  "timestamp": "2026-11-08T16:08:50Z",
+  "git_commit": "7f3f805",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "lammps-gate"
+  ],
+  "input_set_digest": "blake3:32e012a1db4d41fb8a9ef8fd00f62ac0f5f4303c9cf65d52628735c17eb92bb2",
+  "input_files": {
+    "demos/lammps/results/2026-11-08-m4-pro.json": "blake3:ae5018cd0c26912d14ea2c0ec1a30305823532dd512516b3aa2cec5517c4879e",
+    "scripts/claimwire_evidence.py": "blake3:2387a416e05adf0378063adc7f5d0df8c4553765157ed2ec4ad082fe19fb187e"
+  },
+  "scalars": {
+    "atoms": 32000.0,
+    "steps": 100.0,
+    "tolerance": 0.0005,
+    "cpu_double_error": 4.489999999995886e-6,
+    "mode_difference": 3.251373997629743e-7,
+    "analytic_error": 1.9979025887334976e-7,
+    "full_launches": 826.0,
+    "half_launches": 1534.0,
+    "full_loop": 1840120000.0,
+    "half_loop": 1936530000.0,
+    "full_wall": 22000000000.0,
+    "half_wall": 159000000000.0,
+    "ctest_passed": 465.0,
+    "ctest_total": 465.0,
+    "typed_ptx_projects": 51.0,
+    "native_aot_projects": 49.0,
+    "cuda_samples": 83.0,
+    "validator_tests": 11.0
+  }
+}

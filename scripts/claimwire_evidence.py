@@ -77,7 +77,7 @@ def matmul():
         )
 
 
-LAMMPS_GATE = "demos/lammps/results/2026-10-04-m4-pro.json"
+LAMMPS_GATE = "demos/lammps/results/2026-11-08-m4-pro.json"
 LAMMPS_WARM = "demos/lammps/results/2026-10-05-m4-pro-warm.json"
 
 

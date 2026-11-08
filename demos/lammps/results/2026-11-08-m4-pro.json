@@ -1,0 +1,241 @@
+{
+ "status": "pass",
+ "atoms": 32000,
+ "steps": 100,
+ "lammps_revision": "8de817dd79bfe4525d5d39246a212d833e6dee07",
+ "backend": "cumetal-ir",
+ "tolerance": 0.0005,
+ "comparisons": [
+  {
+   "mode": "full",
+   "step": 0,
+   "field": "temperature",
+   "gpu": 1.44,
+   "cpu_double": 1.44,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "full",
+   "step": 0,
+   "field": "pair_energy",
+   "gpu": -6.7733667,
+   "cpu_double": -6.7733681,
+   "scaled_error": 2.0669185238657655e-07
+  },
+  {
+   "mode": "full",
+   "step": 0,
+   "field": "molecular_energy",
+   "gpu": 0.0,
+   "cpu_double": 0.0,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "full",
+   "step": 0,
+   "field": "total_energy",
+   "gpu": -4.6134342,
+   "cpu_double": -4.6134356,
+   "scaled_error": 3.0346148095903766e-07
+  },
+  {
+   "mode": "full",
+   "step": 0,
+   "field": "pressure",
+   "gpu": -5.0197086,
+   "cpu_double": -5.0197073,
+   "scaled_error": 2.5897924368874924e-07
+  },
+  {
+   "mode": "full",
+   "step": 100,
+   "field": "temperature",
+   "gpu": 0.75745343,
+   "cpu_double": 0.7574531,
+   "scaled_error": 3.29999999992836e-07
+  },
+  {
+   "mode": "full",
+   "step": 100,
+   "field": "pair_energy",
+   "gpu": -5.7585073,
+   "cpu_double": -5.7585055,
+   "scaled_error": 3.125811028084793e-07
+  },
+  {
+   "mode": "full",
+   "step": 100,
+   "field": "molecular_energy",
+   "gpu": 0.0,
+   "cpu_double": 0.0,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "full",
+   "step": 100,
+   "field": "total_energy",
+   "gpu": -4.6223627,
+   "cpu_double": -4.6223613,
+   "scaled_error": 3.028755022618688e-07
+  },
+  {
+   "mode": "full",
+   "step": 100,
+   "field": "pressure",
+   "gpu": 0.20725656,
+   "cpu_double": 0.20726105,
+   "scaled_error": 4.489999999995886e-06
+  },
+  {
+   "mode": "half",
+   "step": 0,
+   "field": "temperature",
+   "gpu": 1.44,
+   "cpu_double": 1.44,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "half",
+   "step": 0,
+   "field": "pair_energy",
+   "gpu": -6.7733682,
+   "cpu_double": -6.7733681,
+   "scaled_error": 1.4763703788729764e-08
+  },
+  {
+   "mode": "half",
+   "step": 0,
+   "field": "molecular_energy",
+   "gpu": 0.0,
+   "cpu_double": 0.0,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "half",
+   "step": 0,
+   "field": "total_energy",
+   "gpu": -4.6134357,
+   "cpu_double": -4.6134356,
+   "scaled_error": 2.1675820137259817e-08
+  },
+  {
+   "mode": "half",
+   "step": 0,
+   "field": "pressure",
+   "gpu": -5.0197099,
+   "cpu_double": -5.0197073,
+   "scaled_error": 5.179584872005602e-07
+  },
+  {
+   "mode": "half",
+   "step": 100,
+   "field": "temperature",
+   "gpu": 0.75745342,
+   "cpu_double": 0.7574531,
+   "scaled_error": 3.2000000005361073e-07
+  },
+  {
+   "mode": "half",
+   "step": 100,
+   "field": "pair_energy",
+   "gpu": -5.7585068,
+   "cpu_double": -5.7585055,
+   "scaled_error": 2.2575301874642535e-07
+  },
+  {
+   "mode": "half",
+   "step": 100,
+   "field": "molecular_energy",
+   "gpu": 0.0,
+   "cpu_double": 0.0,
+   "scaled_error": 0.0
+  },
+  {
+   "mode": "half",
+   "step": 100,
+   "field": "total_energy",
+   "gpu": -4.6223622,
+   "cpu_double": -4.6223613,
+   "scaled_error": 1.9470568013528606e-07
+  },
+  {
+   "mode": "half",
+   "step": 100,
+   "field": "pressure",
+   "gpu": 0.20725665,
+   "cpu_double": 0.20726105,
+   "scaled_error": 4.400000000015503e-06
+  }
+ ],
+ "max_scaled_cpu_double_error": 4.489999999995886e-06,
+ "max_scaled_mode_difference": 3.251373997629743e-07,
+ "analytic_initial_pair_energy": -6.773368053252957,
+ "max_scaled_analytic_initial_error": 1.9979025887334976e-07,
+ "date": "2026-11-08",
+ "hardware": "Apple M4 Pro",
+ "os": "macOS 27.2 (26B123)",
+ "toolchain": {
+  "clang": "23.1.5",
+  "cmake": "4.4.5",
+  "build_type": "Release",
+  "binary_shim": false,
+  "source_registration": true
+ },
+ "configuration": {
+  "kokkos": "5.2.1",
+  "kokkos_precision": "single",
+  "cuda_arch": "sm_80",
+  "workload_specializations": false,
+  "metal_device_addresses": true,
+  "cpu_reference_precision": "double"
+ },
+ "evidence_directory": "demos/lammps/out/gpu.P8GW6P",
+ "reference_directory": "demos/lammps/out/reference.8u9LfX",
+ "gpu_runs": {
+  "full": {
+   "successful_apple_gpu_launches": 826,
+   "cold_launches": 2,
+   "loop_seconds": 1.84012,
+   "total_wall_time": "0:00:22",
+   "provenance_classes": [
+    "generic_ptx_lowering",
+    "generic_ptx_lowering_fp64_emulated"
+   ]
+  },
+  "half": {
+   "successful_apple_gpu_launches": 1534,
+   "cold_launches": 2,
+   "loop_seconds": 1.93653,
+   "total_wall_time": "0:02:39",
+   "provenance_classes": [
+    "generic_ptx_lowering",
+    "generic_ptx_lowering_fp64_emulated"
+   ]
+  }
+ },
+ "limitations": [
+  "FP64 uses reduced-precision software emulation.",
+  "GPU tracing was enabled; loop times are completion receipts, not performance measurements.",
+  "This validates the pinned stock 100-step LJ workload, not general LAMMPS compatibility."
+ ],
+ "regressions": {
+  "ctest_passed": 465,
+  "ctest_total": 465,
+  "skips": 0,
+  "execution": "Partitioned runs: ctest -j4 -LE slow (452), then the 13 slow gates serially, with cuda-samples b7c5481 (v13.3, the manifest baseline), PhysX 5ca9f47 with patches 0001-0032, and CUDA Clang 21.1.8, 22.1.8 and 23.1.5.",
+  "logs": [
+   "demos/lammps/out/regression-inner.log",
+   "demos/lammps/out/regression-slow.log"
+  ],
+  "typed_ptx_numerical_projects": 51,
+  "native_aot_numerical_projects": 49,
+  "cuda_samples": 83,
+  "cuda_clang_matrix": [
+   21,
+   22,
+   23
+  ],
+  "demo_validator_tests": 11
+ },
+ "cumetal_revision": "v0.8.0 (6651796); regression run at 7f3f805 (test infrastructure and PhysX patch series only)"
+}

@@ -28,8 +28,8 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   `tests/cuda_projects/backend_matrix_manifest.txt` and
   `conformance_compiler_backend_matrix{,_versions}`. The matrix is compile
   evidence only; promotion still requires numerical GPU tests.
-- The exact in-tree corpus now passes 40/40 typed-PTX enrollments and
-  43/43 direct native-AOT enrollments on Apple M4 Pro (2026-10-04) with workload
+- The exact in-tree corpus now passes 51/51 typed-PTX enrollments and
+  49/49 direct native-AOT enrollments on Apple M4 Pro (2026-11-08) with workload
   specializations disabled. Native ABI v3 carries kernel, symbol, and device
   `printf` metadata and performs no first-launch PTX JIT. This closes the
   reviewed numerical corpus, not the residual language combinations in P1.

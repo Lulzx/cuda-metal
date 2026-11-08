@@ -217,7 +217,9 @@ registrations, disabled tests, and prerequisite skips remain non-passing
 denominator entries. The 90% threshold therefore cannot be met by excluding
 skips from the calculation.
 
-The separate NVIDIA sample gate requires a full `cuda-samples` checkout. It is
+The separate NVIDIA sample gate requires a full `cuda-samples` checkout. The manifest's
+baseline is `NVIDIA/cuda-samples` `b7c5481` (v13.3); v13.4 and later include
+CCCL's `<cuda/cmath>`, which CuMetal does not ship, so check out that commit. It is
 intentionally run serially because several upstream workloads are large:
 
 ```bash

@@ -4,70 +4,70 @@
     "cumetal.backend_matrix": {
       "epochs": {
         "current": {
-          "run_id": "backend_matrix-0133fb25",
-          "git_commit": "4af8929",
+          "run_id": "backend_matrix-c4ce7fd3",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:0133fb254a866b9e1768f96e438d7ffc96c2f2e951a750ada88273dcfa5d3852"
+          "input_set_digest": "blake3:c4ce7fd3ebb5a96b5937cb31f046fc95d8875c9a5231222b0b13d1c2ad649820"
         }
       }
     },
     "cumetal.samples_sweep": {
       "epochs": {
         "current": {
-          "run_id": "samples_sweep-c72955cc",
-          "git_commit": "7f9e42f",
+          "run_id": "samples_sweep-ab6d3a69",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:c72955cc06932aaaaa88f217da961f9e07c9276cd437b5044da9f17c2f379b64"
+          "input_set_digest": "blake3:ab6d3a696ceb3dadee81935c092ce16265dd3b84552ba12eea4225ba1052635e"
         }
       }
     },
     "cumetal.phase4_manifest": {
       "epochs": {
         "current": {
-          "run_id": "phase4_manifest-682399fe",
-          "git_commit": "4af8929",
+          "run_id": "phase4_manifest-2f0da2be",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:682399fe0c6a3da0090291218e88aad971a36ec3490ce39ba9052bbf41a1bc1a"
+          "input_set_digest": "blake3:2f0da2be7ae62f581bec3cbc3f84a52a6dcec63abc63792abe0f3c26af07c193"
         }
       }
     },
     "cumetal.coverage_manifest": {
       "epochs": {
         "current": {
-          "run_id": "coverage_manifest-c7de473d",
-          "git_commit": "7f9e42f",
+          "run_id": "coverage_manifest-7561f533",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:c7de473d7697e01ffadce3a24f5fce565fe839cccda1a4786544168ce83d7fbe"
+          "input_set_digest": "blake3:7561f5337bc608336517d5d929907cef9f09905cd49603a25e4c26cb3d3fb567"
         }
       }
     },
     "cumetal.matmul": {
       "epochs": {
         "current": {
-          "run_id": "matmul-6febf65a",
-          "git_commit": "7f9e42f",
+          "run_id": "matmul-e8ee8ae9",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:6febf65aee0d40b2ae1fa6a02b845fc6c849ed7b7c01bb4973e76cd437a2be7f"
+          "input_set_digest": "blake3:e8ee8ae98324eedc82a3a4badebc024b680a2a0fee47666fcde718ef2ef98dfb"
         }
       }
     },
     "cumetal.lammps_gate": {
       "epochs": {
         "current": {
-          "run_id": "lammps_gate-b0ef96de",
-          "git_commit": "7f9e42f",
+          "run_id": "lammps_gate-32e012a1",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:b0ef96deea99793b1a2008998486e1a97b4d046c42b24b29f1f9ceee67a791b0"
+          "input_set_digest": "blake3:32e012a1db4d41fb8a9ef8fd00f62ac0f5f4303c9cf65d52628735c17eb92bb2"
         }
       }
     },
     "cumetal.lammps_warm": {
       "epochs": {
         "current": {
-          "run_id": "lammps_warm-47f35575",
-          "git_commit": "7f9e42f",
+          "run_id": "lammps_warm-c0c95a32",
+          "git_commit": "7f3f805",
           "git_dirty": true,
-          "input_set_digest": "blake3:47f35575cb369edc1e0ad0897e838c0f91a7250666f17c5160eef6f38e693477"
+          "input_set_digest": "blake3:c0c95a32330f4acbaa717a3bfa5eb3a2a47401d959446c4a4145c3f7a2bfea63"
         }
       }
     }
@@ -277,17 +277,17 @@
       "epoch": "current"
     },
     "corpus.total": {
-      "value": 50,
+      "value": 53,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.typed_ptx": {
-      "value": 47,
+      "value": 51,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.native_aot": {
-      "value": 45,
+      "value": 49,
       "unit": "count",
       "epoch": "current"
     },
@@ -307,17 +307,17 @@
       "epoch": "current"
     },
     "lammps.cpu_double_error": {
-      "value": 5.909999999997861e-6,
+      "value": 4.489999999995886e-6,
       "unit": "ratio",
       "epoch": "current"
     },
     "lammps.mode_difference": {
-      "value": 1.269999999997662e-6,
+      "value": 3.251373997629743e-7,
       "unit": "ratio",
       "epoch": "current"
     },
     "lammps.analytic_error": {
-      "value": 1.259717396824915e-7,
+      "value": 1.9979025887334978e-7,
       "unit": "ratio",
       "epoch": "current"
     },
@@ -332,42 +332,42 @@
       "epoch": "current"
     },
     "lammps.full_loop": {
-      "value": 4671500000,
+      "value": 1840120000,
       "unit": "ns",
       "epoch": "current"
     },
     "lammps.half_loop": {
-      "value": 6770270000,
+      "value": 1936530000,
       "unit": "ns",
       "epoch": "current"
     },
     "lammps.full_wall": {
-      "value": 18000000000,
+      "value": 22000000000,
       "unit": "ns",
       "epoch": "current"
     },
     "lammps.half_wall": {
-      "value": 554000000000,
+      "value": 159000000000,
       "unit": "ns",
       "epoch": "current"
     },
     "lammps.ctest_passed": {
-      "value": 396,
+      "value": 465,
       "unit": "count",
       "epoch": "current"
     },
     "lammps.ctest_total": {
-      "value": 396,
+      "value": 465,
       "unit": "count",
       "epoch": "current"
     },
     "lammps.typed_ptx_projects": {
-      "value": 40,
+      "value": 51,
       "unit": "count",
       "epoch": "current"
     },
     "lammps.native_aot_projects": {
-      "value": 43,
+      "value": 49,
       "unit": "count",
       "epoch": "current"
     },
@@ -407,13 +407,13 @@
       "context_digest": "blake3:9d75e3067d652d064fd0f9ef5463c4a876d208ed5af32a93860a2892b23d9535"
     },
     "demos/lammps/README.md::block:lammps.recorded_result#0": {
-      "rendered": "CPU-double error `5.91e-6`, cross-mode difference `1.27e-6`",
-      "rendered_digest": "blake3:6aba52f17c44a9d0274ebc32a57e6b1c1a7cd5becf7815af8ba7644a5b40f8fb",
+      "rendered": "CPU-double error `4.49e-6`, cross-mode difference `3.25e-7`",
+      "rendered_digest": "blake3:9a187e2ec022cbef8ba92b6f232eab048bddffe51d8e591a2672826d12d4fb77",
       "context_digest": "blake3:b28478355e0446e987acf91567886a7a6e2e2ce6d7d89eea16c251ce01c9459d"
     },
     "demos/lammps/README.md::block:lammps.recorded_result#1": {
-      "rendered": "pair-energy error `1.26e-7`. Full/Newton-off records 826 successful",
-      "rendered_digest": "blake3:16332f208f32fd829473ce209e41ce0b967c8d6e57bc1819974e1bc90238687a",
+      "rendered": "pair-energy error `2.00e-7`. Full/Newton-off records 826 successful",
+      "rendered_digest": "blake3:fadaa76a616856742a0dccaea0af724978143fc39ffb0147c217a0b7cfac597f",
       "context_digest": "blake3:20da7da9334c663c00060b7a4e8971aa7d51d9c8ec197d735b3bf7de9a4bc857"
     },
     "demos/lammps/README.md::block:lammps.recorded_result#2": {
@@ -422,18 +422,18 @@
       "context_digest": "blake3:6e153e514bd30f8d67c03178810c74b1ffc63256fdeb5dc48df700d0f51cb68f"
     },
     "demos/lammps/README.md::block:lammps.loops#0": {
-      "rendered": "took 4.67 seconds (full) and 6.77 seconds (half)",
-      "rendered_digest": "blake3:6ca43c0fc70ddfcbf6329181002ecdb2df3607001ea4c5484531b5bb362a5777",
+      "rendered": "took 1.84 seconds (full) and 1.94 seconds (half)",
+      "rendered_digest": "blake3:a3423496d8701b039dbe3ebf6ca6780e2ca44cb2d09878d3a327db4eebd54e87",
       "context_digest": "blake3:6bcea0766e9fc5f6e430bb4fec4be3d157d6827bb65754d6862089535b90d098"
     },
     "demos/lammps/README.md::block:lammps.loops#1": {
-      "rendered": "versus 18 seconds for full",
-      "rendered_digest": "blake3:e2282fdd5593f40257ff3873681111067222f051e7360c51e19c43029b2370f4",
+      "rendered": "versus 22 seconds for full",
+      "rendered_digest": "blake3:7dc0e92ac8bee65e4973ccbb25fbcb85b5bc26b30bc5a7e9a7079a8ea57d34bb",
       "context_digest": "blake3:1308d8d33d33d32b866b7ac4673a47ea3525cbeff4fe591454012c3d707c8d03"
     },
     "demos/lammps/README.md::block:lammps.loops#2": {
-      "rendered": "All 396 CuMetal CTest gates passed",
-      "rendered_digest": "blake3:c974d92ed2b02a57882d61e8d5cb3a19fb579b4756c01c5e98739080bd602b11",
+      "rendered": "All 465 CuMetal CTest gates passed",
+      "rendered_digest": "blake3:b96c3e5d349b72b2b67fcff5c5bdfdb1c2452e669c3678e3b5a486657755b9c3",
       "context_digest": "blake3:ff9ca666dcb5f38fc51a4ebb743f7fd128b47d5b57f590dc17ced7be8abe98b4"
     },
     "demos/lammps/README.md::block:lammps.loops#3": {
@@ -572,13 +572,13 @@
       "context_digest": "blake3:a8bec03f37916f89cf53f25be59f6fe272528e73d9fc4de2b29e3c6f82c5d41f"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#1": {
-      "rendered": "CPU-double error is `5.91e-6`",
-      "rendered_digest": "blake3:069fc4c2f57450eab4591995c200063eb8b0b4209203f48429aa9c351a9ead9e",
+      "rendered": "CPU-double error is `4.49e-6`",
+      "rendered_digest": "blake3:5ccdfa4ac1b9872ee1f6ec1b90dee7b0c05130d90f67642ff9983cc59cc7da81",
       "context_digest": "blake3:fa2bf0e2bacded74c4d0d6d42e02d61b164a3a47f66dc48ef5cf228169356f94"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#2": {
-      "rendered": "difference `1.27e-6`, and analytic initial pair-energy error `1.26e-7`",
-      "rendered_digest": "blake3:a35a4612da87f7cf5fa3ba2e0a996f3e5f010132e808f8923ff9b3faf1cf673e",
+      "rendered": "difference `3.25e-7`, and analytic initial pair-energy error `2.00e-7`",
+      "rendered_digest": "blake3:8ef50b175e5f2cb6d7ad25919cd07f677f7a77be83c84b7044adf8cf8d16eb26",
       "context_digest": "blake3:d96af433710eb7e901951027a2e815fd6eabadf2f2a9474bf808a2d22cbf31a6"
     },
     "docs/matmul-performance.md::block:matmul.outcome#0": {
@@ -752,13 +752,13 @@
       "context_digest": "blake3:1609b6cb82cb9a4e21e36974cd8ae4b9095e895df5aa066ba120b65e27c94e70"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#5": {
-      "rendered": "corpus now passes 40/40 typed-PTX enrollments",
-      "rendered_digest": "blake3:acb0d8d16b8205f2294a8a067bf779207772a92d3373ea7e9bd5ded365e9c8c0",
+      "rendered": "corpus now passes 51/51 typed-PTX enrollments",
+      "rendered_digest": "blake3:2f32e8b7e37a8bf9db5a72dfa44be6845b31158a4d1b01da6d92cd628d410629",
       "context_digest": "blake3:94e3e75e7c303838716bb354c46cef7c77e2c2dfba17f2c9bcf237d81d1bb471"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#6": {
-      "rendered": "43/43 direct native-AOT enrollments",
-      "rendered_digest": "blake3:49c2aede4939f14ca2a7b5039addcb676de2f714d993e40647cd277016307fb2",
+      "rendered": "49/49 direct native-AOT enrollments",
+      "rendered_digest": "blake3:ddcf9cb29f255140fc0ae37d7c8ff2e2bce2a0dbdd5ffb293236fe07d1f05679",
       "context_digest": "blake3:80f1d1809b99ada1dfb947c71cd269e6d7f9942d9351a394a22b2f039368dae1"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#7": {
@@ -782,13 +782,13 @@
       "context_digest": "blake3:1dd821a5aafe4c957f95c29cca5d001b715595bc9cca388d2864dd900ffe6c19"
     },
     "docs/status.md::block:status.snapshot#2": {
-      "rendered": "typed PTX **40/40** and direct native AOT",
-      "rendered_digest": "blake3:c2a84a884550865089584aacb8a7fe016d7e57bb6d449f31eb71c64bc5d33a74",
+      "rendered": "typed PTX **51/51** and direct native AOT",
+      "rendered_digest": "blake3:d6e141947f63e5fa63e78b5a408efa0719f090416a2c42f6d83519e6c259f0c5",
       "context_digest": "blake3:589a17f920f7584ce9c8d29f213766db200f77a2e09a44e6edb7d4dd5b880747"
     },
     "docs/status.md::block:status.snapshot#3": {
-      "rendered": "**43/43** on Apple M4 Pro",
-      "rendered_digest": "blake3:9c56ec87d254e523c8fbc2471e8eb0893842e296b9e297dd61450206d4f13fb0",
+      "rendered": "**49/49** on Apple M4 Pro",
+      "rendered_digest": "blake3:4e73571d242eb7b59d85d4c212573df22af486ee205ecf2f23b64875f5357a97",
       "context_digest": "blake3:d571e0fd916d07fd7237df0381627650ba8e95b865821c138968c576c18128b7"
     },
     "docs/status/compiler.md::table:status_compiler.backend_matrix::direct `.cu`::Legacy": {
