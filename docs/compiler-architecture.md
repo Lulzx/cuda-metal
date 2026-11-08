@@ -146,8 +146,8 @@ uses CUDA Clang 21-23:
 <!-- cw:table architecture.backend_matrix -->
 | Input corpus | `legacy` | `cumetal-ir` |
 | --- | ---: | ---: |
-| direct `.cu` | 0/54 | **54/54** |
-| `.cu --cuda-device` / PTX | **48/54** | **54/54** |
+| direct `.cu` | 0/55 | **55/55** |
+| `.cu --cuda-device` / PTX | **49/55** | **55/55** |
 
 All three input shapes therefore default to `cumetal-ir`. In the
 registration JIT the default is typed-first with one legacy retry when the

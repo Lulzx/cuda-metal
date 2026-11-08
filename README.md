@@ -27,9 +27,8 @@ cumetalc kernel.cu -o kernel
 
 ## Build from source
 
-This fork pins [krystophny/VF64-metal](https://github.com/krystophny/VF64-metal)
-for its [reduced-precision `wide48` hypot support](docs/fp64-policy.md).
-Initialize the dependency with `git submodule update --init --recursive`.
+FP64 arithmetic comes from the `third_party/VF64-metal` submodule; initialize it
+with `git submodule update --init --recursive`.
 
 From a checkout with the [build prerequisites](docs/build.md) installed:
 

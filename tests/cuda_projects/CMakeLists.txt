@@ -726,6 +726,29 @@ set_tests_properties(
             "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
 )
 
+# The benchmark above stays in [1, 2); this checks ieee64 division bitwise over
+# every exponent, overflow and subnormal results, reciprocal-table segment edges,
+# near-halfway quotients and special operands, for `/` and __drcp_rn.
+add_test(
+    NAME functional_cuda_projects_fp64_division_domain
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        fp64
+        fp64_division_domain.cu
+        fp64_division_domain
+        "PASS: ieee64 division matches host binary64 bitwise over the domain"
+)
+set_tests_properties(
+    functional_cuda_projects_fp64_division_domain
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
+        ENVIRONMENT
+            "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
+)
+
 # if (tid == 0) init; __syncthreads(); update; __syncthreads(); if (tid == 0)
 # read. Both guards share one predicate, and the PTX edge threader once cloned
 # the barrier region per edge; Metal paired the copies and lost lane 0's peers.

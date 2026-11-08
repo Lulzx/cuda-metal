@@ -95,8 +95,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 <!-- cw:table known_gaps_compiler.backend_matrix -->
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/54 | **54/54** |
-| PTX / `--cuda-device` | **48/54** | **54/54** |
+| direct `.cu` | 0/55 | **55/55** |
+| PTX / `--cuda-device` | **49/55** | **55/55** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
@@ -269,7 +269,7 @@ rounded binary64 functions for the 22 functions VF64 provides (`exp`, `log`,
 `pow`, trigonometric and hyperbolic families, `cbrt`, `hypot`, ...; see
 [FP64 policy](../fp64-policy.md)) and do not warn for them; `powi`, `exp10`,
 `log10`, the `erf` and gamma families, and calls under `fast48` or the legacy
-path remain binary32. `wide48` double `hypot` uses the pinned VF64 fork's
+path remain binary32. `wide48` double `hypot` uses VF64's
 reduced-precision helper, preserving internal exponent range through the
 squared sum and square root; its other transcendentals remain binary32.
 This helper has the documented reduced codec, rounding and special-value

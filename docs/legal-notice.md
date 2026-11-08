@@ -90,11 +90,13 @@ path is source recompilation, and binary compatibility remains bounded and opt-i
 The pinned `third_party/VF64-metal` submodule is
 [VF64-metal](https://github.com/Lulzx/VF64-metal), copyright 2026 Lulzx,
 under the [BSD 3-Clause license](../third_party/VF64-metal/LICENSE).
-The pinned dependency obtains the reduced-precision `wide48` hypot helper from
-[krystophny/VF64-metal](https://github.com/krystophny/VF64-metal), with the
-same license and original copyright notice retained. Its implementation uses
-VF64's existing floating-point expansion arithmetic; no NVIDIA implementation
-or SASS is incorporated.
+Its reduced-precision `wide48` hypot helper uses VF64's own expansion
+arithmetic. Its certified round-to-nearest division is generated from VF64's
+own description of the published reciprocal-division construction, citing
+[CCCL](https://github.com/NVIDIA/cccl) (Apache-2.0 WITH LLVM-exception),
+Berkeley SoftFloat and Lefèvre and Zimmermann; see
+[certified-division.md](../third_party/VF64-metal/docs/certified-division.md).
+No NVIDIA header, binary or SASS is incorporated.
 
 The integer reciprocal seed uses constants and a formula adapted from
 [Berkeley SoftFloat Release 3e](https://github.com/ucb-bar/berkeley-softfloat-3/tree/07ebd29db0cfb55723a79fbbffe99103ef38e305),

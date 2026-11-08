@@ -242,6 +242,20 @@
       }
     },
     {
+      "name": "fp64_division_domain",
+      "subdir": "fp64",
+      "source": "fp64_division_domain.cu",
+      "binary": "fp64_division_domain",
+      "harness": "strict",
+      "expect_pattern": "PASS: ieee64 division matches host binary64 bitwise over the domain",
+      "backends": [
+        "cumetal-ir"
+      ],
+      "env": {
+        "CUMETAL_FP64_MODE": "ieee64"
+      }
+    },
+    {
       "name": "fp64_precision",
       "subdir": "fp64",
       "source": "fp64_precision.cu",

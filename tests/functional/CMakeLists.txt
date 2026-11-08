@@ -3153,6 +3153,23 @@ foreach(roundf_backend IN ITEMS legacy cumetal-ir)
     )
 endforeach()
 
+# The PTX corpus covers fp64_division_domain under the JIT; this is the native
+# source-first build of the same bitwise conformance probe. The FP64 mode is a
+# compile-time choice here, so it is passed to cumetalc rather than the runtime.
+add_test(
+    NAME functional_fp64_division_domain_native
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_SOURCE_DIR}/tests/cuda_projects/fp64/fp64_division_domain.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/fp64_division_domain_native
+            --backend=cumetal-ir
+            --fp64=ieee64
+            "--expect-output=PASS: ieee64 division matches host binary64 bitwise over the domain"
+)
+set_tests_properties(functional_fp64_division_domain_native PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
+
 add_test(
     NAME functional_texture_descriptor_device
     COMMAND bash

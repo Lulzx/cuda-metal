@@ -68,6 +68,17 @@ through the virtual FP64 support ABI:
 - IEEE remainder and round-to-integer operations;
 - binary16/binary32 and signed/unsigned 32/64-bit integer conversions.
 
+Under `ieee64`, value-only round-to-nearest division (`vf64_div_rne`, which
+plain `/` and `div.rn.f64` lower to) uses VF64's certified table reciprocal for
+normal finite operands. Operands that are not normal, and reciprocals that
+fail VF64's exact certificate, fall back to the restoring divider, and overflow
+and subnormal results go through the shared rounding packer. Directed-rounding
+and flag-reporting division keep the restoring implementation.
+`functional_cuda_projects_fp64_division_domain` (PTX JIT) and
+`functional_fp64_division_domain_native` (native build) compare GPU quotients
+bitwise with host binary64 division across the exponent range, subnormal and
+overflowing results, near-tie quotients and special values.
+
 On the MSL lowering path, double-precision libdevice calls without a software
 primitive -- `exp`/`log`/trigonometric/hyperbolic families, `pow`, `fmod`,
 `hypot`, `erf`, `ldexp`/`scalbn`/`powi`, `nextafter`, `sinpi`/`cospi`/
@@ -94,8 +105,7 @@ them. `wide48` uses it except for the reduced hypot helper below. `functional_cu
 ulp of the host libm, including arguments outside binary32 range.
 
 Under `wide48`, typed PTX and NVVM double `hypot` calls use
-`vf64_wide_hypot` from the pinned
-[krystophny/VF64-metal fork](https://github.com/krystophny/VF64-metal).
+`vf64_wide_hypot` from the pinned VF64 submodule.
 The helper retains an explicit integer scale through both squares, their
 positive sum and the square root, then packs the reduced result into binary64.
 Infinity precedes NaN after reduced decoding, and two zero inputs return
