@@ -35,15 +35,19 @@ Recorded on Apple M4 Pro, 2026-11-09, ten 640×480 views,
 | | |
 | --- | --- |
 | Kernel launches | 11,800 across 14 kernels, all `device=apple_gpu launch_success=true` |
-| Depth coverage after filtering | 81–96% per view (edge views lowest) |
-| Kept depths within 1% of truth | 96–98% per view |
-| Per-view median depth error | 0.05–0.09% |
-| Fused points (`stereo_fusion`) | 68,996, 98.0% within 1 cm of the true surface, median 2.3 mm |
-| `patch_match_stereo` wall time | 18 min 44 s |
+| Depth coverage after filtering | 78–96% per view (edge views lowest) |
+| Kept depths within 1% of truth | 97–99% per view |
+| Per-view median depth error | 0.05–0.08% |
+| Fused points (`stereo_fusion`) | 73,549, 97.9% within 1 cm of the true surface, median 2.5 mm |
+| `patch_match_stereo` wall time | 12 min 2 s (18 min 44 s before the texture-fetch work) |
 
-It is correct but slow: COLMAP launches one thread per image column, so a sweep
-is 20 threadgroups of 32 threads walking every row, and CuMetal implements
-texture fetches in software. Speed is the next piece of work.
+It is correct but slow. COLMAP launches one thread per image column, so a sweep
+is 20 threadgroups of 32 threads walking every row: the GPU is mostly idle and
+each thread's latency is the whole cost. CuMetal implements texture fetches in
+software; reading the descriptor once per fetch, a clamp/border-only path for
+unnormalized coordinates and branch-free bilinear taps cut a layered fetch from
+about 615 ns to 270 ns. Sampling through Metal textures in hardware is the next
+large step.
 
 ## How it is checked
 
@@ -82,7 +86,12 @@ own test:
   `cudaTextureObject_t` arguments in the cost computer struct and only
   `Compute()` reads them. They were bound as integers, so the GPU read through
   host addresses and every cost came out as the maximum. Parameter inference
-  now follows a handle through the struct into the helper.
+  now follows a handle through the struct into the helper, and a handle the
+  kernel passes straight to an out-of-line helper
+  (`ComputeGeomConsistencyCost`, once faster texture fetches made Clang stop
+  inlining it) is a pointer too.
+- **Texture semantics.** `cudaAddressModeBorder` returns zero outside the
+  texture and `tex2DLayered` honours linear filtering, as COLMAP expects.
 - **Typed PTX importer:** 2-byte struct returns read/written as one `b16` word
   (`Eigen::half`); `__constant__` reads from out-of-line helpers; libdevice
   calls known not to write private memory; `selp`-indexed tables of private

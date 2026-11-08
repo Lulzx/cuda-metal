@@ -43,9 +43,9 @@ depth is the reference, since COLMAP has no CPU PatchMatch:
 bash demos/colmap/run.sh
 ```
 
-The recorded M4 Pro run has 0.05-0.09% median depth error per view and 98.0%
+The recorded M4 Pro run has 0.05-0.08% median depth error per view and 97.9%
 of fused points within 1 cm of the true surface. It is correct but slow (about
-19 minutes for ten 640x480 views). See [the COLMAP guide](../demos/colmap/README.md).
+12 minutes for ten 640x480 views). See [the COLMAP guide](../demos/colmap/README.md).
 
 ## 3D Gaussian Splatting
 

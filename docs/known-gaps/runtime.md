@@ -151,7 +151,12 @@ fire-and-forget graph semantics are not implemented.
 
 Texture/surface object lifecycle, arrays, copies, and selected source descriptor
 helpers exist. Source `tex1Dfetch` now has numerical scalar/vector element reads
-and clamp/zero-border coverage for tracked linear resources. Direct PTX
+and clamp/zero-border coverage for tracked linear resources. Source `tex2D` and
+`tex2DLayered` honour border (zero) and clamp addressing for unnormalized
+coordinates and linear filtering within a layer, checked against host results
+(`functional_texture_sampling_semantics`). All sampling is software: linear
+filtering blends in binary32 rather than CUDA's 9-bit fixed-point weights, and
+each fetch costs several instructions where hardware uses one. Direct PTX
 indirect-object `txq`/`suq` width, height, and depth queries have strict-lowering
 and numerical Apple-GPU coverage. Direct PTX sampling, surface load/store/reduction,
 other query attributes, static opaque-reference operands, native Metal texture ABI,

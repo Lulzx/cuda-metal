@@ -1674,6 +1674,9 @@ __device__ __forceinline__ int __cumetal_texture_index(float coordinate,
         index %= period;
         if (index < 0) index += period;
         if (index >= extent) index = period - 1 - index;
+    } else if (address_mode == cudaAddressModeBorder) {
+        // Outside the texture: the caller fetches the border colour (zero).
+        if (index < 0 || index >= extent) return -1;
     } else {
         if (index < 0) index = 0;
         if (index >= extent) index = extent - 1;
@@ -1681,9 +1684,23 @@ __device__ __forceinline__ int __cumetal_texture_index(float coordinate,
     return index;
 }
 
+// The address mode CUDA applies on one axis. Border and clamp hold for
+// unnormalized coordinates too; wrap and mirror need normalized coordinates
+// and otherwise behave as clamp.
+__device__ __forceinline__ unsigned int __cumetal_texture_address_mode(
+    const __cumetal_texture_descriptor* descriptor, int axis) {
+    const unsigned int mode = descriptor->address_mode[axis];
+    if (!descriptor->normalized_coords &&
+        (mode == cudaAddressModeWrap || mode == cudaAddressModeMirror))
+        return cudaAddressModeClamp;
+    return mode;
+}
+
 template <typename T>
 __device__ __forceinline__ T __cumetal_texture_load(
     const __cumetal_texture_descriptor* descriptor, int x, int y, int z) {
+    // A negative index is a border-mode texel outside the texture.
+    if (x < 0 || y < 0 || z < 0) return T{};
     const unsigned long long offset =
         static_cast<unsigned long long>(z) * descriptor->pitch_bytes * descriptor->height +
         static_cast<unsigned long long>(y) * descriptor->pitch_bytes +
@@ -1744,9 +1761,7 @@ __device__ __forceinline__ T tex1D(cudaTextureObject_t texture, float x) {
                               ? x * static_cast<float>(descriptor->width) : x) - 0.5f;
         float fx = 0.0f;
         const int x0 = __cumetal_texture_floor(sx, &fx);
-        const unsigned int address_x = descriptor->normalized_coords
-                                           ? descriptor->address_mode[0]
-                                           : cudaAddressModeClamp;
+        const unsigned int address_x = __cumetal_texture_address_mode(descriptor, 0);
         const int ix0 = __cumetal_texture_index(static_cast<float>(x0), descriptor->width,
                                                 0, address_x);
         const int ix1 = __cumetal_texture_index(static_cast<float>(x0 + 1), descriptor->width,
@@ -1757,14 +1772,136 @@ __device__ __forceinline__ T tex1D(cudaTextureObject_t texture, float x) {
     }
     const int ix = __cumetal_texture_index(x, descriptor->width,
                                            descriptor->normalized_coords,
-                                           descriptor->normalized_coords
-                                               ? descriptor->address_mode[0]
-                                               : cudaAddressModeClamp);
+                                           __cumetal_texture_address_mode(descriptor, 0));
     return __cumetal_texture_load<T>(descriptor, ix, 0, 0);
+}
+
+// A texture's fields, read once and unconditionally so a sampling loop can
+// keep them in registers: a load under a filter-mode branch cannot be hoisted,
+// and reloading the descriptor before every texel doubles a fetch's latency.
+struct __cumetal_texture_view {
+    const unsigned char* data;
+    int width, height, depth;
+    unsigned long long pitch;
+    unsigned int element_bytes;
+    bool normalized_8bit;
+    bool linear;
+    bool normalized_coords;
+    unsigned int mode_x, mode_y;
+};
+
+__device__ __forceinline__ __cumetal_texture_view __cumetal_texture_view_of(cudaTextureObject_t texture) {
+    const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
+    __cumetal_texture_view view;
+    view.data = reinterpret_cast<const unsigned char*>(descriptor->data);
+    view.width = static_cast<int>(descriptor->width);
+    view.height = static_cast<int>(descriptor->height);
+    view.depth = static_cast<int>(descriptor->depth);
+    view.pitch = descriptor->pitch_bytes;
+    view.element_bytes = descriptor->element_bytes;
+    view.normalized_8bit = descriptor->read_mode == cudaReadModeNormalizedFloat &&
+                           descriptor->channel_kind == cudaChannelFormatKindUnsigned &&
+                           descriptor->element_bytes == 1;
+    view.linear = descriptor->filter_mode == cudaFilterModeLinear;
+    view.normalized_coords = descriptor->normalized_coords != 0;
+    view.mode_x = __cumetal_texture_address_mode(descriptor, 0);
+    view.mode_y = __cumetal_texture_address_mode(descriptor, 1);
+    return view;
+}
+
+// Index of texel `index` along an axis of `extent` texels for unnormalized
+// coordinates, where only clamp and border apply; -1 is a border texel.
+__device__ __forceinline__ int __cumetal_texture_unnormalized_index(int index, int extent, unsigned int mode) {
+    if (mode == cudaAddressModeBorder) return (index < 0 || index >= extent) ? -1 : index;
+    return index < 0 ? 0 : (index >= extent ? extent - 1 : index);
+}
+
+template <typename T>
+__device__ __forceinline__ T __cumetal_texture_view_load(const __cumetal_texture_view& view,
+                                                         const unsigned char* layer, int x, int y) {
+    if (x < 0 || y < 0) return T{};
+    const unsigned char* bytes = layer + static_cast<unsigned long long>(y) * view.pitch +
+                                 static_cast<unsigned long long>(x) * view.element_bytes;
+    if constexpr (std::is_arithmetic<T>::value) {
+        if (view.normalized_8bit) return static_cast<T>(static_cast<float>(*bytes) * (1.0f / 255.0f));
+    }
+    return *reinterpret_cast<const T*>(bytes);
+}
+
+// Bilinear fetch of the 2x2 block at (x0, y0) for unnormalized coordinates,
+// without a branch per tap: every index is clamped to a real texel, all four
+// loads are issued, and border taps are zeroed afterwards. Straight-line code
+// lets the GPU keep several fetches in flight; a branch per tap serialized
+// them, which dominated COLMAP's PatchMatch sweep.
+template <typename T>
+__device__ __forceinline__ T __cumetal_texture_bilinear(const __cumetal_texture_view& view,
+                                                        const unsigned char* plane,
+                                                        int x0, int y0, float fx, float fy) {
+    const bool border_x = view.mode_x == cudaAddressModeBorder;
+    const bool border_y = view.mode_y == cudaAddressModeBorder;
+    const int last_x = view.width - 1;
+    const int last_y = view.height - 1;
+    const int cx0 = x0 < 0 ? 0 : (x0 > last_x ? last_x : x0);
+    const int cx1 = x0 + 1 < 0 ? 0 : (x0 + 1 > last_x ? last_x : x0 + 1);
+    const int cy0 = y0 < 0 ? 0 : (y0 > last_y ? last_y : y0);
+    const int cy1 = y0 + 1 < 0 ? 0 : (y0 + 1 > last_y ? last_y : y0 + 1);
+    const bool in_x0 = !border_x || (x0 >= 0 && x0 <= last_x);
+    const bool in_x1 = !border_x || (x0 + 1 >= 0 && x0 + 1 <= last_x);
+    const bool in_y0 = !border_y || (y0 >= 0 && y0 <= last_y);
+    const bool in_y1 = !border_y || (y0 + 1 >= 0 && y0 + 1 <= last_y);
+    // Offsets within one layer fit in 32 bits (a layer is far below 4 GiB);
+    // 64-bit integer arithmetic costs several instructions per operation on
+    // Apple GPUs, and a fetch's instruction count is what a PatchMatch sweep,
+    // at one SIMD-group per core, actually waits on.
+    const unsigned int pitch = static_cast<unsigned int>(view.pitch);
+    const unsigned int row0 = static_cast<unsigned int>(cy0) * pitch;
+    const unsigned int row1 = static_cast<unsigned int>(cy1) * pitch;
+    T p00, p10, p01, p11;
+    if constexpr (std::is_arithmetic<T>::value) {
+        if (view.normalized_8bit) {
+            constexpr float kScale = 1.0f / 255.0f;
+            p00 = static_cast<T>(static_cast<float>(plane[row0 + static_cast<unsigned int>(cx0)]) * kScale);
+            p10 = static_cast<T>(static_cast<float>(plane[row0 + static_cast<unsigned int>(cx1)]) * kScale);
+            p01 = static_cast<T>(static_cast<float>(plane[row1 + static_cast<unsigned int>(cx0)]) * kScale);
+            p11 = static_cast<T>(static_cast<float>(plane[row1 + static_cast<unsigned int>(cx1)]) * kScale);
+            goto mix;
+        }
+    }
+    {
+        const unsigned int element = view.element_bytes;
+        p00 = *reinterpret_cast<const T*>(plane + (row0 + static_cast<unsigned int>(cx0) * element));
+        p10 = *reinterpret_cast<const T*>(plane + (row0 + static_cast<unsigned int>(cx1) * element));
+        p01 = *reinterpret_cast<const T*>(plane + (row1 + static_cast<unsigned int>(cx0) * element));
+        p11 = *reinterpret_cast<const T*>(plane + (row1 + static_cast<unsigned int>(cx1) * element));
+    }
+mix:
+    p00 = in_x0 && in_y0 ? p00 : T{};
+    p10 = in_x1 && in_y0 ? p10 : T{};
+    p01 = in_x0 && in_y1 ? p01 : T{};
+    p11 = in_x1 && in_y1 ? p11 : T{};
+    return __cumetal_texture_mix(__cumetal_texture_mix(p00, p10, fx),
+                                 __cumetal_texture_mix(p01, p11, fx), fy);
 }
 
 template <typename T>
 __device__ __forceinline__ T tex2D(cudaTextureObject_t texture, float x, float y) {
+    const __cumetal_texture_view view = __cumetal_texture_view_of(texture);
+    if (!view.normalized_coords) {
+        // Unnormalized coordinates (COLMAP reads its poses and reference
+        // image this way): clamp/border only, descriptor fields in registers.
+        if (view.linear) {
+            float fx = 0.0f;
+            float fy = 0.0f;
+            const int x0 = __cumetal_texture_floor(x - 0.5f, &fx);
+            const int y0 = __cumetal_texture_floor(y - 0.5f, &fy);
+            return __cumetal_texture_bilinear<T>(view, view.data, x0, y0, fx, fy);
+        }
+        float unused = 0.0f;
+        return __cumetal_texture_view_load<T>(
+            view, view.data,
+            __cumetal_texture_unnormalized_index(__cumetal_texture_floor(x, &unused), view.width, view.mode_x),
+            __cumetal_texture_unnormalized_index(__cumetal_texture_floor(y, &unused), view.height, view.mode_y));
+    }
     const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
     if (descriptor->filter_mode == cudaFilterModeLinear) {
         const float sx = (descriptor->normalized_coords
@@ -1775,12 +1912,8 @@ __device__ __forceinline__ T tex2D(cudaTextureObject_t texture, float x, float y
         int y0 = static_cast<int>(sy); if (static_cast<float>(y0) > sy) --y0;
         const float fx = sx - static_cast<float>(x0);
         const float fy = sy - static_cast<float>(y0);
-        const unsigned int address_x = descriptor->normalized_coords
-                                           ? descriptor->address_mode[0]
-                                           : cudaAddressModeClamp;
-        const unsigned int address_y = descriptor->normalized_coords
-                                           ? descriptor->address_mode[1]
-                                           : cudaAddressModeClamp;
+        const unsigned int address_x = __cumetal_texture_address_mode(descriptor, 0);
+        const unsigned int address_y = __cumetal_texture_address_mode(descriptor, 1);
         const int ix0 = __cumetal_texture_index(static_cast<float>(x0), descriptor->width,
                                                 0, address_x);
         const int ix1 = __cumetal_texture_index(static_cast<float>(x0 + 1), descriptor->width,
@@ -1798,30 +1931,59 @@ __device__ __forceinline__ T tex2D(cudaTextureObject_t texture, float x, float y
     }
     const int ix = __cumetal_texture_index(x, descriptor->width,
                                            descriptor->normalized_coords,
-                                           descriptor->normalized_coords
-                                               ? descriptor->address_mode[0]
-                                               : cudaAddressModeClamp);
+                                           __cumetal_texture_address_mode(descriptor, 0));
     const int iy = __cumetal_texture_index(y, descriptor->height,
                                            descriptor->normalized_coords,
-                                           descriptor->normalized_coords
-                                               ? descriptor->address_mode[1]
-                                               : cudaAddressModeClamp);
+                                           __cumetal_texture_address_mode(descriptor, 1));
     return __cumetal_texture_load<T>(descriptor, ix, iy, 0);
 }
 
 template <typename T>
 __device__ __forceinline__ T tex2DLayered(cudaTextureObject_t texture,
                                           float x, float y, int layer) {
+    const __cumetal_texture_view view = __cumetal_texture_view_of(texture);
+    // The layer index is never filtered or wrapped: CUDA clamps it.
+    const int iz = layer < 0 ? 0 : (layer >= view.depth ? view.depth - 1 : layer);
+    const unsigned char* plane = view.data + static_cast<unsigned long long>(iz) * view.pitch *
+                                                 static_cast<unsigned long long>(view.height);
+    if (!view.normalized_coords) {
+        // The common case (COLMAP's PatchMatch): unnormalized coordinates,
+        // so only clamp and border addressing can apply.
+        if (view.linear) {
+            float fx = 0.0f;
+            float fy = 0.0f;
+            const int x0 = __cumetal_texture_floor(x - 0.5f, &fx);
+            const int y0 = __cumetal_texture_floor(y - 0.5f, &fy);
+            return __cumetal_texture_bilinear<T>(view, plane, x0, y0, fx, fy);
+        }
+        float unused = 0.0f;
+        return __cumetal_texture_view_load<T>(
+            view, plane,
+            __cumetal_texture_unnormalized_index(__cumetal_texture_floor(x, &unused), view.width, view.mode_x),
+            __cumetal_texture_unnormalized_index(__cumetal_texture_floor(y, &unused), view.height, view.mode_y));
+    }
     const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
-    const int ix = __cumetal_texture_index(x, descriptor->width,
-                                           descriptor->normalized_coords,
-                                           descriptor->address_mode[0]);
-    const int iy = __cumetal_texture_index(y, descriptor->height,
-                                           descriptor->normalized_coords,
-                                           descriptor->address_mode[1]);
-    const int iz = layer < 0 ? 0 : (layer >= static_cast<int>(descriptor->depth)
-                                        ? static_cast<int>(descriptor->depth) - 1 : layer);
-    return __cumetal_texture_load<T>(descriptor, ix, iy, iz);
+    if (view.linear) {
+        // Bilinear within the layer, each of the four taps addressed on its
+        // own so border taps contribute the border colour, as on hardware.
+        float fx = 0.0f;
+        float fy = 0.0f;
+        const int x0 = __cumetal_texture_floor(x * static_cast<float>(view.width) - 0.5f, &fx);
+        const int y0 = __cumetal_texture_floor(y * static_cast<float>(view.height) - 0.5f, &fy);
+        const int ix0 = __cumetal_texture_index(static_cast<float>(x0), descriptor->width, 0, view.mode_x);
+        const int ix1 = __cumetal_texture_index(static_cast<float>(x0 + 1), descriptor->width, 0, view.mode_x);
+        const int iy0 = __cumetal_texture_index(static_cast<float>(y0), descriptor->height, 0, view.mode_y);
+        const int iy1 = __cumetal_texture_index(static_cast<float>(y0 + 1), descriptor->height, 0, view.mode_y);
+        const T p00 = __cumetal_texture_view_load<T>(view, plane, ix0, iy0);
+        const T p10 = __cumetal_texture_view_load<T>(view, plane, ix1, iy0);
+        const T p01 = __cumetal_texture_view_load<T>(view, plane, ix0, iy1);
+        const T p11 = __cumetal_texture_view_load<T>(view, plane, ix1, iy1);
+        return __cumetal_texture_mix(__cumetal_texture_mix(p00, p10, fx),
+                                     __cumetal_texture_mix(p01, p11, fx), fy);
+    }
+    const int ix = __cumetal_texture_index(x, descriptor->width, 1, view.mode_x);
+    const int iy = __cumetal_texture_index(y, descriptor->height, 1, view.mode_y);
+    return __cumetal_texture_view_load<T>(view, plane, ix, iy);
 }
 
 template <typename T>
@@ -1830,13 +1992,13 @@ __device__ __forceinline__ T tex3D(cudaTextureObject_t texture,
     const auto* descriptor = reinterpret_cast<const __cumetal_texture_descriptor*>(texture);
     const int ix = __cumetal_texture_index(x, descriptor->width,
                                            descriptor->normalized_coords,
-                                           descriptor->address_mode[0]);
+                                           __cumetal_texture_address_mode(descriptor, 0));
     const int iy = __cumetal_texture_index(y, descriptor->height,
                                            descriptor->normalized_coords,
-                                           descriptor->address_mode[1]);
+                                           __cumetal_texture_address_mode(descriptor, 1));
     const int iz = __cumetal_texture_index(z, descriptor->depth,
                                            descriptor->normalized_coords,
-                                           descriptor->address_mode[2]);
+                                           __cumetal_texture_address_mode(descriptor, 2));
     return __cumetal_texture_load<T>(descriptor, ix, iy, iz);
 }
 

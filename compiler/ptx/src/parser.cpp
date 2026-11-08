@@ -629,12 +629,59 @@ void infer_pointer_parameters_through_calls(ModuleInfo* module) {
         }
         return helper_pointer_fields[key] = fields;
     };
+    // Whether a helper uses its parameter `index` itself as a memory address
+    // (directly, or after one add/mov/cvta hop).
+    std::unordered_map<std::string, bool> helper_dereferences;
+    const auto dereferences_param = [&](const EntryFunction& helper, std::size_t index) {
+        const std::string key = helper.name + "#" + std::to_string(index);
+        if (const auto found = helper_dereferences.find(key); found != helper_dereferences.end())
+            return found->second;
+        bool used = false;
+        if (index < helper.params.size()) {
+            std::unordered_set<std::string> carriers;
+            for (const auto& instruction : helper.instructions) {
+                if (starts_with(instruction.opcode, "ld.param") && is_wide(instruction.opcode) &&
+                    instruction.operands.size() == 2 &&
+                    extract_param_name_from_operand(instruction.operands[1]) == helper.params[index].name)
+                    carriers.insert(extract_register_name(instruction.operands[0]));
+            }
+            std::unordered_set<std::string> addresses = carriers;
+            for (const auto& instruction : helper.instructions) {
+                const std::string root = opcode_root(instruction.opcode);
+                if ((root == "add" || root == "mov" || root == "cvta") && instruction.operands.size() >= 2 &&
+                    is_wide(instruction.opcode)) {
+                    for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
+                        if (carriers.contains(extract_register_name(instruction.operands[i]))) {
+                            addresses.insert(extract_register_name(instruction.operands[0]));
+                            break;
+                        }
+                    }
+                }
+            }
+            for (const auto& instruction : helper.instructions) {
+                if (used) break;
+                if (!is_memory_opcode(instruction.opcode) || starts_with(instruction.opcode, "ld.param") ||
+                    starts_with(instruction.opcode, "st.param"))
+                    continue;
+                for (const auto& operand : instruction.operands) {
+                    std::string base;
+                    std::int64_t offset = 0;
+                    if (bracket_parts(operand, &base, &offset) && addresses.contains(base)) {
+                        used = true;
+                        break;
+                    }
+                }
+            }
+        }
+        return helper_dereferences[key] = used;
+    };
 
     for (auto& entry : module->entries) {
         std::unordered_map<std::string, std::int64_t> frame;   // register -> depot offset
         std::unordered_map<std::string, std::size_t> param_value;  // register -> param index
         std::unordered_map<std::int64_t, std::size_t> spilled;     // depot offset -> param index
         std::unordered_map<std::string, std::int64_t> staged;      // call arg name -> depot offset
+        std::unordered_map<std::string, std::size_t> staged_param;  // call arg name -> param index
         std::unordered_set<std::size_t> pointers;
         for (const auto& instruction : entry.instructions) {
             const std::string root = opcode_root(instruction.opcode);
@@ -649,6 +696,13 @@ void infer_pointer_parameters_through_calls(ModuleInfo* module) {
                 if (const auto source = frame.find(extract_register_name(instruction.operands[1]));
                     source != frame.end()) {
                     frame[dest] = source->second;
+                    continue;
+                }
+                if (const auto source = param_value.find(extract_register_name(instruction.operands[1]));
+                    source != param_value.end() && is_wide(instruction.opcode)) {
+                    const std::size_t index = source->second;
+                    frame.erase(dest);
+                    param_value[dest] = index;
                     continue;
                 }
             }
@@ -681,6 +735,11 @@ void infer_pointer_parameters_through_calls(ModuleInfo* module) {
                     staged[name] = value->second;
                 else
                     staged.erase(name);
+                if (const auto value = param_value.find(extract_register_name(instruction.operands[1]));
+                    value != param_value.end())
+                    staged_param[name] = value->second;
+                else
+                    staged_param.erase(name);
                 continue;
             }
             if (root == "st" && instruction.operands.size() == 2 && is_wide(instruction.opcode) &&
@@ -718,6 +777,14 @@ void infer_pointer_parameters_through_calls(ModuleInfo* module) {
                 const auto helper = helpers.find(callee);
                 if (helper != helpers.end()) {
                     for (std::size_t k = 0; k < arguments.size(); ++k) {
+                        // The parameter's value itself is the argument, and
+                        // the helper dereferences it: a texture object or
+                        // pointer the kernel only forwards (COLMAP passes its
+                        // depth-map texture straight to an out-of-line
+                        // ComputeGeomConsistencyCost).
+                        if (const auto direct = staged_param.find(arguments[k]);
+                            direct != staged_param.end() && dereferences_param(*helper->second, k))
+                            pointers.insert(direct->second);
                         const auto base = staged.find(arguments[k]);
                         if (base == staged.end()) continue;
                         for (const auto field : pointer_fields(*helper->second, k)) {

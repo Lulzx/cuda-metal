@@ -41,6 +41,33 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
+  returns the border colour (zero) outside the texture instead of clamping,
+  for unnormalized coordinates too, and `tex2DLayered` honours
+  `cudaFilterModeLinear` (it always sampled the nearest texel). COLMAP's
+  PatchMatch relies on both.
+- **Faster texture fetches.** `tex2D`/`tex2DLayered` read the descriptor once
+  per fetch, take a clamp/border-only path for unnormalized coordinates and
+  fetch the four bilinear taps without a branch each, using 32-bit offsets
+  within a layer. A layered bilinear fetch went from about 615 ns to 270 ns
+  per thread at COLMAP's launch shape; a PatchMatch sweep with correct
+  bilinear sampling runs in 1.4-1.9 s instead of 2.7-3.6 s.
+- **Pointer parameters a kernel only forwards to a helper.** A 64-bit kernel
+  parameter passed unchanged (or after `mov`/`cvta`) as an argument to a
+  device function that dereferences it is now bound as a pointer. It was bound
+  as a scalar, so the kernel handed the helper a host address: COLMAP's
+  PatchMatch sweeps, once the faster texture fetches left
+  `ComputeGeomConsistencyCost` out of line, read garbage source depths, every
+  geometric cost hit its cap and the filtered pass dropped every pixel.
+- **Guard liveness.** Runtime-guarded private stores no longer protect a stack
+  cell whose pointer is dead (compilers reuse slots): a callee that only
+  writes through a passed pointer, a narrow load, or a load through a pointer
+  proven non-private no longer keeps it live, and guards are computed from
+  the final proof round. A correct COLMAP sweep was failing with a false
+  report. A guard a helper function needs is kept when a later function of
+  the same import runs its own proof (it was dropped, leaving the helper's
+  store unguarded).
+
 - **Typed PTX import of 2-byte struct returns.** A `.b8 retval[2]` return
   written or read as one `b16` word (`Eigen::half`) is split into or rebuilt
   from its byte fields. Any naturally aligned scalar word that exactly covers a

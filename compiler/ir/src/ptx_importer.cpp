@@ -1076,6 +1076,9 @@ struct Importer {
         }
     };
     std::unordered_map<int, GuardedStore> guarded_stores;
+    // Liveness-based guard requests from this function's latest proof round
+    // (see validate_local_load_proofs).
+    std::vector<PtxImportResult::PrivateStoreGuardRequest> unbounded_store_guard_requests;
     std::unordered_map<std::string, ModuleConstantSymbol>
         module_initialized_symbols;
     std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
@@ -2767,6 +2770,12 @@ struct Importer {
         std::unordered_set<const Instruction*> provisional_dependencies;
         const auto validate_local_load_proofs = [&](const auto& candidates, auto& refined) {
             if (candidates.empty()) return true;
+            // Guards a walk relied on accumulate in the result (which is
+            // shared by every function of the import). The liveness-based
+            // guards for this function's other unbounded stores are
+            // recomputed each round, since a later round knows more pointer
+            // types; the last round's set is merged when type resolution ends.
+            unbounded_store_guard_requests.clear();
             deferred_proof_pending = false;
             deferred_proof_reason.clear();
             deferred_sibling_loads.clear();
@@ -3398,13 +3407,49 @@ struct Importer {
                 if (opcode.find(".global") != std::string::npos || opcode.find(".shared") != std::string::npos ||
                     opcode.find(".const") != std::string::npos || opcode.find(".param") != std::string::npos)
                     return false;
-                if (const auto value = source_value(load, load->operands[1]); value && value_types.contains(*value)) {
+                const auto value = source_value(load, load->operands[1]);
+                if (value && value_types.contains(*value)) {
                     const auto& type = value_types.at(*value);
                     if (type.is_pointer() && type.address_space != AddressSpace::kNone &&
                         type.address_space != AddressSpace::kPrivate)
                         return false;
                 }
-                return true;
+                // An address computed (mov/add/sub) from a pointer this round
+                // has proven to be device, threadgroup or constant -- a texture
+                // descriptor reached through a handle kept on the stack.
+                std::vector<ValueId> pending;
+                if (value) pending.push_back(*value);
+                std::unordered_set<ValueId> visited;
+                while (!pending.empty()) {
+                    const auto current = pending.back();
+                    pending.pop_back();
+                    if (!visited.insert(current).second || !definitions.contains(current)) return true;
+                    const auto* definition = definitions.at(current);
+                    if (root_opcode(definition->opcode) == "ld" &&
+                        definition->opcode.find(".local") != std::string::npos) {
+                        const auto found = refined.find(proof_key(definition));
+                        if (found == refined.end() || found->second.empty()) return true;
+                        for (const auto& [lane, type] : found->second)
+                            if (!type.is_pointer() || type.address_space == AddressSpace::kNone ||
+                                type.address_space == AddressSpace::kPrivate)
+                                return true;
+                        continue;
+                    }
+                    const auto root = root_opcode(definition->opcode);
+                    if ((root != "mov" && root != "add" && root != "sub") || !definition->predicate.empty())
+                        return true;
+                    bool pointer_operand = false;
+                    for (std::size_t i = 1; i < definition->operands.size(); ++i) {
+                        if (integer_literal(definition->operands[i])) continue;
+                        const auto input = source_value(definition, definition->operands[i]);
+                        if (!input) return true;
+                        if (pointer_operand) return true;  // two non-literal operands: not a plain offset
+                        pointer_operand = true;
+                        pending.push_back(*input);
+                    }
+                    if (!pointer_operand) return true;
+                }
+                return false;
             };
             // Bytes past a pointer parameter that a callee reads through it at
             // fixed offsets; nullopt when the pointer is used any other way
@@ -3430,12 +3475,19 @@ struct Importer {
                         const bool memory_operand = operand.find('[') != std::string::npos;
                         const std::string reg = memory_operand ? first_register(operand) : trim(operand);
                         if (!carriers.contains(reg)) continue;
-                        // Only a load's address operand is a plain field read.
+                        // A store through the pointer writes; it cannot read a
+                        // pointer back. Any other use (arithmetic, storing the
+                        // pointer itself, passing it on) may reach anything.
+                        if (root_opcode(instruction.opcode) == "st" && i == 0 && memory_operand) continue;
                         if (!(root_opcode(instruction.opcode) == "ld" && i == 1 && memory_operand))
                             return extent = std::nullopt;
+                        // A pointer can only be read back through a load of at
+                        // least its size; narrower loads read data that happens
+                        // to share a reused stack slot.
                         const std::int64_t bytes =
                             static_cast<std::int64_t>(ptx_scalar_type(instruction.opcode).bit_width / 8) *
                             static_cast<std::int64_t>(memory_vector_width(instruction.opcode));
+                        if (bytes < 8) continue;
                         reach = std::max(reach, memory_operand_offset(operand) + bytes);
                     }
                 }
@@ -3526,11 +3578,12 @@ struct Importer {
             // fields with a weaker analysis than this one and would stop at
             // any of them.
             bool unbounded_stores_requested = false;
+            bool unbounded_guards_needed = false;
             const auto request_unbounded_store_guards = [&] {
                 if (unbounded_stores_requested) return;
                 unbounded_stores_requested = true;
                 const auto cells = pointer_depot_cells();
-                auto& requests = result.private_store_guard_requests;
+                auto& requests = unbounded_store_guard_requests;
                 for (const auto& raw_block : raw_blocks) {
                     for (const auto* store : raw_block.instructions) {
                         if (!starts_with(store->opcode, "st.local") || !store->predicate.empty() ||
@@ -3727,7 +3780,7 @@ struct Importer {
                                         auto& requests = result.private_store_guard_requests;
                                         if (std::find(requests.begin(), requests.end(), request) == requests.end())
                                             requests.push_back(request);
-                                        request_unbounded_store_guards();
+                                        unbounded_guards_needed = true;
                                         continue;
                                     }
                                     if (!written->offsets) {
@@ -3803,6 +3856,9 @@ struct Importer {
                     }
                 }
             }
+            // At the end of the round, when this round's pointer types are
+            // known, so liveness can rule out loads through proven pointers.
+            if (unbounded_guards_needed) request_unbounded_store_guards();
             return true;
         };
 
@@ -9549,7 +9605,13 @@ PtxImportResult import_ptx_once(std::string_view ptx, const PtxImportOptions& op
         }
         {
             common::CompileTrace trace("ptx_resolve_types", 0, function->name);
-            if (!next.resolve_types()) {
+            const bool resolved = next.resolve_types();
+            auto& requests = next.result.private_store_guard_requests;
+            for (const auto& request : next.unbounded_store_guard_requests) {
+                if (std::find(requests.begin(), requests.end(), request) == requests.end())
+                    requests.push_back(request);
+            }
+            if (!resolved) {
                 importer = std::move(next);
                 return false;
             }

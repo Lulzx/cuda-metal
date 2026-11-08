@@ -3222,6 +3222,26 @@ add_test(
 set_tests_properties(functional_texture_descriptor_device PROPERTIES SKIP_RETURN_CODE 77)
 
 add_test(
+    NAME functional_texture_sampling_semantics
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/texture_sampling_semantics.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/texture_sampling_semantics
+)
+set_tests_properties(functional_texture_sampling_semantics PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_texture_helper_call
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/texture_helper_call.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/texture_helper_call
+)
+set_tests_properties(functional_texture_helper_call PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
     NAME functional_memcpy2d_device_synchronization
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh

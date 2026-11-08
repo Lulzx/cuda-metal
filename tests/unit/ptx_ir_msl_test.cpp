@@ -977,6 +977,88 @@ $L_done:
     return ok;
 }
 
+// The guard a helper's unbounded store needs survives the proof rounds of
+// the functions imported after it: the import result is shared, and a later
+// function's pointer-cell proof must not drop the helper's request (which
+// left the helper's store unguarded and COLMAP's filtered geometric sweep
+// overwriting its own pointers).
+bool test_helper_private_store_guard_survives_caller_proof() {
+    using namespace cumetal;
+    const auto result = metal::compile_ptx_to_msl(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func  (.param .b32 func_retval0) fill_helper(.param .b64 src, .param .b64 n)
+{
+	.local .align 8 .b8 	__local_depot0[32];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<20>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.b64 	%rd2, [src];
+	ld.param.b64 	%rd3, [n];
+	add.u64 	%rd4, %SP, 16;
+	st.local.b64 	[%SPL+8], %rd4;
+	add.u64 	%rd5, %SPL, 16;
+	and.b64 	%rd11, %rd3, -4;
+	and.b64 	%rd6, %rd3, 3;
+	setp.eq.s64 	%p1, %rd6, 0;
+	@%p1 bra 	$L_done;
+	shl.b64 	%rd12, %rd11, 2;
+	add.s64 	%rd7, %rd5, %rd12;
+	mov.b64 	%rd8, %rd2;
+$L_loop:
+	ld.global.b32 	%r1, [%rd8];
+	st.local.b32 	[%rd7], %r1;
+	add.s64 	%rd7, %rd7, 4;
+	add.s64 	%rd8, %rd8, 4;
+	add.s64 	%rd6, %rd6, -1;
+	setp.ne.s64 	%p2, %rd6, 0;
+	@%p2 bra 	$L_loop;
+$L_done:
+	ld.local.b64 	%rd9, [%SPL+8];
+	ld.b32 	%r2, [%rd9];
+	st.param.b32 	[func_retval0], %r2;
+	ret;
+}
+.visible .entry caller(.param .u64 out, .param .u64 src, .param .u64 n)
+{
+	.local .align 8 .b8 	__local_depot1[16];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<10>;
+	mov.b64 	%SPL, __local_depot1;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [out];
+	ld.param.u64 	%rd2, [src];
+	ld.param.u64 	%rd3, [n];
+	cvta.to.global.u64 	%rd2, %rd2;
+	cvta.to.global.u64 	%rd4, %rd1;
+	st.local.b64 	[%SPL+0], %rd4;
+	{
+	.param .b64 param0;
+	st.param.b64 	[param0], %rd2;
+	.param .b64 param1;
+	st.param.b64 	[param1], %rd3;
+	.param .b32 retval0;
+	call.uni (retval0), fill_helper, (param0, param1);
+	ld.param.b32 	%r1, [retval0];
+	}
+	ld.local.b64 	%rd5, [%SPL+0];
+	st.global.b32 	[%rd5], %r1;
+	ret;
+}
+)ptx");
+    bool ok = expect(result.ok, "helper with an unbounded private store compiles: " + result.error);
+    ok &= expect(result.source.find("cm_trap_status") != std::string::npos,
+                 "the helper's unbounded store keeps its runtime guard");
+    return ok;
+}
+
 // A 64-bit parameter spilled to a private slot and reloaded is still that
 // parameter: a dereferenced reload makes it a pointer (a cudaTextureObject_t
 // kept in a struct on the stack); an integer-used reload does not.
@@ -1064,6 +1146,55 @@ bool test_spilled_parameter_pointer_inference() {
     ok &= expect(integer_field.ok && integer_field.module.entries.size() == 1 &&
                  !integer_field.module.entries[0].params[0].is_pointer,
                  "a field the helper only uses as an integer leaves the parameter scalar");
+
+    // A parameter forwarded unchanged as a call argument to a helper that
+    // dereferences it (COLMAP passes its depth-map texture straight to an
+    // out-of-line ComputeGeomConsistencyCost). Left scalar, the kernel handed
+    // the helper a host address and every depth fetch read garbage.
+    const auto forwarded = [](const std::string& helper_use, const std::string& staging) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b32 func_retval0) reader(.param .b64 reader_param_0)
+{
+	.reg .b32 	%r<3>;
+	.reg .b64 	%rd<4>;
+	ld.param.b64 	%rd1, [reader_param_0];
+	)ptx") + helper_use + R"ptx(
+	st.param.b32 	[func_retval0], %r1;
+	ret;
+}
+.visible .entry forwarder(.param .u64 handle, .param .u64 out)
+{
+	.reg .b32 	%r<3>;
+	.reg .b64 	%rd<6>;
+	ld.param.u64 	%rd1, [handle];
+	)ptx" + staging + R"ptx(
+	{
+	.param .b64 param0;
+	.param .b32 retval0;
+	st.param.b64 	[param0], %rd2;
+	call.uni (retval0), reader, (param0);
+	ld.param.b32 	%r1, [retval0];
+	}
+	ret;
+}
+)ptx";
+    };
+    const auto direct = cumetal::ptx::parse_ptx(forwarded("ld.b32 \t%r1, [%rd1+40];", "mov.b64 \t%rd2, %rd1;"));
+    ok &= expect(direct.ok && direct.module.entries.size() == 1 &&
+                 direct.module.entries[0].params[0].is_pointer &&
+                 !direct.module.entries[0].params[1].is_pointer,
+                 "a parameter forwarded to a helper that dereferences it is a pointer");
+    const auto offset = cumetal::ptx::parse_ptx(
+        forwarded("add.s64 \t%rd2, %rd1, 8;\n\tld.b32 \t%r1, [%rd2];", "cvta.to.global.u64 \t%rd2, %rd1;"));
+    ok &= expect(offset.ok && offset.module.entries[0].params[0].is_pointer,
+                 "a forwarded parameter the helper offsets and then dereferences is a pointer");
+    const auto integer = cumetal::ptx::parse_ptx(
+        forwarded("cvt.u32.u64 \t%r1, %rd1;", "mov.b64 \t%rd2, %rd1;"));
+    ok &= expect(integer.ok && !integer.module.entries[0].params[0].is_pointer,
+                 "a parameter a helper only uses as an integer stays scalar");
     return ok;
 }
 
@@ -1971,6 +2102,7 @@ int main() {
     ok &= test_selp_indexed_pointer_table();
     ok &= test_pure_builtin_call_preserves_pointer_cell();
     ok &= test_unbounded_private_store_guard();
+    ok &= test_helper_private_store_guard_survives_caller_proof();
     ok &= test_spilled_parameter_pointer_inference();
     const auto packed_atomic = metal::compile_ptx_to_msl(R"ptx(
 .version 7.0
