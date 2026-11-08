@@ -221,7 +221,8 @@
       "harness": "strict",
       "expect_pattern": "PASS: fp64 comparisons and endpoint progress on Apple GPU",
       "backends": [
-        "cumetal-ir"
+        "cumetal-ir",
+        "native-aot"
       ],
       "env": {
         "CUMETAL_FP64_MODE": "wide48"
@@ -235,7 +236,8 @@
       "harness": "strict",
       "expect_pattern": "PASS: exact binary64 division benchmark verified",
       "backends": [
-        "cumetal-ir"
+        "cumetal-ir",
+        "native-aot"
       ],
       "env": {
         "CUMETAL_FP64_MODE": "ieee64"
@@ -249,7 +251,8 @@
       "harness": "strict",
       "expect_pattern": "PASS: ieee64 division matches host binary64 bitwise over the domain",
       "backends": [
-        "cumetal-ir"
+        "cumetal-ir",
+        "native-aot"
       ],
       "env": {
         "CUMETAL_FP64_MODE": "ieee64"
@@ -282,7 +285,8 @@
       "harness": "strict",
       "expect_pattern": "PASS: 22 double libdevice functions within 1 ulp on Apple GPU",
       "backends": [
-        "cumetal-ir"
+        "cumetal-ir",
+        "native-aot"
       ],
       "env": {
         "CUMETAL_FP64_MODE": "ieee64"

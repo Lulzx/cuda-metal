@@ -64,7 +64,24 @@ def classify(returncode: int, output: str, timed_out: bool = False) -> str:
     return "runtime_error"
 
 
+def native_compile_args(project_env: dict[str, str]) -> list[str]:
+    """cumetalc flags for a fixture's declared runtime-mode environment.
+
+    A JIT build picks its FP64 mode up from CUMETAL_FP64_MODE at launch; a
+    native AOT executable is lowered once by cumetalc, so the same contract
+    has to be a compiler flag. Without it the fixture silently runs in the
+    default mode and fails (or, worse, passes) for the wrong reason.
+    """
+    mode = project_env.get("CUMETAL_FP64_MODE")
+    return [f"--fp64={mode}"] if mode else []
+
+
 def self_test() -> int:
+    if native_compile_args({"CUMETAL_FP64_MODE": "ieee64"}) != ["--fp64=ieee64"] or (
+        native_compile_args({"CUMETAL_PTX_BACKEND": "cumetal-ir"}) != []
+    ):
+        print("native compile flag translation is wrong", file=sys.stderr)
+        return 1
     cases = [
         (0, "PASS", False, "pass"),
         (77, "SKIP: clang++ not found", False, "prerequisite_skip"),
@@ -267,6 +284,7 @@ def main() -> int:
                 str(args.cumetalc.resolve()),
                 str(fixtures_root / project["subdir"] / project["source"]),
                 str(output_dir / "native-work" / project["name"]),
+                *native_compile_args(project.get("env", {})),
                 f"--expect-output={expected}",
             ]
         else:
