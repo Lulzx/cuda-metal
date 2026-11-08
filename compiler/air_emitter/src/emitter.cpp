@@ -521,6 +521,9 @@ std::string math_flags(const EmitOptions& options) {
     return flags;
 }
 
+// Software-arithmetic support is always compiled IEEE-safe without contraction.
+std::string precise_math_flags() { return "-fno-fast-math -ffp-contract=off"; }
+
 EmitResult emit_with_xcrun(const EmitOptions& options) {
     EmitResult result;
     result.mode_used = EmitMode::kXcrun;
@@ -545,22 +548,45 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         const std::string xcrun_for_metal = find_tool("xcrun");
         const std::string xcrun_metal_bin = xcrun_for_metal.empty() ? "xcrun" : xcrun_for_metal;
         std::filesystem::path metal_input = options.input;
-        if (!options.textual_include_inputs.empty()) {
+        const bool precise_support = !options.precise_textual_include_inputs.empty();
+        if (precise_support || !options.textual_include_inputs.empty()) {
             std::string combined;
-            for (const auto& include : options.textual_include_inputs) {
-                if (!std::filesystem::exists(include) || lower_ext(include) != ".metal") {
-                    result.error = "textual include input must be an existing .metal file: " +
-                                   include.string();
-                    std::filesystem::remove_all(temp_dir);
-                    return result;
+            const auto include_all =
+                [&](const std::vector<std::filesystem::path>& includes) -> bool {
+                for (const auto& include : includes) {
+                    if (!std::filesystem::exists(include) || lower_ext(include) != ".metal") {
+                        result.error = "textual include input must be an existing .metal file: " +
+                                       include.string();
+                        return false;
+                    }
+                    const std::string path = std::filesystem::absolute(include).string();
+                    if (path.find_first_of("\"\r\n") != std::string::npos) {
+                        result.error = "textual include input has an unsupported path: " + path;
+                        return false;
+                    }
+                    combined += "#include \"" + path + "\"\n";
                 }
-                const std::string path = std::filesystem::absolute(include).string();
-                if (path.find_first_of("\"\r\n") != std::string::npos) {
-                    result.error = "textual include input has an unsupported path: " + path;
-                    std::filesystem::remove_all(temp_dir);
-                    return result;
-                }
-                combined += "#include \"" + path + "\"\n";
+                return true;
+            };
+            if (precise_support) {
+                // The module is compiled safe without contraction (see
+                // precise_math_flags below); the caller's contract applies
+                // again from the end of the support region.
+                combined += "#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)\n";
+            }
+            if (!include_all(options.precise_textual_include_inputs)) {
+                std::filesystem::remove_all(temp_dir);
+                return result;
+            }
+            if (precise_support) {
+                combined += std::string("#pragma METAL fp math_mode(") +
+                            (options.math_mode == "fast" ? "fast" : "safe") + ")\n" +
+                            "#pragma METAL fp contract(" +
+                            (options.fp_contract ? "fast" : "off") + ")\n";
+            }
+            if (!include_all(options.textual_include_inputs)) {
+                std::filesystem::remove_all(temp_dir);
+                return result;
             }
             const std::string source_path = std::filesystem::absolute(options.input).string();
             if (source_path.find_first_of("\"\r\n") != std::string::npos) {
@@ -570,6 +596,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             }
             combined += "#include \"" + source_path + "\"\n";
             metal_input = temp_dir / "combined.metal";
+            result.logs.push_back("staged combined Metal source:\n" + combined);
             std::string write_error;
             const std::vector<std::uint8_t> bytes(combined.begin(), combined.end());
             if (!cumetal::common::write_file_bytes(metal_input, bytes, &write_error)) {
@@ -579,8 +606,9 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             }
         }
         const std::string command = xcrun_metal_bin + " metal -fno-strict-aliasing " +
-                                    math_flags(options) + " -c " +
-                                    quote_shell(metal_input.string()) +
+                                    (precise_support ? precise_math_flags()
+                                                     : math_flags(options)) +
+                                    " -c " + quote_shell(metal_input.string()) +
                                     " -o " + quote_shell(temp_air.string()) + " 2>&1";
         const CommandResult cmd = run_command_capture(command);
         result.logs.push_back("$ " + command);
@@ -638,6 +666,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             result.logs.push_back("$ " + command);
             result.logs.push_back(cmd.output);
             if (options.additional_link_inputs.empty() &&
+                options.precise_link_inputs.empty() &&
                 cmd.started && cmd.exit_code == 0) {
                 result.logs.push_back("used xcrun metal AOT for LLVM IR -> metallib");
                 std::filesystem::remove_all(temp_dir);
@@ -696,12 +725,19 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
     }
 
     std::filesystem::path packaged_air = temp_air;
-    if (!options.additional_link_inputs.empty()) {
+    if (!options.additional_link_inputs.empty() || !options.precise_link_inputs.empty()) {
         const std::string xcrun_path = find_tool("xcrun");
         const std::string xcrun_bin = xcrun_path.empty() ? "xcrun" : xcrun_path;
         std::vector<std::filesystem::path> link_inputs = {temp_air};
-        for (std::size_t index = 0; index < options.additional_link_inputs.size(); ++index) {
-            const auto& input = options.additional_link_inputs[index];
+        std::vector<std::pair<std::filesystem::path, bool>> extra_inputs;
+        for (const auto& input : options.additional_link_inputs) {
+            extra_inputs.emplace_back(input, false);
+        }
+        for (const auto& input : options.precise_link_inputs) {
+            extra_inputs.emplace_back(input, true);
+        }
+        for (std::size_t index = 0; index < extra_inputs.size(); ++index) {
+            const auto& [input, precise] = extra_inputs[index];
             if (!std::filesystem::exists(input)) {
                 result.error = "additional AIR link input does not exist: " + input.string();
                 std::filesystem::remove_all(temp_dir);
@@ -719,7 +755,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             }
             const auto compiled = temp_dir / ("support-" + std::to_string(index) + ".air");
             const std::string command = xcrun_bin + " metal -std=metal3.2 -fno-strict-aliasing " +
-                math_flags(options) + " -c " +
+                (precise ? precise_math_flags() : math_flags(options)) + " -c " +
                 quote_shell(input.string()) + " -o " + quote_shell(compiled.string()) + " 2>&1";
             const CommandResult cmd = run_command_capture(command);
             result.logs.push_back("$ " + command);

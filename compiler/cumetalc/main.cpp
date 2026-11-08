@@ -1442,7 +1442,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     emit.fp_contract = g_fp_contract;
     if (metal_text.find("cm_fp64_") != std::string::npos ||
         metal_text.find("vf64_") != std::string::npos) {
-        emit.textual_include_inputs.push_back(
+        emit.precise_textual_include_inputs.push_back(
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
             "support" / "cumetal_fp64_inline_support.metal");
     }
@@ -2828,8 +2828,8 @@ int main(int argc, char** argv) {
 
     if (needs_vf64_support) {
         const bool typed_msl = options.input.extension() == ".metal";
-        auto& support_inputs = typed_msl ? options.textual_include_inputs
-                                         : options.additional_link_inputs;
+        auto& support_inputs = typed_msl ? options.precise_textual_include_inputs
+                                         : options.precise_link_inputs;
         support_inputs.push_back(
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
             "support" / (typed_msl ? "cumetal_fp64_inline_support.metal"
@@ -2843,6 +2843,10 @@ int main(int argc, char** argv) {
             std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
             "support" / "cumetal_libdevice_support.metal");
     }
+    // --use_fast_math and -fmad apply to metallib output exactly as they do
+    // to linked executables.
+    options.math_mode = g_math_mode;
+    options.fp_contract = g_fp_contract;
     const auto result = cumetal::air_emitter::emit_metallib(options);
     for (const auto& temp_file : temp_files) {
         std::error_code ec;

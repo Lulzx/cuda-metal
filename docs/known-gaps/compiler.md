@@ -317,6 +317,15 @@ in the active FP64 mode's own arithmetic, and the
 conversion intrinsics plus `__nv_hiloint2double`/`__nv_double2hi/loint` are
 exact through the software-FP64 conversion helpers.
 
+A typed-backend kernel that uses software FP64 is compiled as one safe-mode
+Metal module so VF64 keeps IEEE semantics (see
+[FP64 policy](../fp64-policy.md)). Under `--use_fast_math` its user float code
+still gets fast-math operation flags and contraction by pragma, but not Metal's
+module-wide fast-math options: FP32 denormals are not flushed and unqualified
+builtins such as `sin` resolve to their precise overloads. Such kernels are
+more accurate, and may be slower, than `--use_fast_math` would make them
+without FP64.
+
 ## Source AOT architecture
 
 The linked source flow uses native ABI version 3 with an embedded metallib and

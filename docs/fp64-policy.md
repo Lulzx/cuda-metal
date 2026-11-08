@@ -57,6 +57,20 @@ persistent JIT cache key includes the support source SHA-256, so a support
 runtime update cannot reuse an older metallib. Linked helper functions are not
 treated as kernel entry points by validation.
 
+VF64's pair and `wide48` operations are error-free transforms, so its support
+code is always compiled IEEE-safe without FMA contraction, independent of the
+user's `--use_fast_math`, `-fmad` or `CUMETAL_MSL_MATH_MODE`. Linked support
+modules are compiled with `-fno-fast-math -ffp-contract=off`. Where the typed
+backend includes the support source in the kernel's translation unit, that unit
+is compiled safe: the support sits in a `#pragma METAL fp math_mode(safe)` /
+`contract(off)` region, and the user's mode and contraction are restored by
+pragma for the code after it. Previously `--use_fast_math` reached VF64 through
+Metal's module-wide fast-math macro (approximate `sqrt` seeds, FTZ), changing
+`fast48`/`wide48` `sqrt` and `wide48` `hypot` bits, while VF64's own file-scope
+pragmas leaked into user code and silently disabled `-fmad=true` contraction.
+`functional_fp64_math_flag_invariance` requires bit-identical FP64 results
+across those flags on the native and PTX JIT paths.
+
 ## Compiler coverage
 
 The generic PTX-to-AIR path currently routes these source-level operations

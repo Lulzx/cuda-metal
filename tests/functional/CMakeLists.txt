@@ -3772,6 +3772,17 @@ set_tests_properties(functional_fp64_hypot_wide48_nvvm PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
 
+# VF64 support must give the same bits under any user float math flags; the
+# user's --use_fast_math / -fmad still apply to user code (see the script).
+add_test(
+    NAME functional_fp64_math_flag_invariance
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_fp64_math_flag_invariance.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+)
+set_tests_properties(functional_fp64_math_flag_invariance PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 600
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
 add_test(
     NAME functional_driver_jit_compiler_missing
     COMMAND bash

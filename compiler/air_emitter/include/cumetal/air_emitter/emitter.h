@@ -27,6 +27,18 @@ struct EmitOptions {
     // for private inline support code that must be part of the kernel's own
     // translation unit rather than an MTL visible-function library.
     std::vector<std::filesystem::path> textual_include_inputs;
+    // Software-arithmetic support (VF64 FP64) whose error-free transforms
+    // need IEEE-safe math with no FMA contraction, whatever math_mode and
+    // fp_contract say: fast math may reassociate the cancellations they rely
+    // on, and contraction fuses a product whose rounding error they recover.
+    // Linked inputs are compiled with -fno-fast-math -ffp-contract=off.
+    // Textual includes go first, inside a `#pragma METAL fp` safe region,
+    // and the translation unit is compiled safe with the caller's mode
+    // restored by pragma for everything after them. Metal's module-wide
+    // fast-math options (FTZ, fast:: builtin overloads) therefore do not
+    // apply to such a module even under --use_fast_math.
+    std::vector<std::filesystem::path> precise_link_inputs;
+    std::vector<std::filesystem::path> precise_textual_include_inputs;
     // CUDA's default floating-point contract: IEEE comparisons and NaN/Inf
     // preserved ("safe"), with FMA contraction allowed. Apple's compiler
     // defaults to -ffast-math, under which `NaN == NaN` is true and

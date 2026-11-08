@@ -1419,7 +1419,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
             return true;
         }
         if (typed_msl_needs_fp64_support) {
-            emit_options.textual_include_inputs.push_back(
+            emit_options.precise_textual_include_inputs.push_back(
                 std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
                 "metal" / "support" / "cumetal_fp64_inline_support.metal");
         }
@@ -1473,7 +1473,7 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
              cumetal::ptx::fp64_mode_links_vf64_support(
                  lower_options.fp64_mode)) ||
             lowered.llvm_ir.find("vf64_") != std::string::npos) {
-            emit_options.additional_link_inputs.push_back(
+            emit_options.precise_link_inputs.push_back(
                 std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
                 "metal" / "support" / "cumetal_fp64_support.metal"
             );
