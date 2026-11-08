@@ -2,6 +2,8 @@
 
 [Documentation index](../README.md)
 
+- [v0.8.0](v0.8.0.md) — wide48 hypot, faster exact division, FP64 independent of
+  float math flags, and native builds with several kernel units
 - [v0.7.1](v0.7.1.md) — GPU-timed CUDA events, a grid-sync fence, system
   atomics and `roundf` on both backends, and nvcc options from real CMake builds
 - [v0.7.0](v0.7.0.md) — cumetal-ir default everywhere, tensor cores from raw

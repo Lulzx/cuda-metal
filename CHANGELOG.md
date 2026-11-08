@@ -6,6 +6,63 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.8.0] - 2026-11-08
+
+### Added
+
+- **wide48 double `hypot`.** Typed PTX and NVVM `hypot` under `wide48` call
+  VF64's scaled reduced-precision helper instead of evaluating in binary32,
+  keeping the full exponent range. It is gated at max(2^-44 relative, one
+  ulp) on analytic and MPFR vectors; other `wide48` transcendentals still
+  use binary32 (#203).
+- **Native builds with several kernel units.** Kernels in more than one
+  `.cu` file now link into one native executable (each object used to export
+  the same embedded-metallib symbols). Kernels in an anonymous namespace or
+  declared `static` build and launch natively, including same-named ones in
+  different units. This closes the gap reported in #180.
+- **Bitwise division conformance.** `fp64_division_domain` checks `ieee64`
+  `/` and `__drcp_rn` against host binary64 over every exponent, overflow
+  and subnormal results, reciprocal-table edges, near-halfway quotients and
+  special values, on the PTX JIT and native paths. `fp64_division_benchmark`
+  times exact division (#201).
+
+### Changed
+
+- **Faster `ieee64` division.** Value-only round-to-nearest division uses
+  VF64's certified table reciprocal for normal operands, falling back to
+  the restoring divider otherwise: about 1.4x faster on Apple M4 Pro for
+  dependent and independent chains, bit-identical to host division (#203).
+- **VF64 support ignores user float math flags.** VF64's arithmetic is
+  always compiled IEEE-safe without contraction. User float code in an FP64
+  kernel gets the requested `--use_fast_math` operation flags and `-fmad`
+  contraction (previously VF64's own pragmas silently disabled both), but
+  such a module no longer flushes FP32 denormals or uses `fast::` builtin
+  overloads under `--use_fast_math`.
+- VF64-metal is pinned to `feeb6ae`, upstream main with the wide48 hypot,
+  zero-sign and certified division changes. Installations include the VF64
+  and Berkeley SoftFloat license notices.
+
+### Fixed
+
+- **`--use_fast_math` changed FP64 results.** Metal's module-wide fast math
+  reached VF64, so `fast48`/`wide48` `sqrt` and `wide48` `hypot` returned
+  different bits than without the flag, natively and on the PTX JIT
+  (`CUMETAL_MSL_MATH_MODE=fast`).
+- **`cumetalc --emit=metallib` ignored `--use_fast_math` and `-fmad`.**
+- **wide48 comparisons** decode both operands' reduced significands, so a
+  loop such as `while (t < target) t += target - t;` terminates (#202).
+- **wide48 addition and subtraction** return correctly signed zeros (VF64).
+- **Anonymous-namespace kernel names.** Mapping a host stub to its kernel
+  misread a namespace component ending in a digit (`_GLOBAL__N_1`), so every
+  anonymous-namespace kernel failed to build natively.
+- **Parallel test flakiness.** About twenty tests deleted and regenerated a
+  shared reference metallib in the source tree while others loaded it, the
+  cause of most intermittent failures under `ctest -j`. Each now builds a
+  private copy.
+- The native corpus passes a fixture's FP64 mode to `cumetalc`, enrolling
+  four more FP64 fixtures for native AOT, and `nvcc -c` no longer prints
+  `ld` "ignoring unexpected dylib" warnings.
+
 ## [0.7.1] - 2026-11-04
 
 ### Fixed
