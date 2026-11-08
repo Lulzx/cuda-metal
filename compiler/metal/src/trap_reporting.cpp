@@ -129,6 +129,7 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
                              std::string* error) {
     using namespace ir;
     graph->trapping.clear();
+    graph->polling.clear();
     graph->guarded.clear();
     graph->ordinary.clear();
     graph->dispatch.clear();
@@ -273,9 +274,46 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
         }
     }
 
+    // Cancelling traps: every trap except the report-only helper's, and the
+    // functions reaching one. Only kernels that can cancel need their lanes
+    // to poll; the rest just carry the status pointer.
+    std::unordered_set<std::string> cancelling;
+    for (const Function& function : module.functions) {
+        if (function.name == kReportOnlyTrapHelper) continue;
+        for (const BasicBlock& block : function.blocks)
+            for (const Operation& operation : block.operations)
+                if (operation.opcode == OpCode::kTrap) cancelling.insert(function.name);
+    }
+    changed = true;
+    while (changed) {
+        changed = false;
+        for (const Function& function : module.functions) {
+            if (cancelling.contains(function.name)) continue;
+            for (const BasicBlock& block : function.blocks)
+                for (const Operation& operation : block.operations)
+                    for (const std::string& callee : callee_names(operation))
+                        if (cancelling.contains(callee))
+                            changed |= cancelling.insert(function.name).second;
+        }
+    }
+    for (const Function& function : module.functions)
+        if (function.is_kernel && cancelling.contains(function.name)) pending.push_back(&function);
+    while (!pending.empty()) {
+        const Function* function = pending.back();
+        pending.pop_back();
+        if (!graph->polling.insert(function->name).second) continue;
+        for (const BasicBlock& block : function->blocks)
+            for (const Operation& operation : block.operations)
+                for (const std::string& name : callee_names(operation)) {
+                    const auto target = functions.find(name);
+                    if (target != functions.end()) pending.push_back(target->second);
+                }
+    }
+
     graph->guarded = graph->trapping;
     for (const Function& function : module.functions) {
         if (trap_reachable.contains(function.name) && cfg_is_cyclic(function) &&
+            graph->polling.contains(function.name) &&
             !synchronizing.contains(function.name)) {
             graph->guarded.insert(function.name);
             graph->dispatch.insert(function.name);

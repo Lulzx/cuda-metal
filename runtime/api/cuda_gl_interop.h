@@ -36,6 +36,14 @@ cudaError_t cudaGraphicsResourceGetMappedPointer(void** devPtr, size_t* size,
                                                  cudaGraphicsResource* resource);
 cudaError_t cudaGraphicsUnregisterResource(cudaGraphicsResource* resource);
 
+// Pre-CUDA-3.0 buffer-object interop, deprecated but still called by SiftGPU
+// (COLMAP) on its OpenGL path. Like the cudaGraphics* forms above, each one
+// refuses with cudaErrorNotSupported; callers' headless paths never reach them.
+cudaError_t cudaGLRegisterBufferObject(unsigned int buffer);
+cudaError_t cudaGLUnregisterBufferObject(unsigned int buffer);
+cudaError_t cudaGLMapBufferObject(void** devPtr, unsigned int buffer);
+cudaError_t cudaGLUnmapBufferObject(unsigned int buffer);
+
 #ifdef __cplusplus
 }
 #endif

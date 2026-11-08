@@ -83,6 +83,7 @@ target_compile_options(cumetal_common
 
 add_library(cumetal_ptx STATIC
     compiler/ptx/src/parser.cpp
+    compiler/ptx/src/module_slice.cpp
 )
 
 target_include_directories(cumetal_ptx

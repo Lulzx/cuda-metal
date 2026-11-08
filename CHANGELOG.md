@@ -6,6 +6,72 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+### Added
+
+- **PTX module slicing for the registration JIT.** Each kernel is lowered
+  from the part of its module it can reach (module-scope declarations, the
+  entry, and every definition it names, including child entries it enqueues)
+  instead of the whole translation unit. COLMAP's 63 MB, 208-entry PatchMatch
+  module previously took over ten minutes per first launch in a Debug build;
+  slices are kilobytes. The FP64 provenance probe also stops reporting a kernel
+  as FP64-emulated because a neighbouring kernel uses `.f64`.
+- **`__half_raw`/`__half2_raw` and Eigen's GPU fp16 path.** `cuda_fp16.h` adds
+  the raw-bits structs with NVIDIA's conversions, `__half_as_ushort` and
+  friends, `__halves2half2`, `__h2div`, `__hneg2`, `h2sqrt`/`h2rsqrt`/`h2rcp`/
+  `h2exp`/`h2exp2`/`h2log`/`h2log2`, and bit-exact `__half` shuffles, so a
+  `.cu` file including Eigen compiles and runs.
+- **nvcc shim flags.** `--default-stream {legacy,null,per-thread}` (an invalid
+  value is an error) and `--cuda-inline-threshold N`, the `cumetalc` option of
+  the same name, for device code that needs nvcc-like inlining.
+- **Legacy `cudaGL*BufferObject` entry points**, refusing with
+  `cudaErrorNotSupported` like the rest of OpenGL interop (SiftGPU links them).
+- **Runtime-guarded private stores.** A `st.local` whose address the typed
+  PTX backend cannot prove exact no longer refuses the kernel when it might
+  overwrite a pointer kept in the same stack frame. `import_ptx` inserts a
+  guard in front of it that compares the access with each pointer cell still
+  live after the store, skips a violating store and reports the launch as
+  failed (`cudaErrorLaunchFailure`). Guards use address comparisons, never
+  pointer subtraction, so they do not switch a function into strict address
+  cancellation, and both the typed proof and the Metal pointer legalization
+  treat a guarded store as disjoint from the cells it checks.
+- **Report-only traps.** A trap reached only through the guard's report helper
+  sets the launch's trap status without cancelling: such kernels no longer poll
+  the status in every loop or fall back to the CFG dispatcher, which made
+  COLMAP's PatchMatch sweep about 11x slower.
+
+### Fixed
+
+- **Typed PTX import of 2-byte struct returns.** A `.b8 retval[2]` return
+  written or read as one `b16` word (`Eigen::half`) is split into or rebuilt
+  from its byte fields. Any naturally aligned scalar word that exactly covers a
+  run of scalar fields is handled the same way; misaligned words still refuse.
+- **`__constant__` reads in out-of-line device helpers** on the typed path: a
+  helper that reads a module constant, directly or through another helper, now
+  borrows the kernel's constant buffer instead of failing with "module constant
+  buffer is unavailable".
+- **Private pointer proofs across libdevice calls.** A call to a recognised
+  pointer-free math builtin (`__nv_expf`, ...) no longer counts as a possible
+  write to a private pointer cell.
+- **Indexed private pointer tables.** A table index built from a `selp` chain
+  over literals, a 32-bit loop counter with a literal bound, or a literal step
+  off either, widened by `mul.wide`/`cvt`, is a finite value set, so loads from
+  a small table of private pointers are proven. Loop-counter recognition now
+  covers 32-bit counters as well as 64-bit ones.
+- **PTX parser line numbering** is linear in module size instead of quadratic.
+- **Parameters spilled to the stack.** A 64-bit kernel parameter stored to a
+  private slot and reloaded is classified as a pointer when the reload is
+  dereferenced (a `cudaTextureObject_t` kept in a struct on the stack); the
+  typed proof still checks that the reload sees that store.
+- **Parameters dereferenced by a helper.** A 64-bit kernel parameter spilled
+  into a struct on the kernel's stack and dereferenced only by a device helper
+  that receives the struct (a texture object read in a member function) is now
+  bound as a pointer. Bound as a scalar, the helper read through the host
+  address, and COLMAP's PatchMatch cost was the maximum at every pixel.
+- **Raw-address refusal narrowed.** A private pointer stored into private
+  memory, where the pointer proofs track it, no longer makes every raw integer
+  address in the module refuse; it still does when the module also reloads a
+  64-bit private value as an integer, or stores a private pointer elsewhere.
+
 ## [0.8.0] - 2026-11-08
 
 ### Added

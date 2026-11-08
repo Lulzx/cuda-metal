@@ -366,6 +366,21 @@ void infer_pointer_parameters(EntryFunction* entry) {
 
     std::unordered_map<std::string, std::string> register_to_param;
     std::unordered_set<std::string> non_parameter_addresses;
+    // A 64-bit parameter spilled to a private stack slot and reloaded (a
+    // cudaTextureObject_t kept in a struct on the stack, as COLMAP's PatchMatch
+    // cost computer does) is still that parameter. Slots are keyed by their
+    // address text; this only nominates the parameter as a pointer, and the
+    // typed importer separately proves the reload sees this store.
+    std::unordered_map<std::string, std::string> spilled_params;
+    const auto slot_key = [](const std::string& operand) {
+        std::string key;
+        for (const char c : extract_bracket_contents(operand))
+            if (c != ' ' && c != '\t') key.push_back(c);
+        return key;
+    };
+    const auto is_wide = [](const std::string& opcode) {
+        return opcode.ends_with(".b64") || opcode.ends_with(".u64") || opcode.ends_with(".s64");
+    };
     for (const auto& instruction : entry->instructions) {
         if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() >= 2) {
             const std::string dest_register = extract_register_name(instruction.operands[0]);
@@ -453,7 +468,29 @@ void infer_pointer_parameters(EntryFunction* entry) {
                 } else {
                     register_to_param[dest_register] = mapped_param;
                 }
+                // A redefined base register moves every slot addressed through it.
+                for (auto it = spilled_params.begin(); it != spilled_params.end();) {
+                    if (it->first == dest_register || it->first.starts_with(dest_register + "+") ||
+                        it->first.starts_with(dest_register + "-"))
+                        it = spilled_params.erase(it);
+                    else
+                        ++it;
+                }
+                if (starts_with(instruction.opcode, "ld.local") && is_wide(instruction.opcode) &&
+                    instruction.predicate.empty() && instruction.operands.size() == 2) {
+                    const auto spilled = spilled_params.find(slot_key(instruction.operands[1]));
+                    if (spilled != spilled_params.end()) register_to_param[dest_register] = spilled->second;
+                }
             }
+        }
+        if (starts_with(instruction.opcode, "st.local") && instruction.operands.size() == 2) {
+            const std::string key = slot_key(instruction.operands[0]);
+            const auto source = register_to_param.find(extract_register_name(instruction.operands[1]));
+            if (!key.empty() && is_wide(instruction.opcode) && instruction.predicate.empty() &&
+                source != register_to_param.end())
+                spilled_params[key] = source->second;
+            else
+                spilled_params.erase(key);
         }
 
         const std::string root = opcode_root(instruction.opcode);
@@ -507,16 +544,224 @@ void infer_pointer_parameters(EntryFunction* entry) {
     }
 }
 
-int count_line_number_at_offset(const std::string& text, std::size_t offset) {
-    int line = 1;
-    const std::size_t clamped = std::min(offset, text.size());
-    for (std::size_t i = 0; i < clamped; ++i) {
-        if (text[i] == '\n') {
-            ++line;
+// A 64-bit kernel parameter spilled into the kernel's stack frame and only
+// dereferenced by a device helper that receives a pointer to that frame (a
+// cudaTextureObject_t kept in a struct whose member function reads it, as
+// COLMAP's PatchMatch cost computer does) is a pointer too, although the
+// kernel itself never uses it as an address. Recognised shape:
+//   kernel: st.local.b64 [frame + S], %param_value
+//           st.param.b64 [arg_k], frame + A   (then a direct call to H)
+//   H:      ld.param.b64 %p, [H_param_k];  ld.b64 %v, [%p + (S - A)]
+//           %v (or one add/mov of it) used as a memory address.
+// Frame addresses are tracked from the depot setup (%SPL/%SP plus literal
+// offsets); anything less direct is left alone. This only nominates the
+// parameter as a pointer; the typed importer still proves every reload.
+void infer_pointer_parameters_through_calls(ModuleInfo* module) {
+    std::unordered_map<std::string, const EntryFunction*> helpers;
+    for (const auto& function : module->functions) helpers.emplace(function.name, &function);
+    const auto is_wide = [](const std::string& opcode) {
+        return opcode.ends_with(".b64") || opcode.ends_with(".u64") || opcode.ends_with(".s64");
+    };
+    const auto bracket_parts = [](const std::string& operand, std::string* base, std::int64_t* offset) {
+        const std::string inner = trim(extract_bracket_contents(operand));
+        if (inner.empty()) return false;
+        const std::size_t plus = inner.find('+');
+        *base = trim(inner.substr(0, plus));
+        *offset = 0;
+        if (plus != std::string::npos) {
+            try {
+                *offset = std::stoll(trim(inner.substr(plus + 1)));
+            } catch (...) {
+                return false;
+            }
         }
+        return !base->empty() && base->front() == '%';
+    };
+    // Byte offsets (relative to the parameter) that a helper dereferences
+    // after loading them from its pointer parameter `index`.
+    std::unordered_map<std::string, std::unordered_set<std::int64_t>> helper_pointer_fields;
+    const auto pointer_fields = [&](const EntryFunction& helper, std::size_t index) {
+        const std::string key = helper.name + "#" + std::to_string(index);
+        if (const auto found = helper_pointer_fields.find(key); found != helper_pointer_fields.end())
+            return found->second;
+        std::unordered_set<std::int64_t> fields;
+        if (index < helper.params.size()) {
+            std::unordered_set<std::string> carriers;
+            std::unordered_map<std::string, std::int64_t> loaded;  // register -> field offset
+            for (const auto& instruction : helper.instructions) {
+                if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() == 2 &&
+                    extract_param_name_from_operand(instruction.operands[1]) == helper.params[index].name)
+                    carriers.insert(extract_register_name(instruction.operands[0]));
+            }
+            for (const auto& instruction : helper.instructions) {
+                if (opcode_root(instruction.opcode) == "ld" && !starts_with(instruction.opcode, "ld.param") &&
+                    is_wide(instruction.opcode) && instruction.operands.size() == 2) {
+                    std::string base;
+                    std::int64_t offset = 0;
+                    if (bracket_parts(instruction.operands[1], &base, &offset) && carriers.contains(base))
+                        loaded[extract_register_name(instruction.operands[0])] = offset;
+                }
+            }
+            // One add/mov hop: a field plus an offset is still that field's pointer.
+            for (const auto& instruction : helper.instructions) {
+                const std::string root = opcode_root(instruction.opcode);
+                if ((root == "add" || root == "mov") && instruction.operands.size() >= 2) {
+                    for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
+                        const auto source = loaded.find(extract_register_name(instruction.operands[i]));
+                        if (source != loaded.end()) {
+                            loaded.emplace(extract_register_name(instruction.operands[0]), source->second);
+                            break;
+                        }
+                    }
+                }
+            }
+            for (const auto& instruction : helper.instructions) {
+                if (!is_memory_opcode(instruction.opcode) || starts_with(instruction.opcode, "ld.param") ||
+                    starts_with(instruction.opcode, "st.param"))
+                    continue;
+                for (const auto& operand : instruction.operands) {
+                    std::string base;
+                    std::int64_t offset = 0;
+                    if (!bracket_parts(operand, &base, &offset)) continue;
+                    if (const auto field = loaded.find(base); field != loaded.end()) fields.insert(field->second);
+                }
+            }
+        }
+        return helper_pointer_fields[key] = fields;
+    };
+
+    for (auto& entry : module->entries) {
+        std::unordered_map<std::string, std::int64_t> frame;   // register -> depot offset
+        std::unordered_map<std::string, std::size_t> param_value;  // register -> param index
+        std::unordered_map<std::int64_t, std::size_t> spilled;     // depot offset -> param index
+        std::unordered_map<std::string, std::int64_t> staged;      // call arg name -> depot offset
+        std::unordered_set<std::size_t> pointers;
+        for (const auto& instruction : entry.instructions) {
+            const std::string root = opcode_root(instruction.opcode);
+            const std::string dest = instruction.operands.empty() ? std::string()
+                                                                  : extract_register_name(instruction.operands[0]);
+            if (root == "mov" && instruction.operands.size() == 2 &&
+                trim(instruction.operands[1]).starts_with("__local_depot")) {
+                frame[dest] = 0;
+                continue;
+            }
+            if ((root == "cvta" || root == "mov") && instruction.operands.size() == 2) {
+                if (const auto source = frame.find(extract_register_name(instruction.operands[1]));
+                    source != frame.end()) {
+                    frame[dest] = source->second;
+                    continue;
+                }
+            }
+            if (root == "add" && instruction.operands.size() == 3) {
+                const auto source = frame.find(extract_register_name(instruction.operands[1]));
+                std::int64_t literal = 0;
+                bool numeric = true;
+                try {
+                    literal = std::stoll(trim(instruction.operands[2]));
+                } catch (...) {
+                    numeric = false;
+                }
+                if (source != frame.end() && numeric) {
+                    frame[dest] = source->second + literal;
+                    continue;
+                }
+            }
+            if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() == 2 &&
+                is_wide(instruction.opcode)) {
+                const std::string name = extract_param_name_from_operand(instruction.operands[1]);
+                for (std::size_t i = 0; i < entry.params.size(); ++i)
+                    if (entry.params[i].name == name) param_value[dest] = i;
+                continue;
+            }
+            if (root == "st" && starts_with(instruction.opcode, "st.param") && instruction.operands.size() == 2 &&
+                is_wide(instruction.opcode)) {
+                const std::string name = extract_param_name_from_operand(instruction.operands[0]);
+                if (const auto value = frame.find(extract_register_name(instruction.operands[1]));
+                    value != frame.end())
+                    staged[name] = value->second;
+                else
+                    staged.erase(name);
+                continue;
+            }
+            if (root == "st" && instruction.operands.size() == 2 && is_wide(instruction.opcode) &&
+                instruction.predicate.empty()) {
+                std::string base;
+                std::int64_t offset = 0;
+                if (bracket_parts(instruction.operands[0], &base, &offset)) {
+                    if (const auto address = frame.find(base); address != frame.end()) {
+                        const auto value = param_value.find(extract_register_name(instruction.operands[1]));
+                        if (value != param_value.end()) spilled[address->second + offset] = value->second;
+                        else spilled.erase(address->second + offset);
+                    }
+                }
+                continue;
+            }
+            if (root == "call" && instruction.operands.size() >= 2) {
+                std::string callee;
+                std::vector<std::string> arguments;
+                for (const auto& operand : instruction.operands) {
+                    const std::string text = trim(operand);
+                    if (text.starts_with("(")) {
+                        std::string list = text.substr(1, text.size() >= 2 ? text.size() - 2 : 0);
+                        std::size_t at = 0;
+                        arguments.clear();
+                        while (at <= list.size()) {
+                            const std::size_t comma = list.find(',', at);
+                            arguments.push_back(trim(list.substr(at, comma == std::string::npos ? std::string::npos : comma - at)));
+                            if (comma == std::string::npos) break;
+                            at = comma + 1;
+                        }
+                    } else if (!text.empty() && text.front() != '%') {
+                        callee = text;
+                    }
+                }
+                const auto helper = helpers.find(callee);
+                if (helper != helpers.end()) {
+                    for (std::size_t k = 0; k < arguments.size(); ++k) {
+                        const auto base = staged.find(arguments[k]);
+                        if (base == staged.end()) continue;
+                        for (const auto field : pointer_fields(*helper->second, k)) {
+                            const auto param = spilled.find(base->second + field);
+                            if (param != spilled.end()) pointers.insert(param->second);
+                        }
+                    }
+                }
+                continue;
+            }
+            if (!dest.empty() && root != "st") {
+                frame.erase(dest);
+                param_value.erase(dest);
+            }
+        }
+        for (const auto index : pointers)
+            if (is_64bit_param_type(entry.params[index].type)) entry.params[index].is_pointer = true;
     }
-    return line;
 }
+
+// 1-based line number of a byte offset. Entries and functions are visited in
+// source order, so the counter resumes from its last query instead of
+// rescanning the module for each one (which was quadratic in module size).
+class LineCounter {
+public:
+    explicit LineCounter(const std::string& text) : text_(text) {}
+
+    int at(std::size_t offset) {
+        const std::size_t clamped = std::min(offset, text_.size());
+        if (clamped < offset_) {
+            offset_ = 0;
+            line_ = 1;
+        }
+        for (; offset_ < clamped; ++offset_) {
+            if (text_[offset_] == '\n') ++line_;
+        }
+        return line_;
+    }
+
+private:
+    const std::string& text_;
+    std::size_t offset_ = 0;
+    int line_ = 1;
+};
 
 void parse_instructions(const std::string& body,
                         int start_line,
@@ -1010,6 +1255,7 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
         return params;
     };
 
+    LineCounter line_counter(source);
     std::sregex_iterator iter(source.begin(), source.end(), entry_regex);
     const std::sregex_iterator end;
 
@@ -1054,7 +1300,7 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
             result.error = "malformed entry body for '" + entry.name + "'";
             return result;
         }
-        const int start_line = count_line_number_at_offset(source, body_start);
+        const int start_line = line_counter.at(body_start);
         parse_instructions(body, start_line, &entry, &result.warnings);
         infer_pointer_parameters(&entry);
 
@@ -1091,7 +1337,7 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
             result.error = "malformed device function body for '" + function.name + "'";
             return result;
         }
-        const int start_line = count_line_number_at_offset(source, body_start);
+        const int start_line = line_counter.at(body_start);
         // Function-body coverage is consumed lazily by the selected kernel's
         // call graph. Do not make an unrelated unsupported helper reject every
         // entry in the module during the phase-1 kernel parse.
@@ -1111,6 +1357,7 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options) {
         return result;
     }
 
+    infer_pointer_parameters_through_calls(&result.module);
     result.ok = true;
     return result;
 }

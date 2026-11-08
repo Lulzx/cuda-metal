@@ -7,7 +7,9 @@ These are durable boundaries unless the canonical specification changes.
 - macOS 14+ on Apple Silicon only.
 - No Windows, Linux ARM, non-Apple discrete GPU, or Thunderbolt eGPU target.
 - One Apple GPU device; no multi-GPU or peer-to-peer execution.
-- No OpenGL, Vulkan, or DirectX interop.
+- No OpenGL, Vulkan, or DirectX interop. The `cudaGraphicsGL*` and legacy
+  `cudaGL*BufferObject` entry points exist so programs with a headless path
+  compile and link; every one returns `cudaErrorNotSupported`.
 - No SASS execution, decompilation, or SASS-only binary support.
 - No private Apple APIs.
 - CUDA-facing headers remain clean-room; NVIDIA headers are not shipped.

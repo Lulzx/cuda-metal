@@ -1057,6 +1057,25 @@ struct Importer {
     // Promoted module globals each reachable device helper needs threaded in,
     // keyed by PTX function name and listed in module declaration order.
     std::unordered_map<std::string, std::vector<std::string>> helper_global_uses;
+    // Reachable helpers that read a module __constant__ symbol, directly or
+    // through their own calls. Each takes the kernel's constant buffer as a
+    // trailing hidden parameter, after the launch-queue pair.
+    std::unordered_set<std::string> constant_functions;
+    // Store line -> the depot window [lo, hi) a CuMetal runtime guard confines
+    // it to (see insert_private_store_guards). Read from guard labels in the
+    // module text, so it holds for every function imported from it.
+    struct GuardedStore {
+        std::vector<std::int64_t> cells;  // 8-byte depot cells the guard keeps clear
+        bool keeps_clear(std::int64_t cell) const {
+            return std::find(cells.begin(), cells.end(), cell) != cells.end();
+        }
+        std::string attribute() const {
+            std::string out;
+            for (const auto cell : cells) out += (out.empty() ? "" : ",") + std::to_string(cell);
+            return out;
+        }
+    };
+    std::unordered_map<int, GuardedStore> guarded_stores;
     std::unordered_map<std::string, ModuleConstantSymbol>
         module_initialized_symbols;
     std::unordered_map<int, cumetal::passes::PrintfLoweredCall> printf_calls;
@@ -1118,23 +1137,54 @@ struct Importer {
                                                element_offsets.end(), offset);
                 const std::size_t index = static_cast<std::size_t>(
                     element - element_offsets.begin());
-                if (element != element_offsets.end() &&
-                    type.elements[index] == Type::integer(32) &&
-                    (value.type == Type::integer(64) ||
-                     value.type == Type::floating(64)) &&
-                    index + 1 < type.elements.size() &&
-                    type.elements[index + 1] == Type::integer(32)) {
+                // A scalar store wider than the element it starts at must
+                // cover a run of consecutive scalar elements exactly: a b64
+                // over a u32 pair, or a b16 over a .b8[2] return (a 2-byte
+                // struct such as Eigen::half). Reinterpret (never numerically
+                // convert) the stored word and peel each element off by
+                // shift and truncate, little-endian like PTX param storage.
+                std::size_t run_end = index;
+                std::uint32_t run_bytes = 0;
+                const std::uint32_t value_bytes = type_size(value.type);
+                const bool scalar_value =
+                    (value.type.kind == TypeKind::kInteger ||
+                     value.type.kind == TypeKind::kFloat) &&
+                    value_bytes <= 8;
+                // PTX param accesses are naturally aligned; a word that is
+                // not is malformed, not a field run.
+                if (element != element_offsets.end() && scalar_value &&
+                    value_bytes > type_size(type.elements[index]) &&
+                    offset % static_cast<std::int64_t>(value_bytes) == 0) {
+                    while (run_end < type.elements.size() && run_bytes < value_bytes) {
+                        const Type& run_element = type.elements[run_end];
+                        if (run_element.kind != TypeKind::kInteger &&
+                            run_element.kind != TypeKind::kFloat)
+                            break;
+                        run_bytes += type_size(run_element);
+                        ++run_end;
+                    }
+                }
+                if (run_end > index + 1 && run_bytes == value_bytes) {
                     detail::PtxValueBuilder expressions(builder, *block, value_types,
                         {result.module.source_name, static_cast<std::uint32_t>(
                             std::max(0, instruction == nullptr ? 0 : instruction->line)), 0});
-                    // Reinterpret (never numerically convert) the 64-bit
-                    // word, then split it into its two u32 halves.
-                    const Operand wide =
-                        expressions.bit_container(value, Type::integer(64));
-                    insert_field(offset, expressions.emit(OpCode::kConvert, Type::integer(32), {wide}));
-                    const Operand high = expressions.emit(OpCode::kShiftRight, Type::integer(64),
-                        {wide, Operand::immediate("32", Type::integer(64))});
-                    insert_field(offset + 4, expressions.emit(OpCode::kConvert, Type::integer(32), {high}));
+                    const Type wide_type = Type::integer(value_bytes * 8);
+                    const Operand wide = expressions.bit_container(value, wide_type);
+                    std::int64_t shift = 0;
+                    for (std::size_t i = index; i < run_end; ++i) {
+                        const std::uint32_t bytes = type_size(type.elements[i]);
+                        Operand piece = wide;
+                        if (shift != 0) {
+                            piece = expressions.emit(OpCode::kShiftRight, wide_type,
+                                {wide, Operand::immediate(std::to_string(shift * 8), wide_type)});
+                        }
+                        if (bytes != value_bytes) {
+                            piece = expressions.emit(OpCode::kConvert,
+                                                     Type::integer(bytes * 8), {piece});
+                        }
+                        insert_field(offset + shift, piece);
+                        shift += bytes;
+                    }
                 } else {
                     insert_field(offset, value);
                 }
@@ -2724,8 +2774,23 @@ struct Importer {
             const auto effects_for = [&](const Instruction& call) -> const detail::CallEffectSummary* {
                 const auto target = direct_call_target(call);
                 if (!target) return nullptr;
-                if (!call_effects.contains(*target))
-                    call_effects.emplace(*target, detail::summarize_call_effects(result.module, *target));
+                if (!call_effects.contains(*target)) {
+                    // A recognised CUDA math builtin (__nv_expf, ...) is
+                    // lowered to a Metal expression, not a call: with no
+                    // pointer parameter it cannot write memory at all. One
+                    // with an output pointer (sincos, modf, frexp) still goes
+                    // through the module summary, which refuses it.
+                    const auto builtin = cuda_builtin_signature(*target);
+                    if (builtin && std::none_of(builtin->argument_types.begin(),
+                                                builtin->argument_types.end(),
+                                                [](const Type& type) { return type.is_pointer(); })) {
+                        detail::CallEffectSummary pure;
+                        pure.complete = true;
+                        call_effects.emplace(*target, std::move(pure));
+                    } else {
+                        call_effects.emplace(*target, detail::summarize_call_effects(result.module, *target));
+                    }
+                }
                 return &call_effects.at(*target);
             };
             const auto preserves_caller_memory = [&](const Instruction& call) {
@@ -2939,8 +3004,10 @@ struct Importer {
                 std::unordered_set<ValueId> visited;
                 while (visited.insert(value).second && definitions.contains(value)) {
                     const auto* copy = definitions.at(value);
+                    // 32-bit moves too: a loop counter is often a b32 register.
                     if (!copy->predicate.empty() || copy->operands.size() != 2 ||
-                        (copy->opcode != "mov.b64" && copy->opcode != "mov.u64" && copy->opcode != "mov.s64") ||
+                        (copy->opcode != "mov.b64" && copy->opcode != "mov.u64" && copy->opcode != "mov.s64" &&
+                         copy->opcode != "mov.b32" && copy->opcode != "mov.u32" && copy->opcode != "mov.s32") ||
                         copy->operands[1].find('{') != std::string::npos) return std::nullopt;
                     if (const auto literal = integer_literal(copy->operands[1])) return literal;
                     const auto input = source_value(copy, copy->operands[1]);
@@ -2971,7 +3038,8 @@ struct Importer {
                     if (!input || !definitions.contains(*input)) return std::nullopt;
                     const auto* step = definitions.at(*input);
                     if (!step->predicate.empty() || step->operands.size() != 3 ||
-                        (step->opcode != "add.u64" && step->opcode != "add.s64") ||
+                        (step->opcode != "add.u64" && step->opcode != "add.s64" &&
+                         step->opcode != "add.u32" && step->opcode != "add.s32") ||
                         (update && *update != *input)) return std::nullopt;
                     const bool right_one = integer_literal(step->operands[2]) == std::optional<std::int64_t>{1};
                     const bool left_one = integer_literal(step->operands[1]) == std::optional<std::int64_t>{1};
@@ -2986,8 +3054,12 @@ struct Importer {
                     if (!comparison->predicate.empty() || comparison->operands.size() != 3 ||
                         instruction_results.at(comparison).size() != 1) continue;
                     const auto& opcode = comparison->opcode;
-                    const bool equal = opcode == "setp.eq.b64" || opcode == "setp.eq.u64" || opcode == "setp.eq.s64";
-                    const bool unequal = opcode == "setp.ne.b64" || opcode == "setp.ne.u64" || opcode == "setp.ne.s64";
+                    // 32- and 64-bit counters alike: the range is [start, limit)
+                    // with both non-negative and small, so width cannot wrap it.
+                    const bool equal = opcode == "setp.eq.b64" || opcode == "setp.eq.u64" || opcode == "setp.eq.s64" ||
+                                       opcode == "setp.eq.b32" || opcode == "setp.eq.u32" || opcode == "setp.eq.s32";
+                    const bool unequal = opcode == "setp.ne.b64" || opcode == "setp.ne.u64" || opcode == "setp.ne.s64" ||
+                                         opcode == "setp.ne.b32" || opcode == "setp.ne.u32" || opcode == "setp.ne.s32";
                     if (!equal && !unequal) continue;
                     std::optional<std::int64_t> limit;
                     for (const std::size_t index : {1U, 2U})
@@ -3029,6 +3101,78 @@ struct Importer {
                 }
                 return std::nullopt;
             };
+            // Finite value sets of 32-bit integers, as exact u32 bit patterns.
+            // Only what an index computation needs: copies, and selp, whose
+            // result is one of its two inputs whatever the predicate. A
+            // selp-chained argmin over a small private table (COLMAP's
+            // PatchMatch picks the best of five normal pointers this way) is
+            // then a literal set rather than an unknown.
+            std::unordered_set<ValueId> active_narrow;
+            std::unordered_map<ValueId, std::optional<FiniteValues>> narrow;
+            const auto narrow_constants = [&](auto&& self, ValueId value) -> std::optional<FiniteValues> {
+                if (narrow.contains(value)) return narrow.at(value);
+                if (!value_types.contains(value) || value_types.at(value) != Type::integer(32)) return std::nullopt;
+                if (!active_narrow.insert(value).second) return std::nullopt;
+                const auto evaluate = [&]() -> std::optional<FiniteValues> {
+                    if (joined_values.contains(value)) {
+                        if (const auto range = induction_range(value)) return range;
+                        FiniteValues merged;
+                        for (const auto input : joined_values.at(value)) {
+                            const auto values = self(self, input);
+                            if (!values) return std::nullopt;
+                            merged.insert(values->begin(), values->end());
+                            if (merged.size() > kMaxFiniteValues) return std::nullopt;
+                        }
+                        return merged;
+                    }
+                    if (!definitions.contains(value)) return std::nullopt;
+                    const auto* instruction = definitions.at(value);
+                    if (!instruction->predicate.empty() || destination_registers(*instruction).size() != 1)
+                        return std::nullopt;
+                    const auto operand_values = [&](std::size_t index) -> std::optional<FiniteValues> {
+                        if (instruction->operands.size() <= index) return std::nullopt;
+                        if (const auto literal = integer_literal(instruction->operands[index]))
+                            return FiniteValues{static_cast<std::int64_t>(
+                                static_cast<std::uint32_t>(*literal))};
+                        const auto source = source_value(instruction, instruction->operands[index]);
+                        return source ? self(self, *source) : std::nullopt;
+                    };
+                    const auto& opcode = instruction->opcode;
+                    const bool word = opcode.ends_with(".b32") || opcode.ends_with(".u32") ||
+                                      opcode.ends_with(".s32");
+                    if (!word) return std::nullopt;
+                    if (root_opcode(opcode) == "mov" && instruction->operands.size() == 2)
+                        return operand_values(1);
+                    // A literal step off a value set (a rotated loop's
+                    // post-increment index), wrapped as u32 like the hardware.
+                    if ((root_opcode(opcode) == "add" || root_opcode(opcode) == "sub") &&
+                        instruction->operands.size() == 3) {
+                        const auto literal = integer_literal(instruction->operands[2]);
+                        const auto source = operand_values(1);
+                        if (!literal || !source) return std::nullopt;
+                        FiniteValues stepped;
+                        for (const auto pattern : *source) {
+                            const std::int64_t next = root_opcode(opcode) == "add" ? pattern + *literal
+                                                                                   : pattern - *literal;
+                            stepped.insert(static_cast<std::int64_t>(static_cast<std::uint32_t>(next)));
+                        }
+                        return stepped;
+                    }
+                    if (root_opcode(opcode) == "selp" && instruction->operands.size() == 4) {
+                        auto left = operand_values(1);
+                        const auto right = operand_values(2);
+                        if (!left || !right) return std::nullopt;
+                        left->insert(right->begin(), right->end());
+                        if (left->size() > kMaxFiniteValues) return std::nullopt;
+                        return left;
+                    }
+                    return std::nullopt;
+                };
+                auto result = evaluate();
+                active_narrow.erase(value);
+                narrow[value] = result;
+                return result;
+            };
             std::unordered_set<ValueId> active_constants;
             std::unordered_map<ValueId, std::optional<FiniteValues>> constants;
             const auto value_constants = [&](auto&& self, ValueId value) -> std::optional<FiniteValues> {
@@ -3049,6 +3193,52 @@ struct Importer {
                     }
                     if (!definitions.contains(value)) return std::nullopt;
                     const auto* instruction = definitions.at(value);
+                    // Widening a 32-bit value set: cvt.{u,s}64.{u,s}32, and
+                    // mul.wide.{u,s}32 by a literal (a scaled table index).
+                    // Each u32 pattern is reinterpreted with the opcode's
+                    // signedness; a product that leaves int64 is refused.
+                    if (instruction->predicate.empty() && destination_registers(*instruction).size() == 1) {
+                        const auto& opcode = instruction->opcode;
+                        const auto widen = [](std::int64_t pattern, bool is_signed) {
+                            return is_signed ? static_cast<std::int64_t>(
+                                                   static_cast<std::int32_t>(static_cast<std::uint32_t>(pattern)))
+                                             : pattern;
+                        };
+                        const auto narrow_operand = [&](std::size_t index) -> std::optional<FiniteValues> {
+                            if (instruction->operands.size() <= index) return std::nullopt;
+                            const auto source = source_value(instruction, instruction->operands[index]);
+                            return source ? narrow_constants(narrow_constants, *source) : std::nullopt;
+                        };
+                        const bool cvt_u = opcode == "cvt.u64.u32";
+                        const bool cvt_s = opcode == "cvt.s64.s32";
+                        if ((cvt_u || cvt_s) && instruction->operands.size() == 2) {
+                            const auto source = narrow_operand(1);
+                            if (!source) return std::nullopt;
+                            FiniteValues widened;
+                            for (const auto pattern : *source) widened.insert(widen(pattern, cvt_s));
+                            return widened;
+                        }
+                        const bool mul_u = opcode == "mul.wide.u32";
+                        const bool mul_s = opcode == "mul.wide.s32";
+                        if ((mul_u || mul_s) && instruction->operands.size() == 3) {
+                            for (const std::size_t index : {1U, 2U}) {
+                                const auto literal = integer_literal(instruction->operands[3 - index]);
+                                if (!literal) continue;
+                                const auto source = narrow_operand(index);
+                                if (!source) continue;
+                                const __int128 scale = widen(static_cast<std::int64_t>(
+                                    static_cast<std::uint32_t>(*literal)), mul_s);
+                                FiniteValues products;
+                                for (const auto pattern : *source) {
+                                    const __int128 product = static_cast<__int128>(widen(pattern, mul_s)) * scale;
+                                    if (product > INT64_MAX || product < INT64_MIN) return std::nullopt;
+                                    products.insert(static_cast<std::int64_t>(product));
+                                }
+                                return products;
+                            }
+                            return std::nullopt;
+                        }
+                    }
                     if (!instruction->predicate.empty() || destination_registers(*instruction).size() != 1 ||
                         ptx_scalar_type(instruction->opcode) != Type::integer(64)) return std::nullopt;
                     for (const auto& operand : instruction->operands)
@@ -3151,6 +3341,209 @@ struct Importer {
                     if (address && address->offsets) return address;
                 }
                 return operand_address(instruction->operands[index]);
+            };
+            // The exact depot address of a store, from the flow-sensitive value
+            // analysis only. (operand_address is textual: for a loop cursor it
+            // reports the register's first definition, its loop-entry value.)
+            const auto exact_store_cell = [&](const Instruction* store) -> std::optional<std::int64_t> {
+                const auto value = source_value(store, store->operands[0]);
+                if (!value) return std::nullopt;
+                const auto address = value_address(value_address, *value);
+                if (!address || !address->offsets || address->offsets->size() != 1) return std::nullopt;
+                return address->base + *address->offsets->begin() + memory_operand_offset(store->operands[0]);
+            };
+            // Depot cells written, at an exact address, with a pointer or with
+            // a 64-bit kernel parameter (a texture handle a helper dereferences).
+            // Other 64-bit data (a curandState word) is not protected: any store
+            // may rewrite it.
+            const auto pointer_depot_cells = [&] {
+                std::set<std::int64_t> cells;
+                for (const auto& raw_block : raw_blocks) {
+                    for (const auto* store : raw_block.instructions) {
+                        if (!starts_with(store->opcode, "st.local") || store->operands.size() < 2 ||
+                            memory_vector_width(store->opcode) != 1 ||
+                            ptx_scalar_type(store->opcode).bit_width != 64)
+                            continue;
+                        const auto types = stored_types.find(store);
+                        bool pointer = types != stored_types.end() && !types->second.empty() &&
+                                       types->second.front().is_pointer();
+                        if (!pointer) {
+                            const auto value = source_value(store, store->operands[1]);
+                            pointer = value && definitions.contains(*value) &&
+                                      starts_with(definitions.at(*value)->opcode, "ld.param") &&
+                                      ptx_scalar_type(definitions.at(*value)->opcode).bit_width == 64;
+                        }
+                        if (!pointer) continue;
+                        if (const auto cell = exact_store_cell(store)) cells.insert(*cell);
+                    }
+                }
+                return cells;
+            };
+            // Whether the pointer in `cell` may still be read after `from`: some
+            // path reaches a possible 64-bit read of it before an exact 64-bit
+            // store overwrites it. Compilers reuse stack slots, so a cell that
+            // holds a pointer at one point can hold a float array at another;
+            // a store there is only a hazard while the pointer is live. Calls,
+            // and 64-bit loads that may read private memory at an unknown
+            // address, count as reads.
+            const auto exact_cell = [&](const Instruction* access, std::size_t index) -> std::optional<std::int64_t> {
+                const auto value = source_value(access, access->operands[index]);
+                if (!value) return std::nullopt;
+                const auto address = value_address(value_address, *value);
+                if (!address || !address->offsets || address->offsets->size() != 1) return std::nullopt;
+                return address->base + *address->offsets->begin() + memory_operand_offset(access->operands[index]);
+            };
+            const auto may_be_private = [&](const Instruction* load) {
+                const auto& opcode = load->opcode;
+                if (opcode.find(".global") != std::string::npos || opcode.find(".shared") != std::string::npos ||
+                    opcode.find(".const") != std::string::npos || opcode.find(".param") != std::string::npos)
+                    return false;
+                if (const auto value = source_value(load, load->operands[1]); value && value_types.contains(*value)) {
+                    const auto& type = value_types.at(*value);
+                    if (type.is_pointer() && type.address_space != AddressSpace::kNone &&
+                        type.address_space != AddressSpace::kPrivate)
+                        return false;
+                }
+                return true;
+            };
+            // Bytes past a pointer parameter that a callee reads through it at
+            // fixed offsets; nullopt when the pointer is used any other way
+            // (offset arithmetic, stored, passed on), which may reach anything.
+            std::unordered_map<std::string, std::optional<std::int64_t>> parameter_extents;
+            const auto parameter_extent = [&](const cumetal::ptx::EntryFunction& callee,
+                                              std::size_t index) -> std::optional<std::int64_t> {
+                const std::string key = callee.name + "#" + std::to_string(index);
+                if (parameter_extents.contains(key)) return parameter_extents.at(key);
+                std::optional<std::int64_t>& extent = parameter_extents[key];
+                if (index >= callee.params.size()) return extent = std::nullopt;
+                std::unordered_set<std::string> carriers;
+                for (const auto& instruction : callee.instructions) {
+                    if (starts_with(instruction.opcode, "ld.param") && instruction.operands.size() == 2 &&
+                        parameter_name_from_operand(instruction.operands[1]) == callee.params[index].name)
+                        carriers.insert(trim(instruction.operands[0]));
+                }
+                std::int64_t reach = 0;
+                for (const auto& instruction : callee.instructions) {
+                    if (starts_with(instruction.opcode, "ld.param")) continue;
+                    for (std::size_t i = 0; i < instruction.operands.size(); ++i) {
+                        const std::string& operand = instruction.operands[i];
+                        const bool memory_operand = operand.find('[') != std::string::npos;
+                        const std::string reg = memory_operand ? first_register(operand) : trim(operand);
+                        if (!carriers.contains(reg)) continue;
+                        // Only a load's address operand is a plain field read.
+                        if (!(root_opcode(instruction.opcode) == "ld" && i == 1 && memory_operand))
+                            return extent = std::nullopt;
+                        const std::int64_t bytes =
+                            static_cast<std::int64_t>(ptx_scalar_type(instruction.opcode).bit_width / 8) *
+                            static_cast<std::int64_t>(memory_vector_width(instruction.opcode));
+                        reach = std::max(reach, memory_operand_offset(operand) + bytes);
+                    }
+                }
+                return extent = reach;
+            };
+            // Whether a call may read the depot cell: only through a pointer into
+            // this depot that it is passed, within the extent it reads through it.
+            const auto call_may_read_cell = [&](const Instruction* call, std::int64_t cell) {
+                const auto target = direct_call_target(*call);
+                if (!target) return true;
+                const auto callee = device_functions.find(*target);
+                if (callee == device_functions.end())
+                    return !cuda_builtin_signature(*target).has_value();
+                if (call->operands.size() < 2 || !positions.contains(call)) return true;
+                const auto names = grouped_names(call->operands.back());
+                const auto [block, before] = positions.at(call);
+                for (std::size_t argument = 0; argument < names.size(); ++argument) {
+                    const Instruction* staged = nullptr;
+                    for (std::size_t i = before; i > 0; --i) {
+                        const auto* prior = raw_blocks[block].instructions[i - 1];
+                        if (root_opcode(prior->opcode) == "call") break;
+                        if (starts_with(prior->opcode, "st.param") && prior->operands.size() >= 2 &&
+                            parameter_name_from_operand(prior->operands[0]) == names[argument]) {
+                            staged = prior;
+                            break;
+                        }
+                    }
+                    if (!staged) return true;
+                    if (ptx_scalar_type(staged->opcode).bit_width != 64) continue;
+                    const auto value = source_value(staged, staged->operands[1]);
+                    if (!value) return true;
+                    const auto address = value_address(value_address, *value);
+                    if (!address) {
+                        // Not a known depot address: a device or shared pointer, or
+                        // an integer, cannot name this frame. A private one might.
+                        if (value_types.contains(*value)) {
+                            const auto& type = value_types.at(*value);
+                            if (!type.is_pointer() || type.address_space == AddressSpace::kPrivate ||
+                                type.address_space == AddressSpace::kNone)
+                                return true;
+                        }
+                        continue;
+                    }
+                    if (!address->offsets || address->offsets->size() != 1) return true;
+                    const std::int64_t start = address->base + *address->offsets->begin();
+                    const auto extent = parameter_extent(*callee->second, argument);
+                    if (!extent) return true;
+                    if (cell < start + *extent && start < cell + 8) return true;
+                }
+                return false;
+            };
+            const auto cell_live_after = [&](const Instruction* from, std::int64_t cell) {
+                if (!positions.contains(from)) return true;
+                const auto [start_block, start_index] = positions.at(from);
+                std::deque<std::pair<std::size_t, std::size_t>> work{{start_block, start_index + 1}};
+                std::set<std::pair<std::size_t, std::size_t>> seen;
+                while (!work.empty()) {
+                    const auto [block, first] = work.front();
+                    work.pop_front();
+                    if (!seen.insert({block, first}).second) continue;
+                    bool killed = false;
+                    const auto& instructions = raw_blocks[block].instructions;
+                    for (std::size_t i = first; i < instructions.size() && !killed; ++i) {
+                        const auto* event = instructions[i];
+                        const auto root = root_opcode(event->opcode);
+                        if (root == "call" && call_may_read_cell(event, cell)) return true;
+                        if (root == "ld" && event->operands.size() >= 2 &&
+                            ptx_scalar_type(event->opcode).bit_width == 64 && may_be_private(event)) {
+                            const auto read = starts_with(event->opcode, "ld.local") ? exact_cell(event, 1)
+                                                                                     : std::nullopt;
+                            if (!read) return true;
+                            const auto bytes = static_cast<std::int64_t>(8 * memory_vector_width(event->opcode));
+                            if (*read < cell + 8 && cell < *read + bytes) return true;
+                        }
+                        if (starts_with(event->opcode, "st.local") && event->predicate.empty() &&
+                            memory_vector_width(event->opcode) == 1 &&
+                            ptx_scalar_type(event->opcode).bit_width == 64 && exact_cell(event, 0) == cell)
+                            killed = true;
+                    }
+                    if (!killed)
+                        for (const auto successor : raw_blocks[block].successors) work.push_back({successor, 0});
+                }
+                return false;
+            };
+            // Once one private store in this function needs a runtime guard,
+            // guard every private store whose address is not exact against every
+            // pointer cell: the Metal pointer legalization re-proves pointer
+            // fields with a weaker analysis than this one and would stop at
+            // any of them.
+            bool unbounded_stores_requested = false;
+            const auto request_unbounded_store_guards = [&] {
+                if (unbounded_stores_requested) return;
+                unbounded_stores_requested = true;
+                const auto cells = pointer_depot_cells();
+                auto& requests = result.private_store_guard_requests;
+                for (const auto& raw_block : raw_blocks) {
+                    for (const auto* store : raw_block.instructions) {
+                        if (!starts_with(store->opcode, "st.local") || !store->predicate.empty() ||
+                            store->operands.size() < 2 || exact_store_cell(store))
+                            continue;
+                        for (const auto cell : cells) {
+                            if (!cell_live_after(store, cell)) continue;
+                            const PtxImportResult::PrivateStoreGuardRequest request{store->line, cell};
+                            if (std::find(requests.begin(), requests.end(), request) == requests.end())
+                                requests.push_back(request);
+                        }
+                    }
+                }
             };
             // Bind a summary to the SSA value staged for this particular
             // call. A slot from another block, a predicated/partial write, or
@@ -3319,6 +3712,24 @@ struct Importer {
                                             (scalar_ranges.budget_exhausted() ? "; scalar range budget exhausted" : ""));
                                     }
                                     if (written->depot != address->depot) continue;
+                                    if (!written->offsets && starts_with(event->opcode, "st.local")) {
+                                        // An unbounded private store (a loop whose trip
+                                        // count is a runtime value) cannot be proved clear
+                                        // of this pointer cell. Instead a runtime guard
+                                        // traps before any execution in which it would
+                                        // touch the cell; behind that guard it is disjoint.
+                                        const auto guarded = guarded_stores.find(event->line);
+                                        if (guarded != guarded_stores.end() &&
+                                            guarded->second.keeps_clear(static_cast<std::int64_t>(cell)))
+                                            continue;
+                                        const PtxImportResult::PrivateStoreGuardRequest request{
+                                            event->line, static_cast<std::int64_t>(cell)};
+                                        auto& requests = result.private_store_guard_requests;
+                                        if (std::find(requests.begin(), requests.end(), request) == requests.end())
+                                            requests.push_back(request);
+                                        request_unbounded_store_guards();
+                                        continue;
+                                    }
                                     if (!written->offsets) {
                                         if (defer_tainted) { abandon_walk = true; break; }
                                         return fail(load, "unsupported local pointer memory proof: unresolved store offset at line " +
@@ -5008,6 +5419,14 @@ struct Importer {
         operation.location = {.file = result.module.source_name,
                               .line = static_cast<std::uint32_t>(std::max(0, instruction.line))};
         operation.attributes["ptx_opcode"] = instruction.opcode;
+        // A runtime-guarded private store carries the depot cells its guard
+        // checks, so later pointer-field proofs can treat it as disjoint too.
+        if (starts_with(instruction.opcode, "st.local")) {
+            if (const auto guarded = guarded_stores.find(instruction.line);
+                guarded != guarded_stores.end()) {
+                operation.attributes["private_guard_cells"] = guarded->second.attribute();
+            }
+        }
         if (instruction.opcode.find(".f64") != std::string::npos) {
             operation.attributes["fp64_mode"] =
                 result.module.attributes.at("fp64_mode");
@@ -5652,21 +6071,68 @@ struct Importer {
                         const std::int64_t byte_offset = *checked_offset;
                         const std::uint32_t loaded_size =
                             type_size(operation.result_types.front());
-                        if (loaded_size == 8 && operation.result_types.front() == Type::integer(64) &&
-                            byte_offset >= 0 && byte_offset % 8 == 0 &&
-                            (static_cast<std::uint64_t>(byte_offset) + 8) <= type_size(aggregate_type) &&
-                            std::all_of(aggregate_type.elements.begin(), aggregate_type.elements.end(),
-                                [](const Type& field) { return field == Type::integer(32); })) {
-                            const auto word = [&](std::int64_t index) {
-                                const Operand value = expressions.emit(OpCode::kAggregateExtract, Type::integer(32),
-                                    {returned_value, Operand::immediate(std::to_string(index), Type::integer(32))});
-                                return expressions.emit(OpCode::kConvert, Type::integer(64), {value});
-                            };
-                            const Operand low = word(byte_offset / 4);
-                            const Operand high = expressions.emit(OpCode::kShiftLeft, Type::integer(64),
-                                {word(byte_offset / 4 + 1), Operand::immediate("32", Type::integer(64))});
-                            operation.opcode = OpCode::kBitOr;
-                            operation.operands = {low, high};
+                        // A scalar load wider than the field it starts at reads
+                        // a run of consecutive scalar fields as one word (an
+                        // i64 over a u32 pair; a b16 over a .b8[2] return such
+                        // as Eigen::half). Rebuild the word little-endian from
+                        // the fields' bits; it must cover the run exactly.
+                        std::size_t first_field = aggregate_type.elements.size();
+                        std::size_t run_end = 0;
+                        {
+                            std::int64_t cursor = 0;
+                            for (std::size_t i = 0; i < aggregate_type.elements.size(); ++i) {
+                                if (cursor == byte_offset) { first_field = i; break; }
+                                cursor += static_cast<std::int64_t>(type_size(aggregate_type.elements[i]));
+                            }
+                            std::uint32_t run_bytes = 0;
+                            run_end = first_field;
+                            const Type& loaded_type = operation.result_types.front();
+                            const bool scalar_load =
+                                (loaded_type.kind == TypeKind::kInteger ||
+                                 loaded_type.kind == TypeKind::kFloat) && loaded_size <= 8;
+                            // Natural alignment, as PTX requires of ld.param.
+                            if (scalar_load && first_field < aggregate_type.elements.size() &&
+                                type_size(aggregate_type.elements[first_field]) < loaded_size &&
+                                byte_offset % static_cast<std::int64_t>(loaded_size) == 0) {
+                                while (run_end < aggregate_type.elements.size() && run_bytes < loaded_size) {
+                                    const Type& field = aggregate_type.elements[run_end];
+                                    if (field.kind != TypeKind::kInteger && field.kind != TypeKind::kFloat)
+                                        break;
+                                    run_bytes += type_size(field);
+                                    ++run_end;
+                                }
+                            }
+                            if (run_end <= first_field + 1 || run_bytes != loaded_size)
+                                run_end = 0;
+                        }
+                        if (run_end != 0) {
+                            const Type wide_type = Type::integer(loaded_size * 8);
+                            Operand word;
+                            bool have_word = false;
+                            std::int64_t shift = 0;
+                            for (std::size_t i = first_field; i < run_end; ++i) {
+                                const Type& field = aggregate_type.elements[i];
+                                const std::uint32_t bytes = type_size(field);
+                                Operand piece = expressions.emit(OpCode::kAggregateExtract, field,
+                                    {returned_value, Operand::immediate(std::to_string(i), Type::integer(32))});
+                                piece = expressions.bit_container(piece, Type::integer(bytes * 8));
+                                piece = expressions.emit(OpCode::kConvert, wide_type, {piece});
+                                if (shift != 0) {
+                                    piece = expressions.emit(OpCode::kShiftLeft, wide_type,
+                                        {piece, Operand::immediate(std::to_string(shift * 8), wide_type)});
+                                }
+                                if (!have_word) {
+                                    word = piece;
+                                    have_word = true;
+                                } else {
+                                    word = expressions.emit(OpCode::kBitOr, wide_type, {word, piece});
+                                }
+                                shift += bytes;
+                            }
+                            operation.opcode = OpCode::kConvert;
+                            operation.operands = {word};
+                            if (!(operation.result_types.front() == wide_type))
+                                operation.attributes["bitcast"] = "true";
                         } else {
                             if (byte_offset < 0 || loaded_size == 0 ||
                                 aggregate_type.elements.empty() ||
@@ -6201,6 +6667,9 @@ struct Importer {
                 store.opcode = OpCode::kStore;
                 store.location = operation.location;
                 store.attributes["ptx_opcode"] = instruction.opcode;
+                if (const auto guarded = operation.attributes.find("private_guard_cells");
+                    guarded != operation.attributes.end())
+                    store.attributes["private_guard_cells"] = guarded->second;
                 store.operands.push_back(Operand::value_ref(pointer, base.type));
                 store.operands.push_back(store_value(
                     operand_for(lane_operands[lane], *environment, element_type)));
@@ -6879,6 +7348,9 @@ struct Importer {
                 if (!hidden_args.empty()) hidden_args += ',';
                 hidden_args += "queue";
             }
+            if (any_candidate(constant_functions))
+                return fail(&instruction,
+                            "indirect PTX call to a device helper that reads __constant__ memory is unsupported");
             if (!hidden_args.empty())
                 operation.attributes["hidden_args"] = hidden_args;
             std::ostringstream callee_list;
@@ -7288,6 +7760,13 @@ struct Importer {
                 }
                 operation.operands.push_back(*launch_queue_buffer);
                 operation.operands.push_back(*launch_queue_capacity);
+            }
+            if (!builtin_call && constant_functions.contains(callee)) {
+                if (!module_constant_buffer.has_value()) {
+                    return fail(&instruction,
+                                "missing transitive constant buffer binding for PTX device helper");
+                }
+                operation.operands.push_back(*module_constant_buffer);
             }
             if (has_return) {
                 if (signature->return_type.kind == TypeKind::kVoid) {
@@ -7893,8 +8372,9 @@ struct Importer {
             }
         }
 
-        if (is_kernel && !module_constant_symbols.empty()) {
-            if (function.arguments.size() > 30) {
+        if (!module_constant_symbols.empty() &&
+            (is_kernel || constant_functions.contains(entry->name))) {
+            if (is_kernel && function.arguments.size() > 30) {
                 return fail(nullptr,
                             "kernel argument ABI conflicts with reserved constant buffer index 30");
             }
@@ -7914,6 +8394,12 @@ struct Importer {
                 .known_byte_offset = 0,
                 .alignment = 1,
             };
+        }
+        if (is_kernel && !module_constant_symbols.empty()) {
+            // The helper branch above only borrows the kernel's buffer; the
+            // host-visible binding belongs to the kernel alone.
+            const Type pointer_type =
+                Type::pointer(Type::integer(8), AddressSpace::kConstant);
             const std::uint32_t logical_index =
                 static_cast<std::uint32_t>(function.kernel_abi->arguments.size());
             function.kernel_abi->arguments.push_back({
@@ -8416,9 +8902,48 @@ InlineAsmResult lower_inline_ptx_asm(const InlineAsmRequest& request, Builder* b
 
 }  // namespace detail
 
-PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options) {
+namespace {
+
+constexpr std::string_view kGuardLabelPrefix = "$__cumetal_guard_";
+// Must match cumetal::metal::kReportOnlyTrapHelper (trap_reporting.h): the
+// Metal lowering lets this helper's trap report without cancelling the kernel.
+constexpr std::string_view kGuardTrapFunction = "__cumetal_private_store_trap";
+
+// Guard labels name the cells their guard keeps clear, and the guarded store
+// is the next line: "$__cumetal_guard_<tag>__c<cell>_<cell>...:".
+std::unordered_map<int, Importer::GuardedStore> scan_guarded_stores(std::string_view ptx) {
+    std::unordered_map<int, Importer::GuardedStore> guarded;
+    if (ptx.find(kGuardLabelPrefix) == std::string_view::npos) return guarded;
+    static const std::regex cells(R"(__c([0-9_]+):$)");
+    int line = 1;
+    for (std::size_t begin = 0; begin < ptx.size(); ++line) {
+        std::size_t end = ptx.find('\n', begin);
+        if (end == std::string_view::npos) end = ptx.size();
+        std::string_view text = ptx.substr(begin, end - begin);
+        while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+        while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r'))
+            text.remove_suffix(1);
+        if (text.starts_with(kGuardLabelPrefix)) {
+            const std::string label(text);
+            std::smatch match;
+            if (std::regex_search(label, match, cells)) {
+                Importer::GuardedStore store;
+                std::stringstream list(match[1].str());
+                std::string item;
+                while (std::getline(list, item, '_'))
+                    if (!item.empty()) store.cells.push_back(std::stoll(item));
+                if (!store.cells.empty()) guarded[line + 1] = std::move(store);
+            }
+        }
+        begin = end + 1;
+    }
+    return guarded;
+}
+
+PtxImportResult import_ptx_once(std::string_view ptx, const PtxImportOptions& options) {
     common::CompileTrace import_trace("ptx_import", ptx.size());
     Importer importer;
+    importer.guarded_stores = scan_guarded_stores(ptx);
     importer.type_solver_step_limit = options.type_solver_step_limit;
     importer.result.module.source_name =
         options.source_name.empty() ? std::string("<ptx>") : options.source_name;
@@ -8813,6 +9338,28 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
             importer.module_constant_symbols.emplace(symbol.name, symbol);
         }
     }
+    // Helpers reading a module constant, directly or through a direct call.
+    // `reachable_helpers` is call-graph post-order, so callees come first.
+    if (!importer.module_constant_symbols.empty()) {
+        for (const auto* helper : reachable_helpers) {
+            bool uses = false;
+            for (const Instruction& instruction : helper->instructions) {
+                uses = std::any_of(
+                    instruction.operands.begin(), instruction.operands.end(),
+                    [&](const std::string& operand) {
+                        return importer.module_constant_symbols.contains(
+                            parameter_name_from_operand(operand));
+                    });
+                if (!uses) {
+                    const std::optional<std::string> target = direct_call_target(instruction);
+                    uses = target.has_value() && *target != helper->name &&
+                           importer.constant_functions.contains(*target);
+                }
+                if (uses) break;
+            }
+            if (uses) importer.constant_functions.insert(helper->name);
+        }
+    }
     if (!importer.module_constant_symbols.empty() &&
         importer.module_constant_buffer_size > 64u * 1024u) {
         importer.result.error = "external PTX constant buffer exceeds CUDA's 64 KB module limit";
@@ -8900,6 +9447,8 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         next.module_constant_buffer_size = importer.module_constant_buffer_size;
         next.module_global_symbols = importer.module_global_symbols;
         next.helper_global_uses = importer.helper_global_uses;
+        next.constant_functions = importer.constant_functions;
+        next.guarded_stores = importer.guarded_stores;
         next.module_initialized_symbols = importer.module_initialized_symbols;
         next.join_splits = join_splits;
 
@@ -9067,8 +9616,186 @@ PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options
         importer.heap_functions.contains(selected_entry->name);
     importer.result.uses_device_launch_queue =
         importer.launch_queue_functions.contains(selected_entry->name);
+    if (!importer.result.private_store_guard_requests.empty()) {
+        importer.result.error =
+            "unsupported local pointer memory proof: " +
+            std::to_string(importer.result.private_store_guard_requests.size()) +
+            " unbounded private store/cell pair(s) need runtime guards";
+        return importer.result;
+    }
     importer.result.ok = true;
     return importer.result;
+}
+
+std::vector<std::string> split_lines(std::string_view text) {
+    std::vector<std::string> lines;
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        std::size_t end = text.find('\n', begin);
+        if (end == std::string_view::npos) end = text.size();
+        lines.emplace_back(text.substr(begin, end - begin));
+        if (end == text.size()) break;
+        begin = end + 1;
+    }
+    return lines;
+}
+
+std::string_view trimmed(std::string_view text) {
+    while (!text.empty() && (text.front() == ' ' || text.front() == '\t')) text.remove_prefix(1);
+    while (!text.empty() && (text.back() == ' ' || text.back() == '\t' || text.back() == '\r'))
+        text.remove_suffix(1);
+    return text;
+}
+
+// Put a runtime guard in front of each requested private store: it compares
+// the access [first, first+bytes) with each requested 8-byte cell of the
+// function's local depot and traps (through a call, see below) on any overlap,
+// so a guarded store can never overwrite a protected pointer. The guard is
+// plain PTX ending in `@!ok bra label; call trap; label:`, the label naming
+// the cells, which is how a later import (and the Metal pointer legalization,
+// through the IR store's attribute) recognises the store as guarded. A store
+// already guarded is re-guarded against the union of both cell sets.
+// Returns nullopt if any store has a form this cannot guard.
+std::optional<std::string> insert_private_store_guards(
+    std::string_view ptx, const std::vector<PtxImportResult::PrivateStoreGuardRequest>& requests,
+    int round) {
+    std::map<int, std::set<std::int64_t>, std::greater<>> by_line;
+    for (const auto& request : requests) by_line[request.line].insert(request.cell);
+    std::vector<std::string> lines = split_lines(ptx);
+    static const std::regex store_form(
+        R"(^st\.local(?:\.v([24]))?\.(?:b|u|s|f)(8|16|32|64)\s+\[\s*(%[A-Za-z0-9_$.]+)\s*(?:\+\s*(-?[0-9]+))?\s*\]\s*,)");
+    static const std::regex depot_form(R"(\.local\s+\.align\s+[0-9]+\s+\.b8\s+(__local_depot[0-9]+)\s*\[)");
+    for (auto& [line, line_cells] : by_line) {
+        if (line < 1 || static_cast<std::size_t>(line) > lines.size()) return std::nullopt;
+        std::size_t index = static_cast<std::size_t>(line) - 1;
+        const std::string store(trimmed(lines[index]));
+        std::smatch match;
+        if (!std::regex_search(store, match, store_form)) return std::nullopt;  // includes predicated stores
+        const std::int64_t lanes = match[1].matched ? std::stoll(match[1].str()) : 1;
+        const std::int64_t bytes = lanes * (std::stoll(match[2].str()) / 8);
+        const std::string address = match[3].str();
+        const std::int64_t displacement = match[4].matched ? std::stoll(match[4].str()) : 0;
+
+        std::string depot;
+        for (std::size_t i = index; i > 0 && depot.empty(); --i) {
+            const std::string& text = lines[i - 1];
+            std::smatch found;
+            if (std::regex_search(text, found, depot_form)) depot = found[1].str();
+            else if (text.find(".entry") != std::string::npos || text.find(".func") != std::string::npos)
+                break;
+        }
+        if (depot.empty()) return std::nullopt;
+
+        std::set<std::int64_t> cells = line_cells;
+        if (index > 0) {
+            const std::string_view label = trimmed(lines[index - 1]);
+            if (label.starts_with(kGuardLabelPrefix)) {
+                const auto previous = scan_guarded_stores(std::string(label) + "\n");
+                const auto found = previous.find(2);
+                if (found == previous.end()) return std::nullopt;
+                cells.insert(found->second.cells.begin(), found->second.cells.end());
+                std::size_t begin = index - 1;
+                while (begin > 0 && trimmed(lines[begin - 1]) != "// __cumetal_guard_begin") --begin;
+                if (begin == 0) return std::nullopt;
+                lines.erase(lines.begin() + static_cast<std::ptrdiff_t>(begin - 1),
+                            lines.begin() + static_cast<std::ptrdiff_t>(index));
+                index = begin - 1;
+            }
+        }
+        if (cells.empty() || *cells.begin() < 0) return std::nullopt;
+
+        const std::string tag = "r" + std::to_string(round) + "l" + std::to_string(line);
+        std::string label = std::string(kGuardLabelPrefix) + tag + "__c";
+        bool first_label_cell = true;
+        for (const auto cell : cells) {
+            label += (first_label_cell ? "" : "_") + std::to_string(cell);
+            first_label_cell = false;
+        }
+        // Compare addresses, never subtract them: an integer pointer difference
+        // would switch the whole function to strict address cancellation.
+        const std::string reg = "%rd_cmg_" + tag;
+        const std::string depot_reg = reg + "_d", first = reg + "_s", last = reg + "_e";
+        const std::string low_bound = reg + "_lo", high_bound = reg + "_hi";
+        const std::string bad = "%p_cmg_" + tag + "_o";
+        const std::string p_low = "%p_cmg_" + tag + "_l";
+        const std::string p_high = "%p_cmg_" + tag + "_u";
+        std::vector<std::string> guard = {"// __cumetal_guard_begin"};
+        for (const auto& name : {depot_reg, first, last, low_bound, high_bound})
+            guard.push_back("\t.reg .b64 \t" + name + ";");
+        for (const auto& name : {bad, p_low, p_high}) guard.push_back("\t.reg .pred \t" + name + ";");
+        guard.push_back("\tmov.b64 \t" + depot_reg + ", " + depot + ";");
+        guard.push_back("\tadd.s64 \t" + first + ", " + address + ", " + std::to_string(displacement) + ";");
+        guard.push_back("\tadd.s64 \t" + last + ", " + first + ", " + std::to_string(bytes) + ";");
+        // Violation: [first, last) overlaps some [cell, cell+8).
+        bool first_cell = true;
+        for (const auto cell : cells) {
+            guard.push_back("\tadd.s64 \t" + low_bound + ", " + depot_reg + ", " + std::to_string(cell) + ";");
+            guard.push_back("\tadd.s64 \t" + high_bound + ", " + depot_reg + ", " + std::to_string(cell + 8) + ";");
+            guard.push_back("\tsetp.gt.u64 \t" + p_low + ", " + last + ", " + low_bound + ";");
+            guard.push_back("\tsetp.lt.u64 \t" + p_high + ", " + first + ", " + high_bound + ";");
+            if (first_cell) {
+                guard.push_back("\tand.pred \t" + bad + ", " + p_low + ", " + p_high + ";");
+                first_cell = false;
+            } else {
+                guard.push_back("\tand.pred \t" + p_low + ", " + p_low + ", " + p_high + ";");
+                guard.push_back("\tor.pred \t" + bad + ", " + bad + ", " + p_low + ";");
+            }
+        }
+        // A violating access is skipped and reported through a call to the
+        // report-only trap helper: it sets the launch's trap status, so the
+        // host sees a launch failure, but returns, so the kernel needs neither
+        // cancellation polling nor (with barriers) a trap of its own.
+        const std::string done = "$__cumetal_after_" + tag;
+        guard.push_back("\t@!" + bad + " bra \t" + label + ";");
+        guard.push_back("\tcall.uni \t" + std::string(kGuardTrapFunction) + ", ();");
+        guard.push_back("\tbra.uni \t" + done + ";");
+        guard.push_back(label + ":");
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(index) + 1, done + ":");
+        lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(index), guard.begin(), guard.end());
+    }
+    // Define the trap helper once, ahead of the first function definition.
+    bool defined = false;
+    for (const auto& text : lines) defined |= text.find(".func " + std::string(kGuardTrapFunction)) != std::string::npos;
+    if (!defined) {
+        for (std::size_t i = 0; i < lines.size(); ++i) {
+            const std::string_view text = trimmed(lines[i]);
+            if (text.find(".entry") == std::string_view::npos && text.find(".func") == std::string_view::npos)
+                continue;
+            if (text.starts_with("//")) continue;
+            lines.insert(lines.begin() + static_cast<std::ptrdiff_t>(i),
+                         {".func " + std::string(kGuardTrapFunction) + "()", "{", "\ttrap;", "}"});
+            break;
+        }
+    }
+    std::string out;
+    for (std::size_t i = 0; i < lines.size(); ++i) {
+        out += lines[i];
+        if (i + 1 < lines.size()) out += '\n';
+    }
+    return out;
+}
+
+}  // namespace
+
+PtxImportResult import_ptx(std::string_view ptx, const PtxImportOptions& options) {
+    PtxImportResult result = import_ptx_once(ptx, options);
+    // Each round guards every unbounded private store the proof met; guarding
+    // can expose further cells (a walk now passes a store it used to stop at),
+    // so allow a few rounds. Guards only ever add traps, never remove checks.
+    std::string guarded;
+    for (int round = 1; round <= 4 && !result.ok && !result.private_store_guard_requests.empty(); ++round) {
+        const auto rewritten = insert_private_store_guards(
+            guarded.empty() ? ptx : std::string_view(guarded), result.private_store_guard_requests, round);
+        if (!rewritten) break;
+        guarded = *rewritten;
+        result = import_ptx_once(guarded, options);
+        if (result.ok) {
+            result.warnings.push_back(
+                "private stores with unbounded offsets carry runtime guards that trap rather than "
+                "overwrite a proven pointer cell");
+        }
+    }
+    return result;
 }
 
 }  // namespace cumetal::ir

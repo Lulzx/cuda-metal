@@ -8962,6 +8962,23 @@ cudaError_t cudaGraphicsUnregisterResource(cudaGraphicsResource*) {
     return fail(cudaErrorNotSupported);
 }
 
+cudaError_t cudaGLRegisterBufferObject(unsigned int) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGLUnregisterBufferObject(unsigned int) {
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGLMapBufferObject(void** devPtr, unsigned int) {
+    if (devPtr != nullptr) *devPtr = nullptr;
+    return fail(cudaErrorNotSupported);
+}
+
+cudaError_t cudaGLUnmapBufferObject(unsigned int) {
+    return fail(cudaErrorNotSupported);
+}
+
 cudaChannelFormatDesc cudaCreateChannelDesc(int x, int y, int z, int w,
                                              cudaChannelFormatKind f) {
     cudaChannelFormatDesc desc{};

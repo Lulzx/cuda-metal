@@ -20,7 +20,18 @@ struct TrapCallGraph {
     std::unordered_set<std::string> ordinary;
     // Cyclic guarded functions use dispatcher lowering to guarantee polling.
     std::unordered_set<std::string> dispatch;
+    // Functions reachable from a kernel that can reach a cancelling trap. Only
+    // these poll the status (loop headers, after guarded calls) so a trap
+    // stops every lane. A kernel whose only traps are report-only (see below)
+    // records the failure and runs to completion without polling.
+    std::unordered_set<std::string> polling;
 };
+
+// A helper whose trap only reports: it sets the launch's trap status and
+// returns, and its callers carry on. The PTX importer's private-store guards
+// call it after skipping the store they refused, so a failed launch is still
+// reported but the guarded kernel keeps its structured, polling-free code.
+inline constexpr std::string_view kReportOnlyTrapHelper = "__cumetal_private_store_trap";
 
 // Analyze and validate direct call graphs rooted at kernels that can trap.
 // Barriers, collectives, printf, indirect calls, and undefined device calls

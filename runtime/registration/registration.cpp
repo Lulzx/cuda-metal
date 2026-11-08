@@ -1069,7 +1069,7 @@ bool find_arg_info_for_ptx_entry(const std::string& ptx_source,
 
 // out_is_persistent: set to true if the output lives in the persistent JIT cache
 // (and therefore must NOT be deleted on __cudaUnregisterFatBinary).
-bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
+bool emit_ptx_entry_to_temp_metallib(const std::string& module_ptx_source,
                                      const std::string& kernel_name,
                                      std::uint64_t cache_prefix_hash,
                                      std::string* out_path,
@@ -1078,11 +1078,23 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& ptx_source,
                                      bool* out_uses_device_launch_queue = nullptr,
                                      bool* out_is_persistent = nullptr,
                                      std::string* out_provenance = nullptr) {
-    if (ptx_source.empty() || kernel_name.empty() || out_path == nullptr) {
+    if (module_ptx_source.empty() || kernel_name.empty() || out_path == nullptr) {
         REG_DEBUG("emit_ptx_entry_to_temp_metallib: invalid argument (ptx=%zu, kernel=%s)",
-                  ptx_source.size(), kernel_name.c_str());
+                  module_ptx_source.size(), kernel_name.c_str());
         return false;
     }
+
+    // Lower only what this entry needs. A TU's module holds every kernel it
+    // instantiates (COLMAP's PatchMatch module is 63 MB over 208 entries), and
+    // every stage below is at least linear in its input; the FP64 probe below
+    // must also see only this kernel's code, not a neighbour's. An unsplittable
+    // module falls back to the whole text.
+    const std::string sliced_ptx =
+        cumetal::ptx::slice_module_for_entry(module_ptx_source, kernel_name);
+    const std::string& ptx_source = sliced_ptx.empty() ? module_ptx_source : sliced_ptx;
+    REG_DEBUG("emit kernel '%s': module ptx=%zu bytes, slice=%zu bytes%s", kernel_name.c_str(),
+              module_ptx_source.size(), ptx_source.size(),
+              sliced_ptx.empty() ? " (slice failed; whole module)" : "");
 
     // Whether this kernel's FP64 arithmetic runs on the FP32-pair emulation.
     // Computed from the PTX rather than from the lowering result so a warm JIT

@@ -444,3 +444,18 @@ instead of storing a hash set of dominators per block. Storage is linear in CFG
 blocks and edges; the existing dominance relation is preserved, including the
 convention for closed unreachable components. This reduces verifier overhead,
 not the size of imported IR or the separate costs of PTX parsing/register SSA.
+
+Private stores whose address cannot be proved exact are runtime-guarded rather
+than proved. Once one such store blocks a pointer proof, `import_ptx` guards
+every inexact `st.local` in that function against each depot cell that holds a
+pointer (written exactly with a pointer or a 64-bit kernel parameter) and is
+still live after the store: some path reaches a possible 64-bit read of it (an
+exact private load, a call passed a depot pointer within the extent it reads
+through it, or a 64-bit load that may read private memory) before an exact
+store overwrites it. Liveness matters because compilers reuse stack slots. The
+guard compares addresses and, on overlap, skips the store and calls a
+report-only trap helper, so the launch fails but no lane is cancelled. Exactness
+comes only from the flow-sensitive value analysis; the textual operand address
+reports a loop cursor's entry value and is never used to waive a guard.
+Predicated stores are not guarded and still refuse.
+

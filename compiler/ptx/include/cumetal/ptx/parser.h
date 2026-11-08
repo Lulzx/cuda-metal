@@ -83,4 +83,14 @@ ParseResult parse_ptx(std::string_view text, const ParseOptions& options);
 EntryFunction parse_instruction_block(std::string_view body, int start_line,
                                       std::vector<std::string>* warnings);
 
+// The part of a PTX module that one entry needs: every module-scope
+// declaration, the named .entry definition, and every definition reachable
+// from them by name (calls, taken addresses, and child entries a kernel
+// enqueues). Unreferenced entries and unreachable functions are dropped;
+// nothing else is rewritten.
+// Returns an empty string if the module cannot be split into balanced
+// top-level statements or has no definition of `entry_name`; callers then
+// use the whole module.
+std::string slice_module_for_entry(std::string_view text, std::string_view entry_name);
+
 }  // namespace cumetal::ptx

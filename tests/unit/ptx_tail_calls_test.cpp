@@ -43,7 +43,7 @@ int main(int argc, char** argv) {
         std::string invalid = wide_return;
         invalid.replace(invalid.find(from), from.size(), to);
         const auto rejected = metal::compile_ptx_to_msl(invalid);
-        ok &= expect(!rejected.ok, "malformed, overlapping, missing and out-of-bounds wide return fields rejected");
+        ok &= expect(!rejected.ok, "malformed, overlapping, missing and out-of-bounds wide return fields rejected: " + from + " -> " + to);
     }
     std::string vector_return = wide_return;
     for (std::size_t pos = 0; (pos = vector_return.find(".align 8 .b8", pos)) != std::string::npos; pos += 13)

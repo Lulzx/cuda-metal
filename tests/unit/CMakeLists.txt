@@ -835,3 +835,8 @@ target_link_libraries(cumetal_nvvm_private_array_test PRIVATE cumetal_metal_code
 target_compile_options(cumetal_nvvm_private_array_test PRIVATE -Wall -Wextra -Wpedantic)
 add_test(NAME unit_nvvm_private_array COMMAND cumetal_nvvm_private_array_test)
 set_tests_properties(unit_nvvm_private_array PROPERTIES SKIP_RETURN_CODE 77 LABELS "hosted;unit")
+
+add_executable(cumetal_ptx_module_slice_test ptx_module_slice_test.cpp)
+target_link_libraries(cumetal_ptx_module_slice_test PRIVATE cumetal_ptx)
+target_compile_options(cumetal_ptx_module_slice_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_ptx_module_slice COMMAND cumetal_ptx_module_slice_test)

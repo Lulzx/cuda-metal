@@ -569,6 +569,14 @@ add_executable(cumetal_texture_surface_api_test
     texture_surface_api_test.cpp
 )
 
+add_executable(cumetal_gl_interop_api_test
+    gl_interop_api_test.cpp
+)
+
+add_executable(cumetal_private_store_guard_test
+    private_store_guard_test.cpp
+)
+
 add_executable(cumetal_cublaslt_api_test
     cublaslt_api_test.cpp
 )
@@ -1405,6 +1413,16 @@ target_link_libraries(cumetal_texture_surface_api_test
         cumetal_runtime
 )
 
+target_link_libraries(cumetal_gl_interop_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_private_store_guard_test
+    PRIVATE
+        cumetal_runtime
+)
+
 target_link_libraries(cumetal_cublaslt_api_test
     PRIVATE
         cumetal_runtime
@@ -1543,6 +1561,7 @@ target_compile_options(cumetal_cusparse_api_test PRIVATE -Wall -Wextra -Wpedanti
 target_compile_options(cumetal_cusolver_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cuda_graph_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_texture_surface_api_test PRIVATE -Wall -Wextra -Wpedantic)
+target_compile_options(cumetal_gl_interop_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cublaslt_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_async_mempool_api_test PRIVATE -Wall -Wextra -Wpedantic)
 target_compile_options(cumetal_cudnn_api_test PRIVATE -Wall -Wextra -Wpedantic)
@@ -4039,6 +4058,17 @@ add_test(
     NAME functional_texture_surface_api
     COMMAND cumetal_texture_surface_api_test
 )
+
+add_test(
+    NAME functional_gl_interop_api
+    COMMAND cumetal_gl_interop_api_test
+)
+
+add_test(
+    NAME functional_private_store_guard
+    COMMAND cumetal_private_store_guard_test
+)
+set_tests_properties(functional_private_store_guard PROPERTIES LABELS "gpu")
 
 add_test(
     NAME functional_cublaslt_api

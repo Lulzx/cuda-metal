@@ -66,12 +66,29 @@ holds the exact boundary.
   CFG forms that the typed `cumetal-ir` backend accepts.
 - NVRTC needs `cumetalc` and Xcode's Metal toolchain on disk. LTO-IR is
   unavailable, and PTX is produced only for `compute_XX` requests.
+- A private store the typed backend cannot place exactly (a loop cursor whose
+  trip count is a runtime value, as in COLMAP's `GpuMatView::GetSlice`) is
+  compiled behind a runtime guard instead of being proved clear of the frame's
+  live pointer cells. A launch in which it would overwrite one skips the store
+  and fails with `cudaErrorLaunchFailure`; correct programs never hit it. Each
+  guarded store costs a few address compares per live pointer cell.
+- In `.cu` files `__half` is the builtin `_Float16`, so `__half_raw r = h;` has
+  no spelling; `__half(raw)` and `__half_as_ushort(h)` work.
 
 **Runtime** ([details](known-gaps/runtime.md))
 
 - Cooperative grid sync only up to one resident block per reported GPU core.
 - 31 argument buffer slots; kernels using hidden features lose slots 25-30.
 - Stream priorities are always zero; device clocks are not cycle counts.
+- A pointer passed as a plain 64-bit integer kernel argument and dereferenced
+  only after a round trip through memory is honoured as a device address only
+  under `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; by default the GPU reads through
+  the host address and gets garbage. Parameter inference recognises a handle
+  spilled into a stack struct that a helper dereferences (COLMAP's texture
+  objects); other shapes are not detected.
+- `nvcc --default-stream per-thread` is accepted and defines
+  `CUDA_API_PER_THREAD_DEFAULT_STREAM`, but stream 0 still means the legacy
+  default stream: more synchronization than CUDA, never less.
 - Child graphs and event/semaphore/conditional graph nodes.
 - Device `printf` with a dynamically selected format or a read-only
   module-constant `%s` argument.

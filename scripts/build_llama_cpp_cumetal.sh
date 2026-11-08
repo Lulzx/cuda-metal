@@ -142,6 +142,17 @@ foreach(_lib cudart cudart_static cuda_driver cublas cublasLt cufft curand cuspa
 endforeach()
 CMAKE
 
+# --cuda-inline-threshold (below) mirrors cumetalc's option of the same name.
+# LLVM 22 added -inline-all-viable-calls; older Clang rejects the option, so
+# probe once here and bake the answer into the shim.
+INLINE_ALL_VIABLE=0
+# Capture first: under pipefail, `grep -q` closing the pipe early kills clang
+# with SIGPIPE and the whole test reads as false.
+CLANG_HIDDEN_HELP="$("${CLANG_BIN}" -cc1 -mllvm --help-hidden 2>&1 || true)"
+if [[ "${CLANG_HIDDEN_HELP}" == *"-inline-all-viable-calls"* ]]; then
+    INLINE_ALL_VIABLE=1
+fi
+
 # nvcc shim — handles three cmake probes and delegates real compilation to clang++.
 #
 # cmake calls:
@@ -153,6 +164,7 @@ cat > "${FAKE_CUDA}/bin/nvcc" <<NVCC
 # CuMetal nvcc shim — delegates CUDA compilation to clang++
 
 REAL_CLANG="${CLANG_BIN}"
+INLINE_ALL_VIABLE=${INLINE_ALL_VIABLE}
 CUMETAL_API="${ROOT_DIR}/runtime/api"
 TOOLCHAIN="${ROOT_DIR}/scripts/cuda_toolchain"
 FAKE_CUDA_ROOT="${FAKE_CUDA}"
@@ -218,6 +230,8 @@ ARGS=()
 SKIP_NEXT=0
 OPTIONS_FILE_NEXT=0
 XCOMPILER_NEXT=0
+DEFAULT_STREAM_NEXT=0
+INLINE_THRESHOLD_NEXT=0
 XLINKER_NEXT=0
 HAS_CUDA_SOURCE=0
 COMPILE_ONLY=0
@@ -241,6 +255,14 @@ for arg in "\$@"; do
         ARGS+=("@\$arg")
         OPTIONS_FILE_NEXT=0
         continue
+    fi
+    if [[ \$DEFAULT_STREAM_NEXT -eq 1 ]]; then
+        DEFAULT_STREAM_NEXT=0
+        arg="--default-stream=\$arg"
+    fi
+    if [[ \$INLINE_THRESHOLD_NEXT -eq 1 ]]; then
+        INLINE_THRESHOLD_NEXT=0
+        arg="--cuda-inline-threshold=\$arg"
     fi
     if [[ \$SKIP_NEXT -eq 1 ]]; then SKIP_NEXT=0; continue; fi
     case "\$arg" in
@@ -316,6 +338,35 @@ for arg in "\$@"; do
         -maxrregcount=*|--maxrregcount=*)      continue ;;
         --Wext-lambda-captures-this|-Wext-lambda-captures-this) continue ;;
         --Wno-deprecated-gpu-targets|-Wno-deprecated-gpu-targets) continue ;;
+        # nvcc --default-stream {legacy,null,per-thread}. COLMAP builds every
+        # .cu with per-thread. nvcc defines CUDA_API_PER_THREAD_DEFAULT_STREAM
+        # for that mode, so the macro is forwarded; CuMetal's headers do not yet
+        # remap stream 0 to cudaStreamPerThread, which leaves such a TU on the
+        # legacy null stream: more synchronisation, never less (known-gaps).
+        --default-stream|-default-stream)      DEFAULT_STREAM_NEXT=1; continue ;;
+        --default-stream=per-thread|-default-stream=per-thread)
+            ARGS+=(-DCUDA_API_PER_THREAD_DEFAULT_STREAM=1); continue ;;
+        --default-stream=legacy|--default-stream=null|-default-stream=legacy|-default-stream=null)
+            continue ;;
+        --default-stream=*|-default-stream=*)
+            echo "nvcc shim: unsupported value for --default-stream: \${arg#*=}" >&2
+            exit 1 ;;
+        # CuMetal extension, same spelling as cumetalc: inline device calls up
+        # to this threshold (and, on LLVM >= 22, every viable call). nvcc
+        # inlines device code far more eagerly than Clang's default; a helper
+        # left out of line can keep a struct holding pointers in private
+        # memory, which the typed PTX backend must then prove cell by cell.
+        # COLMAP's PatchMatch kernels need it. Device side only.
+        --cuda-inline-threshold)               INLINE_THRESHOLD_NEXT=1; continue ;;
+        --cuda-inline-threshold=*)
+            threshold="\${arg#*=}"
+            if [[ -z "\$threshold" || "\$threshold" == *[!0-9]* ]]; then
+                echo "nvcc shim: --cuda-inline-threshold expects a non-negative integer, got '\$threshold'" >&2
+                exit 1
+            fi
+            ARGS+=("-fgpu-inline-threshold=\$threshold")
+            [[ \$INLINE_ALL_VIABLE -eq 1 ]] && ARGS+=(-Xarch_device "-mllvm -inline-all-viable-calls")
+            continue ;;
         # Device-side debug line tables: nvcc embeds them in the PTX, which
         # CuMetal's PTX path does not consume.
         -lineinfo|--generate-line-info)        continue ;;

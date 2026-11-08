@@ -1,6 +1,7 @@
 #include "cumetal/ir/ir.h"
 #include "cumetal/ir/ptx_importer.h"
 #include "cumetal/metal/lower_to_msl.h"
+#include "cumetal/ptx/parser.h"
 
 #include <algorithm>
 #include <iostream>
@@ -600,6 +601,469 @@ RIGHT:
     const auto missing = ir::import_ptx(prefix + join + undefined + "}\n");
     ok &= expect(!missing.ok && missing.error.find("undefined on an incoming edge") != std::string::npos,
                  "return-slot load with an undefined incoming call remains rejected: " + missing.error);
+    return ok;
+}
+
+// A 2-byte struct returned by value (Eigen::half, a __half_raw wrapper) is a
+// `.b8 retval[2]` aggregate, but NVPTX writes and reads it as one b16 word.
+// Each word must be split into, and rebuilt from, the byte fields it covers.
+bool test_packed_aggregate_return_words() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string module = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .align 2 .b8 func_retval0[2]) make_half(.param .b32 make_half_param_0) {
+    .reg .b32 %r<2>;
+    .reg .b16 %rs<2>;
+    ld.param.b32 %r1, [make_half_param_0];
+    cvt.rn.f16.f32 %rs1, %r1;
+    st.param.b16 [func_retval0], %rs1;
+    ret;
+}
+.func (.param .align 4 .b8 func_retval0[8]) make_pair() {
+    st.param.b64 [func_retval0], 4294967298;
+    ret;
+}
+.visible .entry packed_returns(.param .u64 .ptr .global output, .param .f32 input) {
+    .reg .b64 %rd<3>;
+    .reg .b32 %r<4>;
+    .reg .b16 %rs<2>;
+    ld.param.u64 %rd1, [output];
+    ld.param.f32 %r1, [input];
+    {
+    .param .b32 param0;
+    .param .align 2 .b8 retval0[2];
+    st.param.b32 [param0], %r1;
+    call.uni (retval0), make_half, (param0);
+    ld.param.b16 %rs1, [retval0];
+    }
+    st.global.b16 [%rd1], %rs1;
+    {
+    .param .align 4 .b8 retval0[8];
+    call.uni (retval0), make_pair, ();
+    ld.param.b32 %r2, [retval0];
+    ld.param.b32 %r3, [retval0+4];
+    }
+    st.global.b32 [%rd1+4], %r2;
+    st.global.b32 [%rd1+8], %r3;
+    ret;
+}
+)ptx";
+    const auto imported = ir::import_ptx(module);
+    ok &= expect(imported.ok, "b16 store/load over a .b8[2] return imports: " + imported.error);
+    if (imported.ok) ok &= expect(ir::verify(imported.module).ok, "packed returns verify");
+    const auto msl = metal::compile_ptx_to_msl(module);
+    ok &= expect(msl.ok, "packed returns lower to MSL: " + msl.error);
+
+    // A word that starts inside a field, or runs past the aggregate, still
+    // has no exact field cover and must be refused, not truncated.
+    const auto straddling = ir::import_ptx(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .align 1 .b8 func_retval0[3]) make_three() {
+    st.param.b8 [func_retval0], 1;
+    st.param.b16 [func_retval0+1], 515;
+    ret;
+}
+.visible .entry straddle(.param .u64 .ptr .global output) {
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<2>;
+    ld.param.u64 %rd1, [output];
+    {
+    .param .align 1 .b8 retval0[3];
+    call.uni (retval0), make_three, ();
+    ld.param.b32 %r1, [retval0];
+    }
+    st.global.b32 [%rd1], %r1;
+    ret;
+}
+)ptx");
+    ok &= expect(!straddling.ok, "a b32 load over a 3-byte aggregate is refused");
+    return ok;
+}
+
+// A device helper reading a module __constant__ (COLMAP's PatchMatch cost
+// computer reads ref_K/ref_inv_K out of line) borrows the kernel's constant
+// buffer as a hidden trailing parameter, including through a nested call.
+bool test_helper_module_constants() {
+    using namespace cumetal;
+    bool ok = true;
+    const std::string module = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.const .align 4 .b8 ref_K[16];
+.func (.param .b32 func_retval0) inner_scale(.param .b32 inner_scale_param_0) {
+    .reg .b32 %r<4>;
+    ld.param.b32 %r1, [inner_scale_param_0];
+    ld.const.b32 %r2, [ref_K+4];
+    mul.rn.f32 %r3, %r1, %r2;
+    st.param.b32 [func_retval0], %r3;
+    ret;
+}
+.func (.param .b32 func_retval0) outer_scale(.param .b32 outer_scale_param_0) {
+    .reg .b32 %r<3>;
+    ld.param.b32 %r1, [outer_scale_param_0];
+    {
+    .param .b32 param0;
+    .param .b32 retval0;
+    st.param.b32 [param0], %r1;
+    call.uni (retval0), inner_scale, (param0);
+    ld.param.b32 %r2, [retval0];
+    }
+    st.param.b32 [func_retval0], %r2;
+    ret;
+}
+.visible .entry scale(.param .u64 .ptr .global output, .param .f32 input) {
+    .reg .b64 %rd<2>;
+    .reg .b32 %r<4>;
+    ld.param.u64 %rd1, [output];
+    ld.param.f32 %r1, [input];
+    ld.const.b32 %r3, [ref_K];
+    {
+    .param .b32 param0;
+    .param .b32 retval0;
+    st.param.b32 [param0], %r1;
+    call.uni (retval0), outer_scale, (param0);
+    ld.param.b32 %r2, [retval0];
+    }
+    add.rn.f32 %r2, %r2, %r3;
+    st.global.b32 [%rd1], %r2;
+    ret;
+}
+)ptx";
+    const auto imported = ir::import_ptx(module);
+    ok &= expect(imported.ok, "helpers reading __constant__ import: " + imported.error);
+    if (imported.ok) {
+        ok &= expect(ir::verify(imported.module).ok, "helper constant buffer verifies");
+        unsigned helpers_with_buffer = 0;
+        unsigned kernel_bindings = 0;
+        for (const auto& function : imported.module.functions) {
+            const bool has_arg = std::any_of(function.arguments.begin(), function.arguments.end(),
+                [](const auto& argument) { return argument.name == "__cumetal_constant_buffer"; });
+            if (!function.is_kernel && has_arg) ++helpers_with_buffer;
+            if (function.is_kernel && function.kernel_abi) {
+                for (const auto& binding : function.kernel_abi->bindings)
+                    kernel_bindings += binding.hidden_role == "constant_symbols";
+            }
+        }
+        ok &= expect(helpers_with_buffer == 2, "both helpers borrow the constant buffer");
+        ok &= expect(kernel_bindings == 1, "only the kernel exposes the host constant binding");
+    }
+    const auto msl = metal::compile_ptx_to_msl(module);
+    ok &= expect(msl.ok, "helper constant reads lower to MSL: " + msl.error);
+    return ok;
+}
+
+// A private table of private pointers indexed by a selp-chained argmin
+// (COLMAP's PatchMatch picks the best of five normal pointers this way): the
+// 32-bit index is a finite literal set, widened by mul.wide.u32, so the load
+// reads known table cells. An index with an unknown arm stays unresolved.
+bool test_selp_indexed_pointer_table() {
+    using namespace cumetal;
+    bool ok = true;
+    const auto source = [](const std::string& arm) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry pick(.param .u64 out, .param .f32 a, .param .f32 b, .param .f32 c, .param .u32 k)
+{
+	.local .align 8 .b8 	__local_depot0[64];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<4>;
+	.reg .b32 	%r<20>;
+	.reg .b64 	%rd<20>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [out];
+	ld.param.f32 	%r1, [a];
+	ld.param.f32 	%r2, [b];
+	ld.param.f32 	%r3, [c];
+	ld.param.u32 	%r9, [k];
+	add.u64 	%rd2, %SP, 0;
+	add.u64 	%rd3, %SP, 8;
+	add.u64 	%rd9, %SPL, 24;
+	st.local.f32 	[%SPL], %r1;
+	st.local.f32 	[%SPL+8], %r2;
+	st.local.b64 	[%rd9], %rd2;
+	st.local.b64 	[%rd9+8], %rd3;
+	st.local.b64 	[%rd9+16], %rd3;
+	setp.le.f32 	%p1, %r1, %r2;
+	selp.b32 	%r5, 1, 0, %p1;
+	setp.gt.f32 	%p2, %r3, %r1;
+	selp.b32 	%r6, %r5, )ptx") + arm + R"ptx(, %p2;
+	mul.wide.u32 	%rd10, %r6, 8;
+	add.s64 	%rd11, %rd9, %rd10;
+	ld.local.b64 	%rd12, [%rd11];
+	ld.f32 	%r7, [%rd12];
+	cvta.to.global.u64 	%rd13, %rd1;
+	st.global.f32 	[%rd13], %r7;
+	ret;
+}
+)ptx";
+    };
+    const auto bounded = metal::compile_ptx_to_msl(source("2"));
+    ok &= expect(bounded.ok, "selp-indexed private pointer table lowers: " + bounded.error);
+    ok &= expect(bounded.source.find("thread uchar*") != std::string::npos,
+                 "table entries stay private (thread) pointers");
+    const auto unbounded = metal::compile_ptx_to_msl(source("%r9"));
+    ok &= expect(!unbounded.ok, "a selp arm from a kernel parameter leaves the index unresolved");
+
+    // The same table read with a 32-bit loop counter (COLMAP tries the other
+    // four hypotheses with `normals[i]` for i = 1..4): the counter's range
+    // [1, 5) bounds the index.
+    const auto loop = [](const std::string& limit) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry walk(.param .u64 out, .param .f32 a, .param .u32 k)
+{
+	.local .align 8 .b8 	__local_depot0[64];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<12>;
+	.reg .b64 	%rd<20>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [out];
+	ld.param.f32 	%r1, [a];
+	ld.param.u32 	%r9, [k];
+	add.u64 	%rd2, %SP, 0;
+	add.u64 	%rd9, %SPL, 16;
+	st.local.f32 	[%SPL], %r1;
+	st.local.b64 	[%rd9], %rd2;
+	st.local.b64 	[%rd9+8], %rd2;
+	st.local.b64 	[%rd9+16], %rd2;
+	st.local.b64 	[%rd9+24], %rd2;
+	st.local.b64 	[%rd9+32], %rd2;
+	mov.f32 	%r2, 0f00000000;
+	mov.b32 	%r3, 1;
+$L_loop:
+	mul.wide.u32 	%rd10, %r3, 8;
+	add.s64 	%rd11, %rd9, %rd10;
+	ld.local.b64 	%rd12, [%rd11];
+	ld.f32 	%r4, [%rd12];
+	add.rn.f32 	%r2, %r2, %r4;
+	add.s32 	%r3, %r3, 1;
+	setp.ne.b32 	%p1, %r3, )ptx") + limit + R"ptx(;
+	@%p1 bra 	$L_loop;
+	cvta.to.global.u64 	%rd13, %rd1;
+	st.global.f32 	[%rd13], %r2;
+	ret;
+}
+)ptx";
+    };
+    const auto counted = metal::compile_ptx_to_msl(loop("5"));
+    ok &= expect(counted.ok, "a 32-bit loop counter bounds a private pointer table index: " + counted.error);
+    const auto runtime_limit = metal::compile_ptx_to_msl(loop("%r9"));
+    ok &= expect(!runtime_limit.ok, "a counter with a runtime limit leaves the index unresolved");
+    return ok;
+}
+
+// A pointer-free libdevice call between a private pointer cell's store and
+// its reload writes no memory; it must not block the reaching-store proof.
+bool test_pure_builtin_call_preserves_pointer_cell() {
+    using namespace cumetal;
+    const auto result = metal::compile_ptx_to_msl(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.extern .func (.param .b32 func_retval0) __nv_expf(.param .b32 __nv_expf_param_0);
+.visible .entry keep(.param .u64 out, .param .f32 x)
+{
+	.local .align 8 .b8 	__local_depot0[16];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<8>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [out];
+	ld.param.f32 	%r1, [x];
+	st.local.f32 	[%SPL], %r1;
+	add.u64 	%rd2, %SP, 0;
+	st.local.b64 	[%SPL+8], %rd2;
+	{
+	.param .b32 param0;
+	.param .b32 retval0;
+	st.param.b32 	[param0], %r1;
+	call.uni (retval0), __nv_expf, (param0);
+	ld.param.b32 	%r2, [retval0];
+	}
+	ld.local.b64 	%rd3, [%SPL+8];
+	ld.f32 	%r3, [%rd3];
+	add.rn.f32 	%r4, %r2, %r3;
+	cvta.to.global.u64 	%rd4, %rd1;
+	st.global.f32 	[%rd4], %r4;
+	ret;
+}
+)ptx");
+    return expect(result.ok, "pointer cell survives a call to __nv_expf: " + result.error);
+}
+
+// The remainder loop of an unrolled fill with a runtime 64-bit trip count
+// (COLMAP's GpuMatView::GetSlice) cannot be proved clear of a pointer cell in
+// the same frame. It is compiled behind a runtime guard that traps instead;
+// a predicated store cannot be guarded unconditionally and is still refused.
+bool test_unbounded_private_store_guard() {
+    using namespace cumetal;
+    bool ok = true;
+    const auto kernel = [](const std::string& store) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry fill(.param .u64 out, .param .u64 src, .param .u64 n)
+{
+	.local .align 8 .b8 	__local_depot0[32];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .pred 	%p<3>;
+	.reg .b32 	%r<6>;
+	.reg .b64 	%rd<20>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [out];
+	ld.param.u64 	%rd2, [src];
+	ld.param.u64 	%rd3, [n];
+	cvta.to.global.u64 	%rd2, %rd2;
+	add.u64 	%rd4, %SP, 16;
+	st.local.b64 	[%SPL+8], %rd4;
+	add.u64 	%rd5, %SPL, 16;
+	and.b64 	%rd11, %rd3, -4;
+	and.b64 	%rd6, %rd3, 3;
+	setp.eq.s64 	%p1, %rd6, 0;
+	@%p1 bra 	$L_done;
+	shl.b64 	%rd12, %rd11, 2;
+	add.s64 	%rd7, %rd5, %rd12;
+	mov.b64 	%rd8, %rd2;
+$L_loop:
+	ld.global.b32 	%r1, [%rd8];
+	)ptx") + store + R"ptx(
+	add.s64 	%rd7, %rd7, 4;
+	add.s64 	%rd8, %rd8, 4;
+	add.s64 	%rd6, %rd6, -1;
+	setp.ne.s64 	%p2, %rd6, 0;
+	@%p2 bra 	$L_loop;
+$L_done:
+	ld.local.b64 	%rd9, [%SPL+8];
+	ld.f32 	%r2, [%rd9];
+	cvta.to.global.u64 	%rd10, %rd1;
+	st.global.f32 	[%rd10], %r2;
+	ret;
+}
+)ptx";
+    };
+    const auto guarded = metal::compile_ptx_to_msl(kernel("st.local.b32 \t[%rd7], %r1;"));
+    ok &= expect(guarded.ok, "unbounded private store compiles behind a runtime guard: " + guarded.error);
+    ok &= expect(guarded.source.find("cm_trap_status") != std::string::npos,
+                 "the guarded kernel reports traps");
+    // The guard's trap only reports: the kernel calls the report helper and
+    // never polls the status itself (polling every loop iteration cost
+    // COLMAP's PatchMatch sweep an order of magnitude).
+    std::size_t polls = 0;
+    for (std::size_t at = 0; (at = guarded.source.find("atomic_load_explicit(cm_trap_status", at)) != std::string::npos; ++at)
+        ++polls;
+    ok &= expect(polls == 1, "only the report helper reads the trap status (" + std::to_string(polls) + " reads)");
+    const auto predicated = metal::compile_ptx_to_msl(kernel("@%p2 st.local.b32 \t[%rd7], %r1;"));
+    ok &= expect(!predicated.ok, "a predicated unbounded private store is still refused");
+    return ok;
+}
+
+// A 64-bit parameter spilled to a private slot and reloaded is still that
+// parameter: a dereferenced reload makes it a pointer (a cudaTextureObject_t
+// kept in a struct on the stack); an integer-used reload does not.
+bool test_spilled_parameter_pointer_inference() {
+    bool ok = true;
+    const auto module = [](const std::string& use) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry spill(.param .u64 handle, .param .u64 out)
+{
+	.local .align 8 .b8 	__local_depot0[16];
+	.reg .b64 	%SPL;
+	.reg .b32 	%r<3>;
+	.reg .b64 	%rd<6>;
+	mov.b64 	%SPL, __local_depot0;
+	ld.param.u64 	%rd1, [handle];
+	ld.param.u64 	%rd2, [out];
+	st.local.b64 	[%SPL+8], %rd1;
+	ld.local.b64 	%rd3, [%SPL+8];
+	)ptx") + use + R"ptx(
+	ret;
+}
+)ptx";
+    };
+    const auto pointer = cumetal::ptx::parse_ptx(module("ld.b32 \t%r1, [%rd3+52];"));
+    ok &= expect(pointer.ok && pointer.module.entries.size() == 1 &&
+                 pointer.module.entries[0].params[0].is_pointer,
+                 "a dereferenced reload of a spilled parameter marks it a pointer");
+    const auto scalar = cumetal::ptx::parse_ptx(module("mul.lo.s64 \t%rd4, %rd3, 3;"));
+    ok &= expect(scalar.ok && scalar.module.entries.size() == 1 &&
+                 !scalar.module.entries[0].params[0].is_pointer,
+                 "an integer-used reload leaves the parameter scalar");
+
+    // The kernel only spills the handle into a struct on its stack and passes
+    // the struct to a helper, which loads the field and dereferences it
+    // (COLMAP's PatchMatch cost computer and its texture handles). Bound as a
+    // scalar, the GPU would read through a host address.
+    const auto through_call = [](const std::string& use) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b32 func_retval0) member(.param .b64 member_param_0)
+{
+	.reg .b32 	%r<3>;
+	.reg .b64 	%rd<4>;
+	ld.param.b64 	%rd1, [member_param_0];
+	ld.b64 	%rd2, [%rd1+16];
+	)ptx") + use + R"ptx(
+	st.param.b32 	[func_retval0], %r1;
+	ret;
+}
+.visible .entry owner(.param .u64 handle, .param .u64 out)
+{
+	.local .align 8 .b8 	__local_depot0[32];
+	.reg .b64 	%SP;
+	.reg .b64 	%SPL;
+	.reg .b32 	%r<3>;
+	.reg .b64 	%rd<6>;
+	mov.b64 	%SPL, __local_depot0;
+	cvta.local.u64 	%SP, %SPL;
+	ld.param.u64 	%rd1, [handle];
+	add.u64 	%rd2, %SPL, 0;
+	add.u64 	%rd3, %SP, 0;
+	st.local.b64 	[%rd2+16], %rd1;
+	{
+	.param .b64 param0;
+	.param .b32 retval0;
+	st.param.b64 	[param0], %rd3;
+	call.uni (retval0), member, (param0);
+	ld.param.b32 	%r1, [retval0];
+	}
+	ret;
+}
+)ptx";
+    };
+    const auto dereferenced = cumetal::ptx::parse_ptx(through_call("ld.b32 \t%r1, [%rd2+52];"));
+    ok &= expect(dereferenced.ok && dereferenced.module.entries.size() == 1 &&
+                 dereferenced.module.entries[0].params[0].is_pointer &&
+                 !dereferenced.module.entries[0].params[1].is_pointer,
+                 "a parameter a helper dereferences through a spilled struct field is a pointer");
+    const auto integer_field = cumetal::ptx::parse_ptx(through_call("cvt.u32.u64 \t%r1, %rd2;"));
+    ok &= expect(integer_field.ok && integer_field.module.entries.size() == 1 &&
+                 !integer_field.module.entries[0].params[0].is_pointer,
+                 "a field the helper only uses as an integer leaves the parameter scalar");
     return ok;
 }
 
@@ -1502,6 +1966,12 @@ bool test_trap_reporting_accepts_scalar_math_builtins() {
 int main() {
     using namespace cumetal;
     bool ok = true;
+    ok &= test_packed_aggregate_return_words();
+    ok &= test_helper_module_constants();
+    ok &= test_selp_indexed_pointer_table();
+    ok &= test_pure_builtin_call_preserves_pointer_cell();
+    ok &= test_unbounded_private_store_guard();
+    ok &= test_spilled_parameter_pointer_inference();
     const auto packed_atomic = metal::compile_ptx_to_msl(R"ptx(
 .version 7.0
 .target sm_80

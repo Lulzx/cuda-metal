@@ -25,10 +25,24 @@
 // ── Host-side __half (not compiled with CUDA device target) ─────────────────
 #if !(defined(__clang__) && defined(__CUDA__))
 
+// CUDA's raw-bits views of __half/__half2. Eigen's GPU fp16 path (and any
+// code that moves halves through integer registers) builds a __half from one
+// and reads the bits back through `.x`.
+typedef struct __attribute__((aligned(2))) __half_raw {
+    unsigned short x;
+} __half_raw;
+typedef struct __attribute__((aligned(4))) __half2_raw {
+    unsigned short x;
+    unsigned short y;
+} __half2_raw;
+
 struct __half {
     uint16_t __x;
 
     __half() = default;
+    __half(const __half_raw& raw) : __x(raw.x) {}
+    __half& operator=(const __half_raw& raw) { __x = raw.x; return *this; }
+    operator __half_raw() const { __half_raw raw; raw.x = __x; return raw; }
 
     // Round once to binary16, including subnormals and NaNs.
     explicit __half(float f) : __x(cumetal_float16::from_float<5, 10>(f)) {}
@@ -183,6 +197,23 @@ inline __half2& operator*=(__half2& a, const __half2& b) { a = __hmul2(a, b); re
 // When compiling device code, use the native _Float16 / __fp16 type.
 // These are defined by the compiler; no additional typedef needed.
 typedef _Float16 __half;
+
+// CUDA's raw-bits views of __half/__half2 (see the host branch). __half is a
+// builtin scalar here, so the __half <- __half_raw direction is a conversion
+// operator on the raw struct; `__half(raw)` and implicit use both reach it.
+// The opposite direction (`__half_raw r = h;`) has no spelling for a builtin
+// type: use __half_as_ushort, or copy the bits.
+typedef struct __attribute__((aligned(2))) __half_raw {
+    unsigned short x;
+#ifdef __cplusplus
+    __host__ __device__ operator __half() const { return __builtin_bit_cast(__half, x); }
+#endif
+} __half_raw;
+typedef struct __attribute__((aligned(4))) __half2_raw {
+    unsigned short x;
+    unsigned short y;
+} __half2_raw;
+
 typedef struct __attribute__((aligned(4))) __half2 {
     __half x;
     __half y;
@@ -294,6 +325,23 @@ static __device__ __forceinline__ __half2 __shfl_xor_sync(unsigned int mask, __h
 }
 #endif
 
+// Scalar __half shuffles move the 16 raw bits through the 32-bit lane exchange,
+// so NaN payloads and signed zeros survive. Without these overloads a __half
+// argument is equally convertible to every arithmetic overload in
+// cuda_runtime.h and the call is ambiguous (Eigen's Half.h hits this).
+#define CUMETAL_HALF_SHFL(name, lane_t)                                               \
+    static __device__ __forceinline__ __half name(unsigned int mask, __half val,        \
+                                                  lane_t lane, int width = 32) {       \
+        const int bits = static_cast<int>(__builtin_bit_cast(unsigned short, val));    \
+        const int out = name(mask, bits, lane, width);                                 \
+        return __builtin_bit_cast(__half, static_cast<unsigned short>(out));           \
+    }
+CUMETAL_HALF_SHFL(__shfl_sync, int)
+CUMETAL_HALF_SHFL(__shfl_xor_sync, int)
+CUMETAL_HALF_SHFL(__shfl_up_sync, unsigned int)
+CUMETAL_HALF_SHFL(__shfl_down_sync, unsigned int)
+#undef CUMETAL_HALF_SHFL
+
 static __device__ __forceinline__ __half __hadd(__half a, __half b) { return a + b; }
 static __device__ __forceinline__ __half __hmul(__half a, __half b) { return a * b; }
 static __device__ __forceinline__ __half __hsub(__half a, __half b) { return a - b; }
@@ -359,6 +407,22 @@ CUMETAL_F16_HD inline __half __cumetal_half_from_bits(uint16_t bits) {
     out.__x = bits;
 #endif
     return out;
+}
+CUMETAL_F16_HD inline unsigned short __half_as_ushort(__half value) {
+    uint16_t bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+CUMETAL_F16_HD inline short __half_as_short(__half value) {
+    short bits;
+    __builtin_memcpy(&bits, &value, sizeof(bits));
+    return bits;
+}
+CUMETAL_F16_HD inline __half __ushort_as_half(unsigned short bits) {
+    return __cumetal_half_from_bits(bits);
+}
+CUMETAL_F16_HD inline __half __short_as_half(short bits) {
+    return __cumetal_half_from_bits(static_cast<uint16_t>(bits));
 }
 CUMETAL_F16_HD inline __half __double2half(double value) {
     return __cumetal_half_from_bits(cumetal_float16::from_double<5, 10>(value));
@@ -467,6 +531,35 @@ CUMETAL_F16_HD inline __half hrcp(__half value) {
 }
 CUMETAL_F16_HD inline bool __hisnan(__half value) { return __builtin_isnan(__half2float(value)); }
 CUMETAL_F16_HD inline bool __hisinf(__half value) { return __builtin_isinf(__half2float(value)); }
+
+
+// Paired-lane forms used by Eigen's half2 packet math. Each lane rounds once
+// to binary16 from a binary32 evaluation, like the scalar forms above.
+CUMETAL_F16_HD inline __half2 __halves2half2(__half lo, __half hi) {
+    __half2 r;
+    r.x = lo;
+    r.y = hi;
+    return r;
+}
+CUMETAL_F16_HD inline __half2 __hneg2(__half2 a) {
+    return __halves2half2(__float2half_rn(-__half2float(a.x)), __float2half_rn(-__half2float(a.y)));
+}
+CUMETAL_F16_HD inline __half2 __h2div(__half2 a, __half2 b) {
+    return __halves2half2(__float2half_rn(__half2float(a.x) / __half2float(b.x)),
+                          __float2half_rn(__half2float(a.y) / __half2float(b.y)));
+}
+#define CUMETAL_HALF2_UNARY(name2, name1)                                \
+    CUMETAL_F16_HD inline __half2 name2(__half2 a) {                     \
+        return __halves2half2(name1(a.x), name1(a.y));                   \
+    }
+CUMETAL_HALF2_UNARY(h2sqrt, hsqrt)
+CUMETAL_HALF2_UNARY(h2rsqrt, hrsqrt)
+CUMETAL_HALF2_UNARY(h2rcp, hrcp)
+CUMETAL_HALF2_UNARY(h2exp, hexp)
+CUMETAL_HALF2_UNARY(h2exp2, hexp2)
+CUMETAL_HALF2_UNARY(h2log, hlog)
+CUMETAL_HALF2_UNARY(h2log2, hlog2)
+#undef CUMETAL_HALF2_UNARY
 
 #else  // !__cplusplus
 

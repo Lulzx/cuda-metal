@@ -1990,6 +1990,25 @@ private:
         }
         return true;
     }
+    // True when a guarded private store cannot reach the 8-byte field at
+    // `offset`: it is one of the cells the store's runtime guard keeps clear.
+    static bool guard_keeps_clear(const ir::Operation& store, std::int64_t offset) {
+        const auto attribute = store.attributes.find("private_guard_cells");
+        if (attribute == store.attributes.end()) return false;
+        std::int64_t value = 0;
+        bool any = false;
+        for (const char c : attribute->second + ",") {
+            if (c >= '0' && c <= '9') {
+                value = value * 10 + (c - '0');
+                any = true;
+            } else {
+                if (any && value == offset) return true;
+                value = 0;
+                any = false;
+            }
+        }
+        return false;
+    }
     bool prove(Location start, Address field, ir::ValueId loaded,
                std::optional<Location> selected_caller = {}, bool require_zero = false) {
         using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
@@ -2028,6 +2047,10 @@ private:
                     // same object's unknown offsets remain potential clobbers.
                     const auto allocation = allocation_root_of(event.operands.front());
                     if (allocation && *allocation != root) continue;
+                    // The importer put a runtime guard in front of this store
+                    // that traps before it can overlap any listed cell of its
+                    // own depot (see insert_private_store_guards).
+                    if (allocation && guard_keeps_clear(event, offset)) continue;
                     error_ = "unresolved potentially overlapping write at " + event.location.str();
                     return false;
                 }
@@ -3297,6 +3320,9 @@ struct AstLowerer {
     bool force_cfg_dispatcher = false;
     bool barrier_in_call_graph = false;
     bool trap_guarded = false;
+    // Whether this guarded function polls the trap status so a cancelling trap
+    // stops it; report-only traps (TrapCallGraph::polling) need no polling.
+    bool trap_polls = true;
     std::size_t edge_temporary_index = 0;
     std::size_t loop_escape_index = 0;
     std::optional<ir::AddressSpace> pointer_specialization;
@@ -6766,7 +6792,7 @@ struct AstLowerer {
             if (lowered.has_value()) statements->push_back(*lowered);
             for (MslStmt& trailing : trailing_statements) statements->push_back(std::move(trailing));
             trailing_statements.clear();
-            if (trap_guarded && calls_guarded_helper(operation)) {
+            if (trap_guarded && trap_polls && calls_guarded_helper(operation)) {
                 statements->push_back(MslStatement::if_statement(
                     trap_status_is_set(), {trap_cancel_return()}));
             }
@@ -7580,7 +7606,7 @@ struct AstLowerer {
         };
 
         std::vector<MslStmt> loop_statements;
-        if (trap_guarded) {
+        if (trap_guarded && trap_polls) {
             loop_statements.push_back(MslStatement::if_statement(
                 trap_status_is_set(), {trap_cancel_return()}));
         }
@@ -8530,6 +8556,12 @@ std::optional<std::string> raw_address_refusal(const ir::Module& module) {
     const ir::Operation* raw = nullptr;
     const ir::Function* raw_function = nullptr;
     const ir::Operation* escape = nullptr;
+    // A private pointer stored into private memory stays in a cell the typed
+    // pointer proofs track, and comes back as a typed private pointer. It can
+    // only resurface as a raw integer through a 64-bit private load whose
+    // result is an integer; without one, such stores are not escapes.
+    const ir::Operation* private_cell_store = nullptr;
+    bool integer_private_reload = false;
     for (const ir::Function& function : module.functions) {
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
@@ -8540,9 +8572,19 @@ std::optional<std::string> raw_address_refusal(const ir::Module& module) {
                     raw = &operation;
                     raw_function = &function;
                 }
+                if (operation.opcode == ir::OpCode::kLoad && !operation.operands.empty() &&
+                    is_private(operation.operands.front()) && !operation.result_types.empty() &&
+                    operation.result_types.front().kind == ir::TypeKind::kInteger &&
+                    operation.result_types.front().bit_width == 64)
+                    integer_private_reload = true;
                 if (operation.opcode == ir::OpCode::kStore && escape == nullptr &&
-                    std::any_of(operation.operands.begin() + 1, operation.operands.end(), is_private))
-                    escape = &operation;
+                    std::any_of(operation.operands.begin() + 1, operation.operands.end(), is_private)) {
+                    if (is_private(operation.operands.front())) {
+                        if (private_cell_store == nullptr) private_cell_store = &operation;
+                    } else {
+                        escape = &operation;
+                    }
+                }
                 if (operation.opcode == ir::OpCode::kConvert && escape == nullptr &&
                     !operation.operands.empty() && is_private(operation.operands.front()) &&
                     !operation.result_types.empty() && !operation.result_types.front().is_pointer())
@@ -8550,6 +8592,7 @@ std::optional<std::string> raw_address_refusal(const ir::Module& module) {
             }
         }
     }
+    if (escape == nullptr && integer_private_reload) escape = private_cell_store;
     if (raw == nullptr || escape == nullptr) return std::nullopt;
     return raw->location.str() + ": raw integer address in '" + raw_function->name +
            "' may name private memory: a private pointer becomes an integer at " +
@@ -9746,6 +9789,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                     wide_atomic_usage, trap_graph.guarded, trap_guarded,
                     trap_graph.dispatch.contains(function.name), specialization,
                     barrier_usage.at(function.name));
+                lowerer.trap_polls = trap_graph.polling.contains(function.name);
                 LowerToMslResult function_result = lowerer.run();
                 const bool structurization_failure =
                     !function_result.ok &&
@@ -9772,6 +9816,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
                         metal_module, function, builtin_usage, shared_usage,
                         wide_atomic_usage, trap_graph.guarded, trap_guarded,
                         true, specialization, barrier_usage.at(function.name));
+                    dispatcher_lowerer.trap_polls = trap_graph.polling.contains(function.name);
                     function_result = dispatcher_lowerer.run();
                     if (!function_result.ok) {
                         function_result.error =
