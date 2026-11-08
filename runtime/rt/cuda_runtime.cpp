@@ -6779,7 +6779,7 @@ cudaError_t cudaLaunchKernel(const void* func,
             // Let the backend report the loaded library's actual provenance.
             use_registered_kernel ? registered_kernel.provenance : "",
         .semantic_quality =
-            use_registered_kernel ? registered_kernel.semantic_quality : "exact",
+            use_registered_kernel ? registered_kernel.semantic_quality : "",
         .resident_buffers = std::move(resident_buffers),
     };
 

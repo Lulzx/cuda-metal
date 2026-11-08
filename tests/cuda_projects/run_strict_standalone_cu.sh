@@ -41,3 +41,9 @@ if grep -q 'source=approximate_stub' <<<"${RUN_OUTPUT}"; then
     echo "FAIL: strict numerical probe used an approximate stub"
     exit 1
 fi
+
+if [[ -n "${CUMETAL_EXPECT_SEMANTIC_QUALITY:-}" ]] &&
+   ! grep -q "semantic_quality=${CUMETAL_EXPECT_SEMANTIC_QUALITY}.*device=apple_gpu.*launch_success=true" <<<"${RUN_OUTPUT}"; then
+    echo "FAIL: GPU launch did not report semantic_quality=${CUMETAL_EXPECT_SEMANTIC_QUALITY}"
+    exit 1
+fi

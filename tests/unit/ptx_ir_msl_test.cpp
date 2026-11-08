@@ -2917,6 +2917,43 @@ TRAP:
         std::cerr << directed_probe.source << "\n";
     }
 
+    const std::string hypot_ptx = R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry hypot_probe(.param .u64 output) {
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [output];
+    mov.b64 %rd2, 0d3ff0000000000000;
+    .param .b64 param0;
+    .param .b64 param1;
+    .param .b64 retval0;
+    st.param.b64 [param0], %rd2;
+    st.param.b64 [param1], %rd2;
+    call.uni (retval0), __nv_hypot, (param0, param1);
+    ld.param.b64 %rd3, [retval0];
+    st.global.b64 [%rd1], %rd3;
+    ret;
+}
+)ptx";
+    for (const char* mode : {"fast48", "wide48", "ieee64"}) {
+        metal::PtxToMslOptions options;
+        options.fp64_mode = mode;
+        const auto result = metal::compile_ptx_to_msl(hypot_ptx, options);
+        const bool fallback = result.source.find(ir::kFp64LibdeviceViaF32Caveat) !=
+                              std::string::npos;
+        const bool reduced = result.source.find(ir::kWide48HypotCaveat) !=
+                             std::string::npos;
+        const bool exact = result.source.find("cumetal-semantic-quality: exact") !=
+                           std::string::npos;
+        ok &= expect(result.ok && reduced == (std::string(mode) == "wide48") &&
+                         (std::string(mode) != "wide48" || !exact),
+                     "wide48 hypot identifies reduced-precision semantics");
+        ok &= expect(result.ok && fallback == (std::string(mode) == "fast48"),
+                     std::string("hypot reports binary32 fallback only in fast48: ") +
+                         mode + " " + result.error);
+    }
+
     // rcp.rn.f64 imports as 1.0 / x. binary64 lowers to raw bits in a ulong,
     // so the literal must be spelled as its bit pattern: a decimal `1.0`
     // converts to the integer 1 (the smallest denormal) and every reciprocal

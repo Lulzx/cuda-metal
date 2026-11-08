@@ -665,6 +665,17 @@ set_tests_properties(
             "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
 )
 
+add_test(
+    NAME functional_cuda_projects_fp64_hypot_wide48
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        fp64_vf64_math fp64_vf64_math.cu fp64_hypot_wide48
+        "PASS: wide48 hypot analytic and MPFR vectors on Apple GPU"
+)
+set_tests_properties(functional_cuda_projects_fp64_hypot_wide48 PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=wide48;CUMETAL_CUDA_PROJECT_EXTRA_DEVICE_FLAGS=-DCUMETAL_TEST_WIDE_HYPOT=1;CUMETAL_EXPECT_SEMANTIC_QUALITY=reduced_precision_fp64")
+
 # Native atom.add.f64, the form Kokkos emits for sm_60+ (the header's
 # atomicAdd(double*) is a CAS loop). It shares the 64-bit lock bank and adds
 # with the active FP64 mode; device and threadgroup memory are both contended.
@@ -711,6 +722,29 @@ set_tests_properties(
         SKIP_RETURN_CODE 77
         RUN_SERIAL TRUE
         LABELS "benchmark;gpu;performance"
+        ENVIRONMENT
+            "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
+)
+
+# The benchmark above stays in [1, 2); this checks ieee64 division bitwise over
+# every exponent, overflow and subnormal results, reciprocal-table segment edges,
+# near-halfway quotients and special operands, for `/` and __drcp_rn.
+add_test(
+    NAME functional_cuda_projects_fp64_division_domain
+    COMMAND bash
+        ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR}
+        ${CMAKE_CURRENT_BINARY_DIR}
+        fp64
+        fp64_division_domain.cu
+        fp64_division_domain
+        "PASS: ieee64 division matches host binary64 bitwise over the domain"
+)
+set_tests_properties(
+    functional_cuda_projects_fp64_division_domain
+    PROPERTIES
+        SKIP_RETURN_CODE 77
+        RUN_SERIAL TRUE
         ENVIRONMENT
             "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=ieee64"
 )

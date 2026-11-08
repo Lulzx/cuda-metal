@@ -2490,6 +2490,34 @@ int main() {
                          std::string::npos,
                  "isolated float-to-double multiply chains demote explicitly for Metal");
 
+    const std::string hypot_nvvm = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+define ptx_kernel void @hypot_probe(ptr %input, ptr %output) {
+  %x = load double, ptr %input, align 8
+  %r = call double @__nv_hypot(double %x, double %x)
+  store double %r, ptr %output, align 8
+  ret void
+}
+declare double @__nv_hypot(double, double)
+)llvm";
+    for (const char* mode : {"fast48", "wide48", "ieee64"}) {
+        const auto result = metal::compile_nvvm_to_msl(
+            hypot_nvvm, "hypot.ll", "hypot_probe", mode);
+        const bool fallback = result.source.find(ir::kFp64LibdeviceViaF32Caveat) !=
+                              std::string::npos;
+        const bool reduced = result.source.find(ir::kWide48HypotCaveat) !=
+                             std::string::npos;
+        const bool exact = result.source.find("cumetal-semantic-quality: exact") !=
+                           std::string::npos;
+        ok &= expect(result.ok && reduced == (std::string(mode) == "wide48") &&
+                         (std::string(mode) != "wide48" || !exact),
+                     "wide48 hypot identifies reduced-precision semantics");
+        ok &= expect(result.ok && fallback == (std::string(mode) == "fast48"),
+                     std::string("hypot reports binary32 fallback only in fast48: ") +
+                         mode + " " + result.error);
+    }
+
     const metal::NvvmToMslResult general_fp64 =
         metal::compile_nvvm_to_msl(kNvvmUnsupportedFp64,
                                    "unsupported-fp64.ll", "unsupported_fp64");

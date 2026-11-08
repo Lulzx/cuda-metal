@@ -27,6 +27,9 @@ cumetalc kernel.cu -o kernel
 
 ## Build from source
 
+FP64 arithmetic comes from the `third_party/VF64-metal` submodule; initialize it
+with `git submodule update --init --recursive`.
+
 From a checkout with the [build prerequisites](docs/build.md) installed:
 
 ```bash

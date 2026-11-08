@@ -68,6 +68,17 @@ through the virtual FP64 support ABI:
 - IEEE remainder and round-to-integer operations;
 - binary16/binary32 and signed/unsigned 32/64-bit integer conversions.
 
+Under `ieee64`, value-only round-to-nearest division (`vf64_div_rne`, which
+plain `/` and `div.rn.f64` lower to) uses VF64's certified table reciprocal for
+normal finite operands. Operands that are not normal, and reciprocals that
+fail VF64's exact certificate, fall back to the restoring divider, and overflow
+and subnormal results go through the shared rounding packer. Directed-rounding
+and flag-reporting division keep the restoring implementation.
+`functional_cuda_projects_fp64_division_domain` (PTX JIT) and
+`functional_fp64_division_domain_native` (native build) compare GPU quotients
+bitwise with host binary64 division across the exponent range, subnormal and
+overflowing results, near-tie quotients and special values.
+
 On the MSL lowering path, double-precision libdevice calls without a software
 primitive -- `exp`/`log`/trigonometric/hyperbolic families, `pow`, `fmod`,
 `hypot`, `erf`, `ldexp`/`scalbn`/`powi`, `nextafter`, `sinpi`/`cospi`/
@@ -88,10 +99,24 @@ rounded for every argument; the other twenty are correctly rounded wherever
 VF64's certificate holds (every published MPFR comparison) and faithfully
 rounded by their error bound otherwise. `powi`, `exp10`, `log10`, the `erf`
 and gamma families, and the rest of the list above stay on the binary32 path
-under `ieee64`; `fast48`, `wide48`, and the legacy PTX-to-LLVM path use it for
-all of them. `functional_cuda_projects_fp64_vf64_math_ieee64` (PTX) and
+under `ieee64`; `fast48` and the legacy PTX-to-LLVM path use it for all of
+them. `wide48` uses it except for the reduced hypot helper below. `functional_cuda_projects_fp64_vf64_math_ieee64` (PTX) and
 `functional_fp64_vf64_math_nvvm` (native NVVM build) check all 22 within one
 ulp of the host libm, including arguments outside binary32 range.
+
+Under `wide48`, typed PTX and NVVM double `hypot` calls use
+`vf64_wide_hypot` from the pinned VF64 submodule.
+The helper retains an explicit integer scale through both squares, their
+positive sum and the square root, then packs the reduced result into binary64.
+Infinity precedes NaN after reduced decoding, and two zero inputs return
+positive zero. It supplies neither binary64 correct rounding nor exception
+flags. The existing `wide48` codec's uncertainty at the top overflow boundary
+still applies. Tests use a relative tolerance of 2^-44, allowing one binary64
+ulp where larger; this is a corpus gate, not a universal error bound.
+`functional_cuda_projects_fp64_hypot_wide48` and
+`functional_fp64_hypot_wide48_nvvm` check dynamic GPU inputs against scaled
+3-4-5 norms and pinned MPFR vectors. Other `wide48` transcendentals retain the
+binary32 fallback and warning.
 
 Where the binary32 fallback applies, the generated module records the
 `FP64 libdevice calls evaluate through binary32 under emulation` semantic
