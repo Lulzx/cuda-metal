@@ -61,8 +61,9 @@ compile matrix. Embedded read-only module-constant strings remain outside this
 proved subset, as does CUDA's circular overwrite policy.
 
 <!-- cw:block verified_results.phase4 -->
-The reviewed Phase 4 manifest ran 185/185 required functional tests on
-2026-08-29 with zero failures and zero skips. This includes native-AOT numerical
+The reviewed Phase 4 manifest ran 192/192 required functional tests on
+2026-11-08 with zero failures and zero skips, in Debug builds with the binary
+shim on and off (logs in `docs/evidence/release-gates-2026-11-08/`). This includes native-AOT numerical
 Apple-GPU execution for by-value aggregates containing device pointers, the
 bounded monotonic `clock()` emulation, and a four-threadgroup cooperative grid
 barrier. The barrier gate checks device-scope visibility across two barriers;

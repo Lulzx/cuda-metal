@@ -11,10 +11,10 @@ external workloads. `scripts/ci_report.sh` reports pass/skip/fail separately.
 High-value executable gates include:
 
 <!-- cw:block status_verification.gates -->
-- 185/185 required Phase 4 functional tests with zero skips on the recorded
-  2026-08-29 Apple M4 Pro run;
+- 192/192 required Phase 4 functional tests with zero skips on the recorded
+  2026-11-08 Apple M4 Pro runs (shim on and off);
 - 83-entry `cuda-samples` coverage manifest and sweep classifier;
-- 52-file four-cell frontend/backend production-metallib matrix;
+- 55-file four-cell frontend/backend production-metallib matrix;
 - numerical PTX instruction sweep with hand-derived oracles;
 - runtime/API negative paths and GPU provenance checks;
 - Release/shim-off and Debug/shim-on configuration contracts;

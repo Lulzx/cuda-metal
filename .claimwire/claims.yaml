@@ -17,7 +17,7 @@ aliases:
 
 constants:
   # Recorded runs that the docs cite but whose logs are not checked in.
-  phase4.recorded_pass: { type: Count, value: "185" }
+  phase4.recorded_pass: { type: Count, value: "192" }
 
 families:
   matmul:

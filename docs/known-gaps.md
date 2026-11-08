@@ -17,7 +17,7 @@ current status must be backed by tests and evidence.
 1. Expand typed CuMetal IR beyond the now-matched reviewed compile corpus and
    broaden numerical coverage.
 2. Establish a recurring verification mechanism outside GitHub Actions and
-   commission the trusted Apple-GPU lane; the fixed 185-test Phase 4 denominator
+   commission the trusted Apple-GPU lane; the fixed 192-test Phase 4 denominator
    is now defined.
 3. Validate genuinely distinct supported Xcode toolchains.
 4. Finish runtime/library semantic matrices and bounded binary-container forms.

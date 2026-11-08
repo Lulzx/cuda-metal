@@ -14,9 +14,9 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   `tests/cuda_projects/cuda_samples_sweep_manifest.txt` and
   `conformance_cuda_samples_sweep`. This proves only that enrolled snapshot and
   does not establish general CUDA compatibility or replace the separate fixed
-  185-test Phase 4 functional denominator.
-- The reviewed Phase 4 functional denominator passed 185/185 with zero skips on
-  Apple M4 Pro on 2026-08-30. This closes the local percentage gate, but it does
+  192-test Phase 4 functional denominator.
+- The reviewed Phase 4 functional denominator passed 192/192 with zero skips on
+  Apple M4 Pro on 2026-11-08, in Debug shim-on and shim-off builds. This closes the local percentage gate, but it does
   not substitute for a recurring verification mechanism or a commissioned GPU
   lane. GitHub Actions workflows are intentionally absent.
 - The typed shared-IR migration gate is not closed. With CUDA Clang 21-23, the

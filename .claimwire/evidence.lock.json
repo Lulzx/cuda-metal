@@ -4,10 +4,10 @@
     "cumetal.backend_matrix": {
       "epochs": {
         "current": {
-          "run_id": "backend_matrix-0dc61dbd",
-          "git_commit": "7f9e42f",
+          "run_id": "backend_matrix-0133fb25",
+          "git_commit": "4af8929",
           "git_dirty": true,
-          "input_set_digest": "blake3:0dc61dbd2c888dfc9e87f7fdf80649a796f90f6433baff13dacd762e56775439"
+          "input_set_digest": "blake3:0133fb254a866b9e1768f96e438d7ffc96c2f2e951a750ada88273dcfa5d3852"
         }
       }
     },
@@ -24,10 +24,10 @@
     "cumetal.phase4_manifest": {
       "epochs": {
         "current": {
-          "run_id": "phase4_manifest-96f67461",
-          "git_commit": "7f9e42f",
+          "run_id": "phase4_manifest-682399fe",
+          "git_commit": "4af8929",
           "git_dirty": true,
-          "input_set_digest": "blake3:96f6746116ae2feb894baebb3064168b7ed4423a3132a928b3831138b6239379"
+          "input_set_digest": "blake3:682399fe0c6a3da0090291218e88aad971a36ec3490ce39ba9052bbf41a1bc1a"
         }
       }
     },
@@ -74,7 +74,7 @@
   },
   "evaluated_claims": {
     "phase4.recorded_pass": {
-      "value": 185,
+      "value": 192,
       "unit": "count"
     },
     "matmul[mps].time": {
@@ -232,7 +232,7 @@
       "unit": "ratio"
     },
     "matrix.total": {
-      "value": 52,
+      "value": 55,
       "unit": "count",
       "epoch": "current"
     },
@@ -242,17 +242,17 @@
       "epoch": "current"
     },
     "matrix.direct_typed": {
-      "value": 52,
+      "value": 55,
       "unit": "count",
       "epoch": "current"
     },
     "matrix.ptx_legacy": {
-      "value": 47,
+      "value": 49,
       "unit": "count",
       "epoch": "current"
     },
     "matrix.ptx_typed": {
-      "value": 52,
+      "value": 55,
       "unit": "count",
       "epoch": "current"
     },
@@ -272,7 +272,7 @@
       "epoch": "current"
     },
     "phase4.total": {
-      "value": 185,
+      "value": 192,
       "unit": "count",
       "epoch": "current"
     },
@@ -492,23 +492,23 @@
       "context_digest": "blake3:5b90484f57a77cfd1941496fe5e219c1b0977d7d029d906a90591f8e7bfd160b"
     },
     "docs/compiler-architecture.md::table:architecture.backend_matrix::direct `.cu`::`legacy`": {
-      "rendered": "0/52",
-      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "rendered": "0/55",
+      "rendered_digest": "blake3:d154391c755083755b214567c7803119f682cd089428ea6998f3cc408fe5fe31",
       "context_digest": "blake3:31e75c35fb7e919f1bc81bfb521e43c819f9b9f01ca589442a9924187dd0826f"
     },
     "docs/compiler-architecture.md::table:architecture.backend_matrix::direct `.cu`::`cumetal-ir`": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:9155d5578ec8526b0aebe956acbe678f6be48b3aee7a820f41c62f52bb5a1dcd"
     },
     "docs/compiler-architecture.md::table:architecture.backend_matrix::`.cu --cuda-device` / PTX::`legacy`": {
-      "rendered": "**47/52**",
-      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "rendered": "**49/55**",
+      "rendered_digest": "blake3:73ea0068c661475f3a010e4fbe9465a563bf6132b970082e018bdb8328e604b8",
       "context_digest": "blake3:b757e4400302783720eeb375c121e32c69e4a4741632e311e6d3724324fe1696"
     },
     "docs/compiler-architecture.md::table:architecture.backend_matrix::`.cu --cuda-device` / PTX::`cumetal-ir`": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:bdce3f702c4a167a19bdae350d0d374235835ecda8ab8ca29ded89cbe30e7810"
     },
     "docs/demos.md::block:demos.lammps#0": {
@@ -527,38 +527,38 @@
       "context_digest": "blake3:d7a7db7c2fce649ee9071416686cdd67fea7e96dc71bfcf2f6307a984b8c84c2"
     },
     "docs/known-gaps.md::block:known_gaps.next_steps#0": {
-      "rendered": "the fixed 185-test Phase 4 denominator",
-      "rendered_digest": "blake3:0fa77db25cb418583e5504caf5f2b2988e34a67e61a8a2f9f1030f49082fcff9",
+      "rendered": "the fixed 192-test Phase 4 denominator",
+      "rendered_digest": "blake3:134c9da147e6085efe0198e2a93cad0a46ab3548cca8c77578bd879c0d4c413d",
       "context_digest": "blake3:d8a70511fd164cfe578a7f533bd44ab7d8193ceee744502b51f46c72371d8967"
     },
     "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::direct `.cu`::Legacy": {
-      "rendered": "0/52",
-      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "rendered": "0/55",
+      "rendered_digest": "blake3:d154391c755083755b214567c7803119f682cd089428ea6998f3cc408fe5fe31",
       "context_digest": "blake3:abfe279f01044b64e2f586527023868253aae07800a16008ded0e57dc938bfee"
     },
     "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::direct `.cu`::Typed CuMetal IR": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:a7c0673a1575a5a85dd0133879b54daa9444b54ed3baea8d2847bb12866517ae"
     },
     "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::PTX / `--cuda-device`::Legacy": {
-      "rendered": "**47/52**",
-      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "rendered": "**49/55**",
+      "rendered_digest": "blake3:73ea0068c661475f3a010e4fbe9465a563bf6132b970082e018bdb8328e604b8",
       "context_digest": "blake3:0fc5e6d94931781b1e56277d2d485254f8770ea3f30d9074aaac591bd3a92bbb"
     },
     "docs/known-gaps/compiler.md::table:known_gaps_compiler.backend_matrix::PTX / `--cuda-device`::Typed CuMetal IR": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:8868447ce462e2aae1f30668d0cb6eab3b6c1b86edb234e8a9a197c050935a18"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#0": {
-      "rendered": "reviewed 185-test manifest",
-      "rendered_digest": "blake3:dd44cac90120dbbfea7a2766b494f6cfcf2712f10ecc1650c1414152bbcc015c",
+      "rendered": "reviewed 192-test manifest",
+      "rendered_digest": "blake3:613bc08b8ff72e78f62980f1842503233479c2ace99fd65318f46ff31b54e27c",
       "context_digest": "blake3:7d22391d68bf10d84a046ebcbbb78232c93bb70f163fb04ca4098aa486d9f186"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#1": {
-      "rendered": "run passed all 185 with zero skips",
-      "rendered_digest": "blake3:93549b859501cada92c42ce5dc6c5adfcc7e0c69fa7827afae38243257777e14",
+      "rendered": "run passed all 192 with zero skips",
+      "rendered_digest": "blake3:c3db08bc4eac914ff58d1e5f2683dbf672b687fd4ae485c5529ef11d555d468e",
       "context_digest": "blake3:5cd9bb2bfc3536c8724bb1b2d4637d56d7b1ace200553c463849fb69eeb77418"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#2": {
@@ -732,23 +732,23 @@
       "context_digest": "blake3:7087c5713d32737d8065950159647d03fad3af47e364d43a3f5ecf8691aed664"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#1": {
-      "rendered": "185-test Phase 4 functional denominator.",
-      "rendered_digest": "blake3:514fc78d5173f3c94a7c368c13be8730397fd207c786e988663ab5b7407311d5",
+      "rendered": "192-test Phase 4 functional denominator.",
+      "rendered_digest": "blake3:5ce9103ddd6b5cca19babcca9c8ba5b5eed003b6050bfe3c43460acbf4485625",
       "context_digest": "blake3:35bcf0ab0d8e1b3f7849e466c4da9ffc00cd8df1529bbec53fed9d1a888c7c86"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#2": {
-      "rendered": "denominator passed 185/185 with zero skips",
-      "rendered_digest": "blake3:dcf179bf76809395e2f5b0567b75ebcb2b703144d6600ae3f5609e89dbba77aa",
+      "rendered": "denominator passed 192/192 with zero skips",
+      "rendered_digest": "blake3:41825fdd138a40242358b333b4bcdb82180d4452935663c202645c98fc749d7d",
       "context_digest": "blake3:7a9c789317475dd5e86e248e23619e3a9b4629e6552b7392f430bcf292da1ffa"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#3": {
-      "rendered": "reviewed 52-file production-metallib matrix is 52/52 for direct `.cu` and 52/52 for PTX",
-      "rendered_digest": "blake3:119bfa84a0ad902df1373de2a8edd703380667906b5cc70514383ec202600f24",
+      "rendered": "reviewed 55-file production-metallib matrix is 55/55 for direct `.cu` and 55/55 for PTX",
+      "rendered_digest": "blake3:2e0237c580a2835c824b72fb82084e182d7700cf0d9e02b2a8d274852cfb0995",
       "context_digest": "blake3:53e51b353f952a9515c3440ea7cd70a36e579f8142051698be9636a907103a8d"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#4": {
-      "rendered": "legacy PTX backend is 47/52 because",
-      "rendered_digest": "blake3:bb56a83242c3fd0e8dc816131a8bf50dda49e2cc9c02828f3c77b1c412e9566a",
+      "rendered": "legacy PTX backend is 49/55 because",
+      "rendered_digest": "blake3:8f7db2cdefeeed28d4e9b0b75c11c50d976bd9c8f6d982e69f9c86a422738bf2",
       "context_digest": "blake3:1609b6cb82cb9a4e21e36974cd8ae4b9095e895df5aa066ba120b65e27c94e70"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#5": {
@@ -777,8 +777,8 @@
       "context_digest": "blake3:58314b1865745b3cdaa5a7c28ed1b49e37ae18ddf45d077120468a14495cf689"
     },
     "docs/status.md::block:status.snapshot#1": {
-      "rendered": "**52/52**, typed PTX **52/52**, legacy PTX **47/52**",
-      "rendered_digest": "blake3:4ae917bac1eac373e039a7929b25460399004fecf6978afea09c52e2b1025ed0",
+      "rendered": "**55/55**, typed PTX **55/55**, legacy PTX **49/55**",
+      "rendered_digest": "blake3:87f00f970fde1b41a08fedef48a6c3070241ef0c5ed2c36f265eb355c98ffee7",
       "context_digest": "blake3:1dd821a5aafe4c957f95c29cca5d001b715595bc9cca388d2864dd900ffe6c19"
     },
     "docs/status.md::block:status.snapshot#2": {
@@ -792,28 +792,28 @@
       "context_digest": "blake3:d571e0fd916d07fd7237df0381627650ba8e95b865821c138968c576c18128b7"
     },
     "docs/status/compiler.md::table:status_compiler.backend_matrix::direct `.cu`::Legacy": {
-      "rendered": "0/52",
-      "rendered_digest": "blake3:af6e3427592d3e64fe319d230f07d37c6cd4181debce711fb0d3d7c8ddeea08a",
+      "rendered": "0/55",
+      "rendered_digest": "blake3:d154391c755083755b214567c7803119f682cd089428ea6998f3cc408fe5fe31",
       "context_digest": "blake3:abfe279f01044b64e2f586527023868253aae07800a16008ded0e57dc938bfee"
     },
     "docs/status/compiler.md::table:status_compiler.backend_matrix::direct `.cu`::Typed CuMetal IR": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:a7c0673a1575a5a85dd0133879b54daa9444b54ed3baea8d2847bb12866517ae"
     },
     "docs/status/compiler.md::table:status_compiler.backend_matrix::PTX / `--cuda-device`::Legacy": {
-      "rendered": "**47/52**",
-      "rendered_digest": "blake3:b96d0e8e3b12ad394f8c100a1aa30bcbdeab42ef49c589423ec55bfc0de13b3a",
+      "rendered": "**49/55**",
+      "rendered_digest": "blake3:73ea0068c661475f3a010e4fbe9465a563bf6132b970082e018bdb8328e604b8",
       "context_digest": "blake3:0fc5e6d94931781b1e56277d2d485254f8770ea3f30d9074aaac591bd3a92bbb"
     },
     "docs/status/compiler.md::table:status_compiler.backend_matrix::PTX / `--cuda-device`::Typed CuMetal IR": {
-      "rendered": "**52/52**",
-      "rendered_digest": "blake3:382e3b2ed7713d9b32973fe8d5dddbeff84fca55c3e9be97c7bf269cd88f64a9",
+      "rendered": "**55/55**",
+      "rendered_digest": "blake3:96711fffe134d373e2dadc2ccd96c101064261e77d1d91ce62ce8487da22b8d2",
       "context_digest": "blake3:8868447ce462e2aae1f30668d0cb6eab3b6c1b86edb234e8a9a197c050935a18"
     },
     "docs/status/verification.md::block:status_verification.gates#0": {
-      "rendered": "- 185/185 required Phase 4 functional tests",
-      "rendered_digest": "blake3:a1179c6dc663cda8953bb6236f2761d31fbbe539ab1ea78345281c8a7436593c",
+      "rendered": "- 192/192 required Phase 4 functional tests",
+      "rendered_digest": "blake3:ad746fa79f3aae1afbdbc0a13b1b23ec7cc0848d3f07e61cb052d53a1b052a71",
       "context_digest": "blake3:c0e49450a31be78db36788781a42546c5a264ee1caeae68adef3fe5872936cc0"
     },
     "docs/status/verification.md::block:status_verification.gates#1": {
@@ -822,18 +822,18 @@
       "context_digest": "blake3:a0cc66a482ca44a1d04c9b955c35d1c95e472d89f66981b2a827f521d0a8eb38"
     },
     "docs/status/verification.md::block:status_verification.gates#2": {
-      "rendered": "- 52-file four-cell frontend/backend production-metallib matrix",
-      "rendered_digest": "blake3:579a9e670687972dbfab1209fe5e158c6bf1cfd97fbbd1e545dab3d1632c0fd7",
+      "rendered": "- 55-file four-cell frontend/backend production-metallib matrix",
+      "rendered_digest": "blake3:0e697ee9d567dd639ef00e9ee093811cdd1685be551e4f5210eb253868127a04",
       "context_digest": "blake3:07f3d48f4b0ea637b16b7f4ad84101061056c8eafd2221076e66bfa991306cbf"
     },
     "docs/testing.md::block:testing.phase4#0": {
-      "rendered": "reviewed 185-test functional manifest",
-      "rendered_digest": "blake3:4990dc92a3783a8d94f634ce7bca351dc4b656ec6edec3cc2625d4de14f73b25",
+      "rendered": "reviewed 192-test functional manifest",
+      "rendered_digest": "blake3:f3307a62e896e7c95fa2babc80982c11dca01f03b59e1ef548682db576e00343",
       "context_digest": "blake3:58e873112e052326b3d4967fbe143924a8d0fef0b43e5324d196e654f659df4e"
     },
     "docs/verified-results.md::block:verified_results.phase4#0": {
-      "rendered": "Phase 4 manifest ran 185/185 required functional tests",
-      "rendered_digest": "blake3:f16cb78004ee6a8a1ce2f422f4c6b81e9bf68f5dd8f7c3d9c42f933c6875dc34",
+      "rendered": "Phase 4 manifest ran 192/192 required functional tests",
+      "rendered_digest": "blake3:087a6bbedb35cd6618f6ad657e969eae1ec7823e74fc9e565aa1861f9f180f03",
       "context_digest": "blake3:80255dc7151817111b3ebe7d4183912b6f714cb213559af4f45633794a1d8785"
     },
     "docs/verified-results.md::block:verified_results.samples_snapshot#0": {

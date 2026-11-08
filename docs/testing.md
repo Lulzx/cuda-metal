@@ -201,7 +201,7 @@ Conformance suite
 -----------------
 
 <!-- cw:block testing.phase4 -->
-Phase 4 conformance gate over the reviewed 185-test functional manifest:
+Phase 4 conformance gate over the reviewed 192-test functional manifest:
 
 ```bash
 ctest --test-dir build -R conformance_phase4_functional --output-on-failure

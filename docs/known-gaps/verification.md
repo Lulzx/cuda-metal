@@ -5,10 +5,11 @@
 ## Conformance denominator
 
 <!-- cw:block known_gaps_verification.denominator -->
-The Phase 4 denominator is the reviewed 185-test manifest at
+The Phase 4 denominator is the reviewed 192-test manifest at
 `tests/conformance/phase4_functional_manifest.txt`. Every entry has expected
-outcome `pass`; skips and waivers are not removed from the denominator. The
-recorded 2026-08-29 Apple M4 Pro run passed all 185 with zero skips. The
+outcome `pass`; skips and waivers are not removed from the denominator. In
+Debug builds on Apple M4 Pro (2026-11-08), with the binary shim on and off,
+each run passed all 192 with zero skips. The
 separate NVIDIA `cuda-samples` manifest has 83 enrolled headless samples; all 83 pass.
 Both are bounded snapshots, not general CUDA compatibility percentages;
 tests and samples outside the enrollments are unclassified.
