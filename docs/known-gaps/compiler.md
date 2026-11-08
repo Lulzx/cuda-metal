@@ -524,8 +524,13 @@ compile the same source without producing the join. Tracked upstream as issue
 `cumetalc` builds a native AOT executable by generating a separate registration
 translation unit that names each kernel's host stub. A `__global__` function
 with internal linkage -- one declared in an anonymous namespace, or `static` --
-therefore fails to link, because the generated unit cannot reference the symbol.
-Give such kernels external linkage; the registration path itself is unaffected.
+has an internal host stub, so `cumetalc` gives that stub hidden linkage under a
+name unique to its translation unit; the embedded metallib symbols carry the
+same per-unit tag. Programs therefore link several native units with kernels,
+including same-named internal kernels, through `nvcc -c` and a final link
+(`functional_native_multi_unit`, `functional_native_internal_linkage_kernels`).
+Relocatable device code (`-rdc`) remains unsupported: a kernel cannot call a
+`__device__` function defined in another unit.
 
 ## Guarded PTX definitions
 

@@ -3171,6 +3171,28 @@ set_tests_properties(functional_fp64_division_domain_native PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE)
 
 add_test(
+    NAME functional_native_internal_linkage_kernels
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/internal_linkage_kernels.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/native_internal_linkage_kernels
+            "--expect-output=PASS: internal-linkage kernels"
+)
+set_tests_properties(functional_native_internal_linkage_kernels PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_native_multi_unit
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_native_multi_unit.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/native_units
+            ${CMAKE_CURRENT_BINARY_DIR}/native_multi_unit
+)
+set_tests_properties(functional_native_multi_unit PROPERTIES
+    SKIP_RETURN_CODE 77 ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR}")
+
+add_test(
     NAME functional_texture_descriptor_device
     COMMAND bash
             ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh

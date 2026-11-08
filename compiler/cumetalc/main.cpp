@@ -787,25 +787,44 @@ std::vector<std::string> parse_native_printf_formats(
 
 std::string device_symbol_from_stub(std::string symbol) {
     static constexpr std::string_view marker = "__device_stub__";
-    const std::size_t marker_at = symbol.find(marker);
-    if (marker_at == std::string::npos) return {};
-    if (marker_at == 0) return symbol.substr(marker.size());
+    if (symbol.rfind(marker, 0) == 0) return symbol.substr(marker.size());
+    if (symbol.rfind("_Z", 0) != 0) return {};
 
-    std::size_t digits_at = marker_at;
-    while (digits_at > 0 &&
-           std::isdigit(static_cast<unsigned char>(symbol[digits_at - 1])) != 0) {
-        --digits_at;
+    // Walk the Itanium source-name components (<length><identifier>) from the
+    // start of the (possibly nested, possibly internal-linkage) name. Scanning
+    // backwards from the marker for the length digits misreads a preceding
+    // component that ends in a digit: `_ZN12_GLOBAL__N_121__device_stub__k`
+    // (anonymous namespace `_GLOBAL__N_1`, then a 21-character stub) was read
+    // as a 121-character stub.
+    std::size_t pos = 2;
+    if (pos < symbol.size() && symbol[pos] == 'L') ++pos;  // internal linkage
+    if (pos < symbol.size() && symbol[pos] == 'N') {
+        ++pos;
+        while (pos < symbol.size() &&
+               (symbol[pos] == 'r' || symbol[pos] == 'V' || symbol[pos] == 'K')) {
+            ++pos;
+        }
     }
-    if (digits_at == marker_at) return {};
-    const std::uint64_t component_size =
-        std::strtoull(symbol.substr(digits_at, marker_at - digits_at).c_str(),
-                      nullptr, 10);
-    if (component_size < marker.size()) return {};
-    symbol.replace(digits_at, marker_at - digits_at,
-                   std::to_string(component_size - marker.size()));
-    symbol.erase(digits_at + std::to_string(component_size - marker.size()).size(),
-                 marker.size());
-    return symbol;
+    while (pos < symbol.size() &&
+           std::isdigit(static_cast<unsigned char>(symbol[pos])) != 0) {
+        std::size_t digits_end = pos;
+        while (digits_end < symbol.size() &&
+               std::isdigit(static_cast<unsigned char>(symbol[digits_end])) != 0) {
+            ++digits_end;
+        }
+        const std::uint64_t length =
+            std::strtoull(symbol.substr(pos, digits_end - pos).c_str(), nullptr, 10);
+        if (length == 0 || length > symbol.size() - digits_end) return {};
+        if (std::string_view(symbol).substr(digits_end, length).starts_with(marker)) {
+            if (length <= marker.size()) return {};
+            const std::string name = symbol.substr(digits_end + marker.size(),
+                                                   length - marker.size());
+            return symbol.substr(0, pos) + std::to_string(name.size()) + name +
+                   symbol.substr(digits_end + length);
+        }
+        pos = digits_end + length;
+    }
+    return {};
 }
 
 bool parse_native_host_kernels(std::string_view llvm_ir,
@@ -884,28 +903,36 @@ std::uint32_t native_alignment(std::uint32_t size) {
 // Assembly stub embedding the metallib via .incbin in its own Mach-O
 // section. Replaces a multi-megabyte ASCII C array, whose parse dominated
 // registration compilation for large modules.
-std::string native_metallib_asm_source(const std::filesystem::path& metallib) {
+// `unit_tag` makes the symbols unique per translation unit: every native
+// object embeds its own metallib, and a program links several of them.
+std::string native_metallib_asm_source(const std::filesystem::path& metallib,
+                                       std::string_view unit_tag) {
+    const std::string data = "_cm_metallib_data_" + std::string(unit_tag);
+    const std::string end = "_cm_metallib_end_" + std::string(unit_tag);
     std::string escaped;
     for (const char c : metallib.string()) {
         if (c == '\\' || c == '"') escaped += '\\';
         escaped += c;
     }
     return "\t.section __CUMETAL,__metallib\n"
-           "\t.globl _cm_metallib_data\n"
-           "\t.globl _cm_metallib_end\n"
-           "\t.p2align 3\n"
-           "_cm_metallib_data:\n"
+           "\t.globl " + data + "\n"
+           "\t.globl " + end + "\n"
+           "\t.private_extern " + data + "\n"
+           "\t.private_extern " + end + "\n"
+           "\t.p2align 3\n" +
+           data + ":\n"
            "\t.incbin \"" +
            escaped +
-           "\"\n"
-           "_cm_metallib_end:\n";
+           "\"\n" +
+           end + ":\n";
 }
 
 std::string native_registration_source(
     const std::vector<NativeHostKernel>& kernels,
     const std::vector<NativeSourceSymbol>& symbols,
     std::string_view provenance,
-    std::string_view semantic_quality) {
+    std::string_view semantic_quality,
+    std::string_view unit_tag) {
     std::ostringstream out;
     out << "#include <cumetal_native.h>\n#include <cstdlib>\n#include <cstring>\n\n";
     for (std::size_t i = 0; i < kernels.size(); ++i) {
@@ -922,8 +949,10 @@ std::string native_registration_source(
                 << symbols[i].name << "\");\n";
         }
     }
-    out << "\nextern \"C\" const unsigned char cm_metallib_data[];\n"
-           "extern \"C\" const unsigned char cm_metallib_end[];\n";
+    out << "\nextern \"C\" const unsigned char cm_metallib_data[] asm(\"_cm_metallib_data_"
+        << unit_tag << "\");\n"
+           "extern \"C\" const unsigned char cm_metallib_end[] asm(\"_cm_metallib_end_"
+        << unit_tag << "\");\n";
 
     for (std::size_t i = 0; i < symbols.size(); ++i) {
         if (symbols[i].initializer.empty()) continue;
@@ -1270,8 +1299,66 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             }
         }
     }
+    std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
+    bool host_rewritten = false;
+    // A kernel in an anonymous namespace or declared `static` has an
+    // internal-linkage host stub, which the separately compiled registration
+    // object cannot name. Give it hidden external linkage under a name unique
+    // to this translation unit, so two units with the same static kernel
+    // still link.
+    // Names this translation unit's private symbols in the objects it emits.
+    std::string unit_tag;
+    {
+        std::uint64_t unit_hash = 1469598103934665603ull;
+        for (const std::string& part : {std::filesystem::absolute(options.input).string(),
+                                        std::filesystem::absolute(options.output).string()}) {
+            for (const unsigned char c : part) {
+                unit_hash = (unit_hash ^ c) * 1099511628211ull;
+            }
+            unit_hash = (unit_hash ^ 0xffu) * 1099511628211ull;
+        }
+        char unit_tag_text[17];
+        std::snprintf(unit_tag_text, sizeof unit_tag_text, "%016llx",
+                      static_cast<unsigned long long>(unit_hash));
+        unit_tag = unit_tag_text;
+        const auto is_ident = [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) != 0 || c == '_' ||
+                   c == '.' || c == '$';
+        };
+        for (NativeHostKernel& kernel : kernels) {
+            // The stub's definition line, not a call site that precedes it.
+            const std::string reference = "@" + kernel.stub_symbol + "(";
+            std::size_t line_begin = std::string::npos;
+            std::string_view line;
+            for (std::size_t at = rewritten_host.find(reference); at != std::string::npos;
+                 at = rewritten_host.find(reference, at + 1)) {
+                const std::size_t begin = rewritten_host.rfind('\n', at) + 1;
+                const std::string_view candidate(rewritten_host.data() + begin, at - begin);
+                if (candidate.starts_with("define")) {
+                    line_begin = begin;
+                    line = candidate;
+                    break;
+                }
+            }
+            if (line_begin == std::string::npos) continue;
+            const std::size_t internal = line.find(" internal ");
+            if (internal == std::string_view::npos) continue;
+            rewritten_host.replace(line_begin + internal, std::string_view(" internal ").size(),
+                                   " hidden ");
+            const std::string renamed = kernel.stub_symbol + ".cumetal." + unit_tag;
+            const std::string old_ref = "@" + kernel.stub_symbol;
+            for (std::size_t use = rewritten_host.find(old_ref); use != std::string::npos;
+                 use = rewritten_host.find(old_ref, use + 1)) {
+                const std::size_t after = use + old_ref.size();
+                if (after < rewritten_host.size() && is_ident(rewritten_host[after])) continue;
+                rewritten_host.replace(use, old_ref.size(), "@" + renamed);
+            }
+            kernel.stub_symbol = renamed;
+            host_rewritten = true;
+        }
+    }
     if (!symbols.empty()) {
-        std::string rewritten_host(host_llvm_bytes.begin(), host_llvm_bytes.end());
+        host_rewritten = true;
         for (const NativeSourceSymbol& symbol : symbols) {
             if (symbol.module_private) continue;
             const std::string internal = "@" + symbol.name + " = internal global";
@@ -1285,11 +1372,12 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             rewritten_host.replace(at, internal.size(),
                                    "@" + symbol.name + " = global");
         }
-        if (!write_text_output(host_llvm, rewritten_host, true, &io_error)) {
-            cleanup();
-            std::cerr << "cumetalc failed: " << io_error << "\n";
-            return 1;
-        }
+    }
+    if (host_rewritten &&
+        !write_text_output(host_llvm, rewritten_host, true, &io_error)) {
+        cleanup();
+        std::cerr << "cumetalc failed: " << io_error << "\n";
+        return 1;
     }
     // Lower the single host IR (rewritten above when device symbols exist)
     // to the host object. No second C++ frontend parse is involved.
@@ -1384,13 +1472,13 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     const std::string generated = native_registration_source(
         kernels, symbols,
         comment_value("// cumetal-provenance: ", "generic_nvvm_lowering"),
-        comment_value("// cumetal-semantic-quality: ", "unsupported"));
+        comment_value("// cumetal-semantic-quality: ", "unsupported"), unit_tag);
     if (!write_text_output(registration_source, generated, true, &io_error)) {
         cleanup();
         std::cerr << "cumetalc failed: " << io_error << "\n";
         return 1;
     }
-    if (!write_text_output(metallib_asm, native_metallib_asm_source(metallib),
+    if (!write_text_output(metallib_asm, native_metallib_asm_source(metallib, unit_tag),
                            true, &io_error)) {
         cleanup();
         std::cerr << "cumetalc failed: " << io_error << "\n";
@@ -1419,7 +1507,9 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     }
 
     if (options.object_only) {
-        const std::string merge = quote_shell(compiler.string()) + " -r " +
+        // A relocatable merge links no libraries; without -nostdlib the
+        // driver passes libc++/libSystem and ld warns that it ignores them.
+        const std::string merge = quote_shell(compiler.string()) + " -r -nostdlib " +
             quote_shell(object_file.string()) + " " +
             quote_shell(registration_object.string()) + " " +
             quote_shell(metallib_object.string()) + " -o " +
