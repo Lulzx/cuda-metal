@@ -8824,6 +8824,16 @@ cudaError_t cudaCreateTextureObject(cudaTextureObject_t* pTexObject,
         cudaFree(descriptor_allocation);
         return fail(cudaErrorInvalidValue);
     }
+    // tex2D and tex2DLayered address texels within a layer with 32-bit byte
+    // offsets (64-bit multiplies are several instructions each on Apple
+    // GPUs). A layer of 4 GiB or more would wrap them, so refuse it here
+    // rather than sample the wrong texels. Linear resources are fetched with
+    // 64-bit offsets and stay unrestricted.
+    if (pResDesc->resType != cudaResourceTypeLinear &&
+        descriptor->pitch_bytes * descriptor->height > 0xffffffffull) {
+        cudaFree(descriptor_allocation);
+        return fail(cudaErrorInvalidValue);
+    }
     const cudaTextureObject_t handle =
         static_cast<cudaTextureObject_t>(reinterpret_cast<std::uintptr_t>(descriptor_allocation));
     TextureObjectRecord record;

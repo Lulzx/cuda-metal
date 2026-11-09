@@ -22,7 +22,7 @@
 # launch ran on the Apple GPU and none failed.
 #
 # Exit 0 only if the build, every COLMAP stage, the provenance check and the
-# accuracy gate pass. The reconstruction takes about 19 minutes on an M4 Pro.
+# accuracy gate pass. The reconstruction takes about 10 minutes on an M4 Pro.
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"

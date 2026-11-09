@@ -52,6 +52,18 @@ All notable changes to CuMetal are documented here. Format follows
   within a layer. A layered bilinear fetch went from about 615 ns to 270 ns
   per thread at COLMAP's launch shape; a PatchMatch sweep with correct
   bilinear sampling runs in 1.4-1.9 s instead of 2.7-3.6 s.
+- **Cheaper float-to-int conversions and texel addressing.** The typed MSL
+  backend no longer tests for a subnormal input in round-to-nearest and
+  truncating float-to-integer conversions (every `(int)x`), where both paths
+  give zero; floor and ceil keep the test. Texture fetches floor with one
+  instruction, compute a layer's base with a 32x32->64-bit multiply and keep
+  the descriptor's read-mode test out of a branch, so a caller's sampling loop
+  can hoist it. COLMAP's PatchMatch sweeps run 1.27x faster (6.49 s to 5.10 s
+  for one iteration on one view).
+- **Texture layers of 4 GiB or more are refused.** `tex2D`/`tex2DLayered`
+  address texels within a layer with 32-bit offsets, so such a layer would
+  have sampled wrapped addresses; `cudaCreateTextureObject` now returns
+  `cudaErrorInvalidValue` for it (linear resources are unaffected).
 - **Pointer parameters a kernel only forwards to a helper.** A 64-bit kernel
   parameter passed unchanged (or after `mov`/`cvta`) as an argument to a
   device function that dereferences it is now bound as a pointer. It was bound

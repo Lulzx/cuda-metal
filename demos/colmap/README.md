@@ -38,16 +38,22 @@ Recorded on Apple M4 Pro, 2026-11-09, ten 640×480 views,
 | Depth coverage after filtering | 78–96% per view (edge views lowest) |
 | Kept depths within 1% of truth | 97–99% per view |
 | Per-view median depth error | 0.05–0.08% |
-| Fused points (`stereo_fusion`) | 73,549, 97.9% within 1 cm of the true surface, median 2.5 mm |
-| `patch_match_stereo` wall time | 12 min 2 s (18 min 44 s before the texture-fetch work) |
+| Fused points (`stereo_fusion`) | 73,600, 97.9% within 1 cm of the true surface, median 2.5 mm |
+| `patch_match_stereo` wall time | 10 min 13 s (18 min 44 s before the texture-fetch work) |
 
 It is correct but slow. COLMAP launches one thread per image column, so a sweep
 is 20 threadgroups of 32 threads walking every row: the GPU is mostly idle and
 each thread's latency is the whole cost. CuMetal implements texture fetches in
 software; reading the descriptor once per fetch, a clamp/border-only path for
 unnormalized coordinates and branch-free bilinear taps cut a layered fetch from
-about 615 ns to 270 ns. Sampling through Metal textures in hardware is the next
-large step.
+about 615 ns to 270 ns, and cheaper float-to-int conversions and texel
+addressing took another 18% off the run. CuMetal's code for the fetch now runs
+as fast as the same bilinear written directly in Metal, apart from CUDA's
+saturating float-to-int conversion. Hardware sampling would not help as things
+stand: at one SIMD-group per core a Metal `sample()` in a loop like COLMAP's
+measured 177 ns per fetch against 160 ns in software. It wins (27 ns) only when
+several fetches are in flight, which needs the 11-tap window loop unrolled, and
+Clang does not unroll it even at a raised threshold.
 
 ## How it is checked
 

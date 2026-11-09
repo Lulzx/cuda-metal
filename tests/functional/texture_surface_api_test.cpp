@@ -1,5 +1,6 @@
 #include "cuda_runtime.h"
 
+#include <cstddef>
 #include <cstdio>
 #include <cstring>
 
@@ -142,6 +143,45 @@ static bool test_linear_texture_negative_paths() {
     return true;
 }
 
+static bool test_pitch2d_layer_limit() {
+    // tex2D addresses texels within a layer with 32-bit byte offsets, so a
+    // layer of 4 GiB or more must be refused at creation, not sampled from
+    // wrapped offsets. The pitch alone makes the layer that large; nothing
+    // here allocates it.
+    void* storage = nullptr;
+    if (cudaMalloc(&storage, 4096) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: cudaMalloc for pitch2D storage\n");
+        return false;
+    }
+    cudaResourceDesc resource{};
+    resource.resType = cudaResourceTypePitch2D;
+    resource.res.pitch2D.devPtr = storage;
+    resource.res.pitch2D.desc = cudaCreateChannelDesc(32, 0, 0, 0, cudaChannelFormatKindFloat);
+    resource.res.pitch2D.width = 16;
+    resource.res.pitch2D.pitchInBytes = std::size_t{1} << 20;
+    resource.res.pitch2D.height = 4096;  // exactly 4 GiB
+    cudaTextureDesc texture{};
+    texture.filterMode = cudaFilterModePoint;
+    texture.readMode = cudaReadModeElementType;
+    cudaTextureObject_t object = 0;
+    bool ok = true;
+    if (cudaCreateTextureObject(&object, &resource, &texture, nullptr) != cudaErrorInvalidValue) {
+        std::fprintf(stderr, "FAIL: a 4 GiB texture layer was accepted\n");
+        ok = false;
+    }
+    (void)cudaGetLastError();
+    resource.res.pitch2D.height = 4095;  // one row under the limit
+    if (ok && cudaCreateTextureObject(&object, &resource, &texture, nullptr) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: a texture layer under 4 GiB was refused\n");
+        ok = false;
+    } else if (ok && cudaDestroyTextureObject(object) != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: destroying the under-limit texture\n");
+        ok = false;
+    }
+    cudaFree(storage);
+    return ok;
+}
+
 static bool test_surface_object_lifecycle() {
     cudaChannelFormatDesc desc = cudaCreateChannelDesc(8, 8, 8, 8, cudaChannelFormatKindUnsigned);
     cudaArray_t arr = nullptr;
@@ -255,6 +295,7 @@ int main() {
     if (!test_malloc_free_array()) return 1;
     if (!test_texture_object_lifecycle()) return 1;
     if (!test_linear_texture_negative_paths()) return 1;
+    if (!test_pitch2d_layer_limit()) return 1;
     if (!test_surface_object_lifecycle()) return 1;
     if (!test_memcpy_to_from_array()) return 1;
     if (!test_channel_format_desc_variants()) return 1;

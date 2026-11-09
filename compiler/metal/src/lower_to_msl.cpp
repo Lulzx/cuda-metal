@@ -5616,10 +5616,18 @@ struct AstLowerer {
                         result_bits(signed_output ? sign_result : 0),
                         MslExpression::conditional(above, result_bits(maximum), converted, result_type),
                         result_type);
+                    // Round-to-nearest and truncation take every subnormal,
+                    // flushed or not, to zero, which the numeric path already
+                    // yields; only floor and ceil need the classification.
+                    // `(int)x` is the commonest conversion in CUDA code, and
+                    // the test is three instructions of it.
+                    const bool subnormal_to_zero = rounding == "0u" || rounding == "1u";
                     return declare_result(operation, MslExpression::conditional(
                         compare(">", magnitude, integer_literal(infinity)),
                         result_bits(destination_bits == 64 ? sign_result : 0),
-                        MslExpression::conditional(subnormal, subnormal_result, clamped, result_type),
+                        subnormal_to_zero
+                            ? clamped
+                            : MslExpression::conditional(subnormal, subnormal_result, clamped, result_type),
                         result_type));
                 }
                 input = MslExpression::call(rounder, {input}, input->type);

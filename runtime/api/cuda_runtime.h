@@ -1734,11 +1734,12 @@ __device__ __forceinline__ float4 __cumetal_texture_mix(float4 a, float4 b, floa
 }
 
 // Floor of a (possibly negative) sample coordinate and its fractional part.
+// floor is one instruction; converting first and correcting downwards costs
+// a saturating float-to-int conversion more per axis.
 __device__ __forceinline__ int __cumetal_texture_floor(float value, float* fraction) {
-    int whole = static_cast<int>(value);
-    if (static_cast<float>(whole) > value) --whole;
-    *fraction = value - static_cast<float>(whole);
-    return whole;
+    const float whole = __builtin_floorf(value);
+    *fraction = value - whole;
+    return static_cast<int>(whole);
 }
 
 template <typename T>
@@ -1782,7 +1783,11 @@ __device__ __forceinline__ T tex1D(cudaTextureObject_t texture, float x) {
 struct __cumetal_texture_view {
     const unsigned char* data;
     int width, height, depth;
-    unsigned long long pitch;
+    // Byte offsets within one layer are 32-bit: cudaCreateTextureObject
+    // refuses a texture whose layer reaches 4 GiB. 64-bit integer multiplies
+    // cost several instructions each on Apple GPUs.
+    unsigned int pitch;
+    unsigned int layer_bytes;
     unsigned int element_bytes;
     bool normalized_8bit;
     bool linear;
@@ -1797,11 +1802,14 @@ __device__ __forceinline__ __cumetal_texture_view __cumetal_texture_view_of(cuda
     view.width = static_cast<int>(descriptor->width);
     view.height = static_cast<int>(descriptor->height);
     view.depth = static_cast<int>(descriptor->depth);
-    view.pitch = descriptor->pitch_bytes;
+    view.pitch = static_cast<unsigned int>(descriptor->pitch_bytes);
+    view.layer_bytes = static_cast<unsigned int>(descriptor->pitch_bytes * descriptor->height);
     view.element_bytes = descriptor->element_bytes;
-    view.normalized_8bit = descriptor->read_mode == cudaReadModeNormalizedFloat &&
-                           descriptor->channel_kind == cudaChannelFormatKindUnsigned &&
-                           descriptor->element_bytes == 1;
+    // Bitwise, not short-circuit: a field read under a branch cannot be
+    // hoisted out of the caller's sampling loop.
+    view.normalized_8bit = (descriptor->read_mode == cudaReadModeNormalizedFloat) &
+                           (descriptor->channel_kind == cudaChannelFormatKindUnsigned) &
+                           (descriptor->element_bytes == 1);
     view.linear = descriptor->filter_mode == cudaFilterModeLinear;
     view.normalized_coords = descriptor->normalized_coords != 0;
     view.mode_x = __cumetal_texture_address_mode(descriptor, 0);
@@ -1820,8 +1828,8 @@ template <typename T>
 __device__ __forceinline__ T __cumetal_texture_view_load(const __cumetal_texture_view& view,
                                                          const unsigned char* layer, int x, int y) {
     if (x < 0 || y < 0) return T{};
-    const unsigned char* bytes = layer + static_cast<unsigned long long>(y) * view.pitch +
-                                 static_cast<unsigned long long>(x) * view.element_bytes;
+    const unsigned char* bytes = layer + (static_cast<unsigned int>(y) * view.pitch +
+                                          static_cast<unsigned int>(x) * view.element_bytes);
     if constexpr (std::is_arithmetic<T>::value) {
         if (view.normalized_8bit) return static_cast<T>(static_cast<float>(*bytes) * (1.0f / 255.0f));
     }
@@ -1845,18 +1853,20 @@ __device__ __forceinline__ T __cumetal_texture_bilinear(const __cumetal_texture_
     const int cx1 = x0 + 1 < 0 ? 0 : (x0 + 1 > last_x ? last_x : x0 + 1);
     const int cy0 = y0 < 0 ? 0 : (y0 > last_y ? last_y : y0);
     const int cy1 = y0 + 1 < 0 ? 0 : (y0 + 1 > last_y ? last_y : y0 + 1);
-    const bool in_x0 = !border_x || (x0 >= 0 && x0 <= last_x);
-    const bool in_x1 = !border_x || (x0 + 1 >= 0 && x0 + 1 <= last_x);
-    const bool in_y0 = !border_y || (y0 >= 0 && y0 <= last_y);
-    const bool in_y1 = !border_y || (y0 + 1 >= 0 && y0 + 1 <= last_y);
-    // Offsets within one layer fit in 32 bits (a layer is far below 4 GiB);
-    // 64-bit integer arithmetic costs several instructions per operation on
-    // Apple GPUs, and a fetch's instruction count is what a PatchMatch sweep,
-    // at one SIMD-group per core, actually waits on.
-    const unsigned int pitch = static_cast<unsigned int>(view.pitch);
+    // One unsigned compare per tap tests both ends of the range. A fetch's
+    // instruction count is what a PatchMatch sweep, at one SIMD-group per
+    // core, actually waits on.
+    const unsigned int width = static_cast<unsigned int>(view.width);
+    const unsigned int height = static_cast<unsigned int>(view.height);
+    const bool in_x0 = !border_x || static_cast<unsigned int>(x0) < width;
+    const bool in_x1 = !border_x || static_cast<unsigned int>(x0 + 1) < width;
+    const bool in_y0 = !border_y || static_cast<unsigned int>(y0) < height;
+    const bool in_y1 = !border_y || static_cast<unsigned int>(y0 + 1) < height;
+    const unsigned int pitch = view.pitch;
     const unsigned int row0 = static_cast<unsigned int>(cy0) * pitch;
     const unsigned int row1 = static_cast<unsigned int>(cy1) * pitch;
     T p00, p10, p01, p11;
+    bool loaded = false;
     if constexpr (std::is_arithmetic<T>::value) {
         if (view.normalized_8bit) {
             constexpr float kScale = 1.0f / 255.0f;
@@ -1864,17 +1874,16 @@ __device__ __forceinline__ T __cumetal_texture_bilinear(const __cumetal_texture_
             p10 = static_cast<T>(static_cast<float>(plane[row0 + static_cast<unsigned int>(cx1)]) * kScale);
             p01 = static_cast<T>(static_cast<float>(plane[row1 + static_cast<unsigned int>(cx0)]) * kScale);
             p11 = static_cast<T>(static_cast<float>(plane[row1 + static_cast<unsigned int>(cx1)]) * kScale);
-            goto mix;
+            loaded = true;
         }
     }
-    {
+    if (!loaded) {
         const unsigned int element = view.element_bytes;
         p00 = *reinterpret_cast<const T*>(plane + (row0 + static_cast<unsigned int>(cx0) * element));
         p10 = *reinterpret_cast<const T*>(plane + (row0 + static_cast<unsigned int>(cx1) * element));
         p01 = *reinterpret_cast<const T*>(plane + (row1 + static_cast<unsigned int>(cx0) * element));
         p11 = *reinterpret_cast<const T*>(plane + (row1 + static_cast<unsigned int>(cx1) * element));
     }
-mix:
     p00 = in_x0 && in_y0 ? p00 : T{};
     p10 = in_x1 && in_y0 ? p10 : T{};
     p01 = in_x0 && in_y1 ? p01 : T{};
@@ -1944,8 +1953,9 @@ __device__ __forceinline__ T tex2DLayered(cudaTextureObject_t texture,
     const __cumetal_texture_view view = __cumetal_texture_view_of(texture);
     // The layer index is never filtered or wrapped: CUDA clamps it.
     const int iz = layer < 0 ? 0 : (layer >= view.depth ? view.depth - 1 : layer);
-    const unsigned char* plane = view.data + static_cast<unsigned long long>(iz) * view.pitch *
-                                                 static_cast<unsigned long long>(view.height);
+    // A 32x32->64-bit multiply: the layer's base may lie beyond 4 GiB.
+    const unsigned char* plane = view.data + static_cast<unsigned long long>(static_cast<unsigned int>(iz)) *
+                                                 view.layer_bytes;
     if (!view.normalized_coords) {
         // The common case (COLMAP's PatchMatch): unnormalized coordinates,
         // so only clamp and border addressing can apply.

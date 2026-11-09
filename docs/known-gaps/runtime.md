@@ -156,7 +156,9 @@ and clamp/zero-border coverage for tracked linear resources. Source `tex2D` and
 coordinates and linear filtering within a layer, checked against host results
 (`functional_texture_sampling_semantics`). All sampling is software: linear
 filtering blends in binary32 rather than CUDA's 9-bit fixed-point weights, and
-each fetch costs several instructions where hardware uses one. Direct PTX
+each fetch costs several instructions where hardware uses one. A 2D or layered
+texture whose layer reaches 4 GiB is refused with `cudaErrorInvalidValue`
+(fetches use 32-bit offsets within a layer); CUDA accepts such layers. Direct PTX
 indirect-object `txq`/`suq` width, height, and depth queries have strict-lowering
 and numerical Apple-GPU coverage. Direct PTX sampling, surface load/store/reduction,
 other query attributes, static opaque-reference operands, native Metal texture ABI,
