@@ -45,10 +45,17 @@ trap 'rm -f "${LOG}"' EXIT
 ctest --test-dir "${BUILD_DIR}" --output-on-failure ${CTEST_ARGS[@]+"${CTEST_ARGS[@]}"} 2>&1 | tee "${LOG}"
 CTEST_STATUS="${PIPESTATUS[0]}"
 
-TOTAL=$(grep -cE '^[[:space:]]*[0-9]+/[0-9]+ Test' "${LOG}" || true)
-PASSED=$(grep -cE '\.\.\.[[:space:]]+Passed' "${LOG}" || true)
-SKIPPED=$(grep -cE '\.\.\.\*+Skipped' "${LOG}" || true)
-FAILED=$(grep -cE '\.\.\.\*+Failed|\.\.\.\*+Exception' "${LOG}" || true)
+# Match CTest result rows, not status-like text printed by a test. Disabled
+# tests did not run by choice; other Not Run results (for example a missing
+# executable), timeouts, and exceptions are failures just like failed asserts.
+RESULT_PATTERN='^[[:space:]]*[0-9]+/[0-9]+ Test[[:space:]]+#[0-9]+:'
+PASS_PATTERN="${RESULT_PATTERN}.*\\.\\.\\.[[:space:]]+Passed"
+SKIP_PATTERN="${RESULT_PATTERN}.*\\.\\.\\.\\*+(Skipped|Not Run \\(Disabled\\))"
+FAIL_PATTERN="${RESULT_PATTERN}.*\\.\\.\\.\\*+(Failed|Exception|Timeout|Not Run[[:space:]]+[0-9])"
+TOTAL=$(grep -cE "${RESULT_PATTERN}" "${LOG}" || true)
+PASSED=$(grep -cE "${PASS_PATTERN}" "${LOG}" || true)
+SKIPPED=$(grep -cE "${SKIP_PATTERN}" "${LOG}" || true)
+FAILED=$(grep -cE "${FAIL_PATTERN}" "${LOG}" || true)
 
 POLICY_FAILURES=()
 if [[ "${REQUIRE_TESTS}" -eq 1 && "${TOTAL}" -eq 0 ]]; then
@@ -69,14 +76,14 @@ fi
     echo "| Failed | ${FAILED} |"
     echo "| Registered | ${TOTAL} |"
     echo ""
-    echo "_A registration count is not a pass count; skips are environment-dependent._"
+    echo "_A registration count is not a pass count; skipped counts include disabled tests._"
     echo ""
 
     if [[ "${SKIPPED}" -gt 0 ]]; then
         echo "### Skipped tests"
         echo ""
-        grep -E '\.\.\.\*+Skipped' "${LOG}" |
-            sed -E 's/^[[:space:]]*[0-9]+\/[0-9]+ Test +#[0-9]+: +//; s/ *\.+\*+Skipped.*//' |
+        grep -E "${SKIP_PATTERN}" "${LOG}" |
+            sed -E 's/^[[:space:]]*[0-9]+\/[0-9]+ Test +#[0-9]+: +//; s/ *\.+\*+(Skipped|Not Run).*//' |
             sed 's/^/- /'
         echo ""
     fi
@@ -84,8 +91,8 @@ fi
     if [[ "${FAILED}" -gt 0 ]]; then
         echo "### Failed tests"
         echo ""
-        grep -E '\.\.\.\*+Failed|\.\.\.\*+Exception' "${LOG}" |
-            sed -E 's/^[[:space:]]*[0-9]+\/[0-9]+ Test +#[0-9]+: +//; s/ *\.+\*+(Failed|Exception).*//' |
+        grep -E "${FAIL_PATTERN}" "${LOG}" |
+            sed -E 's/^[[:space:]]*[0-9]+\/[0-9]+ Test +#[0-9]+: +//; s/ *\.+\*+(Failed|Exception|Timeout|Not Run).*//' |
             sed 's/^/- /'
         echo ""
     fi
