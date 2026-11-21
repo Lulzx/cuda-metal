@@ -2094,9 +2094,80 @@ bool test_trap_reporting_accepts_scalar_math_builtins() {
 
 }  // namespace
 
+// #232: binary64 sqrt/rsqrt and #231's min/max.f64 lower through the active
+// FP64 mode's software ALU instead of being refused; the directed sqrt forms
+// use VF64's rounding-mode sqrt in every mode.
+bool test_binary64_root_and_select_opcodes() {
+    using namespace cumetal;
+    bool ok = true;
+    struct Case { const char* ptx; const char* fast48; const char* wide48; const char* ieee64; };
+    const Case cases[] = {
+        {"sqrt.rn.f64 %fd3, %fd1;", "cm_fp64_fast_sqrt(", "vf64_wide_sqrt(", "vf64_sqrt_rne("},
+        {"sqrt.rz.f64 %fd3, %fd1;", "vf64_sqrt_round(", "vf64_sqrt_round(", "vf64_sqrt_round("},
+        {"sqrt.rm.f64 %fd3, %fd1;", "vf64_sqrt_round(", "vf64_sqrt_round(", "vf64_sqrt_round("},
+        {"sqrt.rp.f64 %fd3, %fd1;", "vf64_sqrt_round(", "vf64_sqrt_round(", "vf64_sqrt_round("},
+        {"rsqrt.approx.f64 %fd3, %fd1;", "cm_fp64_fast_div(", "vf64_wide_div(", "vf64_div_rne("},
+        {"max.f64 %fd3, %fd1, %fd2;", "cm_fp64_fast_max(", "vf64_max(", "vf64_max("},
+        {"min.f64 %fd3, %fd1, %fd2;", "cm_fp64_fast_min(", "vf64_min(", "vf64_min("},
+    };
+    for (const Case& test : cases) {
+        const std::string module =
+            ".version 7.0\n.target sm_60\n.address_size 64\n"
+            ".visible .entry k(.param .u64 p) {\n"
+            ".reg .b64 %rd<3>;\n.reg .f64 %fd<4>;\n"
+            "ld.param.u64 %rd1, [p];\ncvta.to.global.u64 %rd2, %rd1;\n"
+            "ld.global.f64 %fd1, [%rd2];\nld.global.f64 %fd2, [%rd2+8];\n" +
+            std::string(test.ptx) + "\nst.global.f64 [%rd2], %fd3;\nret;\n}\n";
+        for (const auto& [mode, expected] :
+             {std::pair<const char*, const char*>{"fast48", test.fast48},
+              {"wide48", test.wide48},
+              {"ieee64", test.ieee64}}) {
+            metal::PtxToMslOptions options;
+            options.fp64_mode = mode;
+            const auto compiled = metal::compile_ptx_to_msl(module, options);
+            const std::string label = std::string(test.ptx) + " under " + mode;
+            ok &= expect(compiled.ok, label + " compiles: " + compiled.error);
+            ok &= expect(compiled.source.find(expected) != std::string::npos,
+                         label + " uses " + expected);
+        }
+    }
+    return ok;
+}
+
+// #231: a by-value .b8[16] parameter lowers to four uint words; reading a
+// float from it reinterprets the word's bits instead of converting the
+// integer numerically (xgrid-gpu's Params struct; 1.75f read as 1.07e9).
+bool test_packed_param_float_field_is_bitcast() {
+    using namespace cumetal;
+    const auto compiled = metal::compile_ptx_to_msl(R"ptx(
+.version 7.0
+.target sm_60
+.address_size 64
+.visible .entry k(.param .u64 .ptr .align 1 out, .param .align 4 .b8 p[16]) {
+  .reg .b64 %rd<3>;
+  .reg .f32 %f<2>;
+  .reg .b32 %r<2>;
+  ld.param.u64 %rd1, [out];
+  cvta.to.global.u64 %rd2, %rd1;
+  ld.param.f32 %f1, [p+8];
+  ld.param.u32 %r1, [p+12];
+  st.global.f32 [%rd2], %f1;
+  st.global.u32 [%rd2+4], %r1;
+  ret;
+}
+)ptx");
+    bool ok = expect(compiled.ok, "packed float field compiles: " + compiled.error);
+    ok &= expect(compiled.source.find("as_type<float>(") != std::string::npos &&
+                     compiled.source.find(".field2)") != std::string::npos,
+                 "the float field is read as as_type<float>(p.field2)");
+    return ok;
+}
+
 int main() {
     using namespace cumetal;
     bool ok = true;
+    ok &= test_binary64_root_and_select_opcodes();
+    ok &= test_packed_param_float_field_is_bitcast();
     ok &= test_packed_aggregate_return_words();
     ok &= test_helper_module_constants();
     ok &= test_selp_indexed_pointer_table();

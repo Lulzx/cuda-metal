@@ -716,13 +716,32 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         const cumetal::ptx::LowerToMetalResult lowered =
             cumetal::ptx::lower_ptx_to_metal_source(ptx, options);
         if (!lowered.ok || lowered.metal_source.empty() || lowered.approximate) {
-            if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+            // Say why (#231). When the typed backend declines and the legacy
+            // MSL retry also produces nothing, the typed reason survives only
+            // as a fallback warning, so report the warnings too.
+            std::string reason = lowered.error;
+            if (reason.empty() && lowered.approximate) {
+                reason = "the lowering is approximate";
+            }
+            if (lowered.error.empty()) {
+                for (const std::string& warning : lowered.warnings) {
+                    reason += (reason.empty() ? "" : "; ") + warning;
+                }
+            }
+            if (reason.empty()) reason = "no MSL produced";
+            // Strict typed selection turns this into a load failure, so the
+            // reason is printed unconditionally there; otherwise the module
+            // continues on the legacy JIT and the reason is a diagnostic.
+            if (backend == "cumetal-ir") {
+                std::fprintf(stderr,
+                             "CuMetal: CUMETAL_PTX_BACKEND=cumetal-ir cannot load kernel "
+                             "'%s': %s\n",
+                             options.entry_name.c_str(), reason.c_str());
+            } else if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
                 std::fprintf(stderr,
                              "CUMETAL_DEBUG_ERRORS: typed PTX lowering declined "
-                             "'%s': %s\n",
-                             options.entry_name.c_str(),
-                             lowered.error.empty() ? "no MSL produced"
-                                                   : lowered.error.c_str());
+                             "'%s', using the legacy JIT for this module: %s\n",
+                             options.entry_name.c_str(), reason.c_str());
             }
             cleanup_metal();
             return false;
@@ -2058,9 +2077,13 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
         }
         // The image is PTX, so no metallib parse below can accept it; CUDA
         // reports a PTX module the JIT cannot compile as CUDA_ERROR_INVALID_PTX.
-        std::fprintf(stderr,
-                     "cumetal: PTX module could not be compiled for the Apple GPU "
-                     "(set CUMETAL_DEBUG_ERRORS=1 for the lowering diagnostic)\n");
+        // Strict typed selection has already printed the typed reason.
+        const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
+        if (backend_env == nullptr || std::string(backend_env) != "cumetal-ir") {
+            std::fprintf(stderr,
+                         "cumetal: PTX module could not be compiled for the Apple GPU "
+                         "(set CUMETAL_DEBUG_ERRORS=1 for the lowering diagnostic)\n");
+        }
         return CUDA_ERROR_INVALID_PTX;
     }
 

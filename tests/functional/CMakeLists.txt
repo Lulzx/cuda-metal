@@ -4788,3 +4788,37 @@ add_test(
             ${CMAKE_SOURCE_DIR}/runtime/driver/driver_v2_aliases.txt
 )
 set_tests_properties(functional_driver_v2_symbols PROPERTIES SKIP_RETURN_CODE 77)
+
+# #231 / #232: run-time binary64 PTX through the driver JIT, with exact
+# kernelParams counts (no NULL terminator) and a 16-byte by-value struct, in
+# every FP64 mode, on the default and strict typed backends.
+add_executable(cumetal_driver_raw_ptx_fp64_abi_test driver_raw_ptx_fp64_abi_test.cpp)
+target_link_libraries(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE cumetal_runtime)
+target_compile_features(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE cxx_std_20)
+target_compile_options(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE
+    -Wall -Wextra -Wpedantic -ffp-contract=off)
+foreach(cumetal_fp64_mode fast48 wide48 ieee64)
+    add_test(
+        NAME functional_driver_raw_ptx_fp64_abi_${cumetal_fp64_mode}
+        COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test>
+    )
+    set_tests_properties(functional_driver_raw_ptx_fp64_abi_${cumetal_fp64_mode} PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "CUMETAL_FP64_MODE=${cumetal_fp64_mode}")
+endforeach()
+add_test(
+    NAME functional_driver_raw_ptx_fp64_abi_strict_typed
+    COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test>
+)
+set_tests_properties(functional_driver_raw_ptx_fp64_abi_strict_typed PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_FP64_MODE=ieee64;CUMETAL_PTX_BACKEND=cumetal-ir")
+add_test(
+    NAME functional_driver_raw_ptx_strict_typed_refusal
+    COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test> --expect-refusal
+)
+set_tests_properties(functional_driver_raw_ptx_strict_typed_refusal PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_PTX_BACKEND=cumetal-ir"
+    PASS_REGULAR_EXPRESSION "PASS: strict typed selection refuses"
+    FAIL_REGULAR_EXPRESSION "FAIL:")

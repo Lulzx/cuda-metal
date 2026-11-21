@@ -52,6 +52,32 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Driver `_v2` entry points are exported (#230).** `cuCtxCreate_v2`,
+  `cuMemAlloc_v2`, `cuMemcpyHtoD_v2` and the rest of NVIDIA's 40 versioned
+  names for entry points CuMetal implements are linker aliases of the
+  unsuffixed functions, which already have the `_v2` ABI
+  (`runtime/driver/driver_v2_aliases.txt`). Programs that resolve the driver
+  with `dlsym`, such as xgrid-gpu, now load. `functional_driver_v2_symbols`
+  checks every alias against its unsuffixed function.
+- **Run-time FP64 PTX takes the typed path with exact argument metadata
+  (#231).** `max.f64`/`min.f64` were accepted by the typed importer but had no
+  software-FP64 lowering, so every module with them (xgrid-gpu's
+  `biot_savart.ptx`) fell to the legacy driver JIT. They now use the mode's
+  min/max, and the module's three kernels run on the typed path in every FP64
+  mode (bit-exact against the host in ieee64). A float read from a by-value
+  `.b8` array parameter (`ld.param.f32 [p+8]`) was converted numerically from
+  the packed `uint` word instead of reinterpreted, so a 16-byte struct's
+  `float` field arrived as roughly 1e9; it is now `as_type<float>`. When the
+  typed path declines a module, `CUMETAL_DEBUG_ERRORS` prints the typed
+  backend's reason, and `CUMETAL_PTX_BACKEND=cumetal-ir` prints it
+  unconditionally before `cuModuleLoadData` returns `CUDA_ERROR_INVALID_PTX`.
+  `functional_driver_raw_ptx_fp64_abi_{fast48,wide48,ieee64,strict_typed}`
+  launch an xgrid-shaped module with a non-NULL-terminated `kernelParams`.
+- **`sqrt.rn.f64` and `rsqrt.approx.f64` on the typed PTX path (#232).** They
+  were refused as "only supported for binary32". `sqrt.rn.f64` uses the mode's
+  square root (correctly rounded in ieee64), `sqrt.{rz,rm,rp}.f64` use VF64's
+  directed-rounding square root in every mode, and `rsqrt.approx.f64` is
+  `1/sqrt(x)` in the active mode, at least as accurate as PTX's approximation.
 - **Allocations reached through stored device addresses are resident (#224).**
   A kernel following a pointer it loaded from device memory touched an
   allocation it never bound; in the default pointer mode the GPU read zeros
