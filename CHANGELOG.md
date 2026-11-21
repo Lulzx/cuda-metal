@@ -38,8 +38,42 @@ All notable changes to CuMetal are documented here. Format follows
   sets the launch's trap status without cancelling: such kernels no longer poll
   the status in every loop or fall back to the CFG dispatcher, which made
   COLMAP's PatchMatch sweep about 11x slower.
+- **Directed-rounding half and bfloat16 conversions.** `__float2half_rz/_ru/_rd`
+  and `__float2bfloat16_rz/_ru/_rd` round in software, identically on host and
+  device, with the right overflow and signed-zero results. `cuda_bf16.h` also
+  gains `__bfloat16_as_ushort`/`__ushort_as_bfloat16` and the `short` forms.
+  Cuport-Matrix's `fp-semantics/half-bf16-001` is now bit-exact.
+- **Device `printf` of string literals.** A `%s` argument that is a string
+  literal, including one chosen at run time (`odd ? "odd" : "even"`), prints
+  its text on the typed NVVM path (native AOT, direct `.cu`) instead of
+  `[string]`. Literals live in Metal constant memory, so the pointer travels
+  as a tagged index into the kernel's printf string table; `%p` still prints
+  the address.
 
 ### Fixed
+
+- **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
+  places each value at its natural alignment, so `printf("%d %f", i, d)` has
+  four bytes of padding. The typed NVVM importer refused such calls and the
+  PTX printf pass left them undecoded. Both now accept alignment padding and
+  still reject other gaps. Cuport-Matrix's `device-services/printf-001` is
+  now bit-exact.
+- **Device `printf` goes to stdout,** as CUDA's does, flushed at each drain so
+  it stays in order with host output. It used to go to stderr.
+- **Installed toolchain (#204).** `cmake --install` now installs every
+  clean-room header; the hand-written list had missed 43 of them, including
+  `cuda_bf16.h`, `vector_types.h`, `vector_functions.h`, `math_constants.h`
+  and `mma.h`. It also installs the FP64/libdevice Metal support sources and
+  the VF64 shaders they include under `share/cumetal/metal`. `cumetalc` and the
+  runtime look for them there ($CUMETAL_ROOT, then the binary's own prefix)
+  before the source tree, so an installed `cumetalc --fp64=ieee64` no longer
+  fails on a missing `compiler/metal/support/*.metal`.
+- **No `libz3` load command.** Homebrew's LLVM exports `libz3` as a link
+  dependency of `LLVMSupport`, which CuMetal never calls. Binaries are now
+  linked with `-dead_strip_dylibs`, so an installed `cumetalc` or
+  `libcumetal.dylib` no longer aborts in dyld on a machine without z3.
+- **Metal compile errors carry Apple's diagnostics.** "failed to compile
+  .metal to .air" now includes the first 2 KB of `xcrun metal` output.
 
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
   returns the border colour (zero) outside the texture instead of clamping,

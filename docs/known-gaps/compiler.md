@@ -327,7 +327,9 @@ A typed-backend kernel that uses software FP64 is compiled as one safe-mode
 Metal module so VF64 keeps IEEE semantics (see
 [FP64 policy](../fp64-policy.md)). Under `--use_fast_math` its user float code
 still gets fast-math operation flags and contraction by pragma, but not Metal's
-module-wide fast-math options: FP32 denormals are not flushed and unqualified
+module-wide fast-math options: FP32 denormal flushing is not requested
+(whether the GPU keeps them is hardware-dependent; see
+[platform](platform.md)) and unqualified
 builtins such as `sin` resolve to their precise overloads. Such kernels are
 more accurate, and may be slower, than `--use_fast_math` would make them
 without FP64.
