@@ -279,7 +279,7 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
     // to poll; the rest just carry the status pointer.
     std::unordered_set<std::string> cancelling;
     for (const Function& function : module.functions) {
-        if (function.name == kReportOnlyTrapHelper) continue;
+        if (is_report_only_trap_helper(function.name)) continue;
         for (const BasicBlock& block : function.blocks)
             for (const Operation& operation : block.operations)
                 if (operation.opcode == OpCode::kTrap) cancelling.insert(function.name);

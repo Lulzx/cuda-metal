@@ -284,17 +284,36 @@ so a refused kernel does not turn into an unrelated `CUBLAS_STATUS_EXECUTION_FAI
 NVRTC's CUBIN size includes a trailing NUL, matching real NVRTC; CuPy drops
 the last byte of every image it receives and the module image still loads.
 
-### Device assertions in synchronized kernels
+### Device assertions
 
-The typed PTX path recognizes a narrow, proven terminal assertion of
+A failed device `assert` reports `cudaErrorAssert` (710, driver
+`CUDA_ERROR_ASSERT`) from the synchronization that observes its launch. Like
+other trap errors it is sticky on the stream that ran the launch, so every
+later synchronization of that stream, and of the device, keeps returning 710.
+Other streams and API calls that do not synchronize with it keep working,
+whereas CUDA makes the whole context unusable. Assertion messages are not
+printed.
+
+The semantics differ from CUDA's in one respect. CUDA aborts the kernel when
+an assertion fails. On the CUDA source path (`cumetalc file.cu`, the typed
+NVVM importer) the failing thread records the failure and continues past the
+assertion instead, so a kernel with `__syncthreads` or warp collectives cannot
+hang on a thread that left early. That thread may then do the work the
+assertion guarded; its writes are never observable through the CUDA API,
+because the stream reports 710 from then on. A kernel whose asserting path
+cannot carry the trap status (device `printf`, grid sync, indirect or
+undefined device calls, or a launch argument at Metal buffer index 25) still
+compiles with its asserts dropped, as before; the generated MSL records this
+as a `cumetal-semantic-caveat`.
+
+On the typed PTX path, five-argument void `__assertfail` calls in kernels
+without barriers, collectives, or device printf cancel the launch and report
+`cudaErrorAssert`; divergent and spinning peers are cancelled. General
+`__assertfail` assertions in synchronized PTX kernels still refuse. The path
+also recognizes a narrow, proven terminal assertion of
 `blockDim.axis & (blockDim.axis - 1)`. It restricts accepted launches to a
-power-of-two dimension and checks the constraint at kernel entry before any
-barrier or divergent work. This includes straight-line assertion forwarding
-helpers. The launch reports `cudaErrorLaunchFailure` on an invalid shape.
-Five-argument void `__assertfail` calls in kernels without barriers,
-collectives, or device printf use the per-launch trap status and report
-`cudaErrorLaunchFailure`; divergent and spinning peers are cancelled.
-General assertions in synchronized kernels still refuse. Assertion messages
-and exact `cudaErrorAssert` status are not implemented.
-The constraint also applies when the assertion's original path would have been
-untaken, so this is a deliberately narrower supported launch domain.
+power-of-two dimension, checks the constraint at kernel entry before any
+barrier or divergent work (including straight-line assertion forwarding
+helpers), and reports `cudaErrorAssert` on an invalid shape. The constraint
+also applies when the assertion's original path would have been untaken, so
+this is a deliberately narrower supported launch domain.

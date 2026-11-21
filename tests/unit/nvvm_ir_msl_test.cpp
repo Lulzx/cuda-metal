@@ -3031,8 +3031,12 @@ declare double @__nv_hypot(double, double)
                                         : sequential_loops.source.find("while (true)", first_loop + 1);
     ok &= expect(sequential_loops.ok && first_loop != std::string::npos &&
                      second_loop != std::string::npos &&
-                     sequential_loops.source.find("_Z12__assert_rtn") == std::string::npos,
-                 "sequential natural loops accept pre-bound PHIs and erase the empty device assert shim");
+                     sequential_loops.source.find("_Z12__assert_rtn") == std::string::npos &&
+                     sequential_loops.source.find("cm___cumetal_device_assert__cm_trap_guarded(") !=
+                         std::string::npos &&
+                     sequential_loops.source.find("cm_trap_status, 2u") != std::string::npos,
+                 "sequential natural loops accept pre-bound PHIs and turn the empty device "
+                 "assert shim into a report-only assert trap");
     if (!sequential_loops.ok) std::cerr << sequential_loops.error << "\n";
 
     const metal::NvvmToMslResult warp_votes =

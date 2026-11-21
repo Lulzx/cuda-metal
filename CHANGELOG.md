@@ -57,6 +57,16 @@ All notable changes to CuMetal are documented here. Format follows
   timing-disabled event returns `cudaErrorInvalidResourceHandle`
   (`CUDA_ERROR_INVALID_HANDLE` from `cuEventElapsedTime`), not
   `cudaErrorInvalidValue`.
+- **Device `assert` reports `cudaErrorAssert`.** A failed assertion in CUDA
+  source compiled by `cumetalc` used to be dropped, so the next synchronize
+  returned success. It now sets the launch's trap status and the next
+  synchronize returns 710 (driver: `CUDA_ERROR_ASSERT`), sticky on its stream.
+  The failing thread continues rather than aborting the kernel, so kernels with
+  `__syncthreads` and warp collectives keep compiling and cannot hang. A kernel
+  whose asserting path cannot carry the trap status (device `printf`, grid
+  sync, indirect calls) keeps its old behaviour, with a semantic caveat in
+  the generated source. PTX `__assertfail` and the block-dimension assertion
+  report 710 instead of `cudaErrorLaunchFailure`.
 - **`cudaDevAttrMaxSharedMemoryPerBlockOptin`**, CUDA's name for attribute 97,
   is declared; the old `cudaDevAttrSharedMemPerBlockOptin` spelling remains.
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now

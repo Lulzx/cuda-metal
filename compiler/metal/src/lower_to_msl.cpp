@@ -7930,6 +7930,21 @@ struct AstLowerer {
                     condition, std::move(first), std::move(second)));
                 body.push_back(MslStatement::break_statement());
             } else if (terminator.opcode == ir::OpCode::kTrap) {
+                // A failed assertion marks its own status bit so the host can
+                // report cudaErrorAssert; the shared trap announcement below
+                // still sets the launch-failure bit.
+                if (terminator.attributes.contains("trap_kind") &&
+                    terminator.attributes.at("trap_kind") == "assert") {
+                    body.push_back(MslStatement::expression(MslExpression::call(
+                        "atomic_fetch_or_explicit",
+                        {MslExpression::identifier(
+                             abi::kTrapStatusName,
+                             MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
+                         MslExpression::literal(
+                             std::to_string(abi::kTrapStatusAssert) + "u", MslType::uint()),
+                         MslExpression::identifier("memory_order_relaxed", MslType::uint())},
+                        MslType::uint())));
+                }
                 // Execute this block's operations before announcing its trap.
                 body.push_back(MslStatement::assignment(state,
                     MslExpression::literal(std::to_string(function.blocks.size()) + "u", MslType::uint())));
@@ -8306,7 +8321,7 @@ struct AstLowerer {
                 output.statements.push_back(MslStatement::if_statement(invalid, {
                     MslStatement::expression(MslExpression::call("atomic_fetch_or_explicit", {
                         MslExpression::identifier(abi::kTrapStatusName, MslType::pointer(atomic_uint_type(), MslAddressSpace::kDevice)),
-                        MslExpression::literal("1u", MslType::uint()),
+                        MslExpression::literal(std::to_string(abi::kTrapStatusLaunchFailure | abi::kTrapStatusAssert) + "u", MslType::uint()),
                         MslExpression::identifier("memory_order_relaxed", MslType::uint())}, MslType::uint())),
                     MslStatement::return_statement()}));
             }
@@ -9398,6 +9413,110 @@ StructurizeResult check_structurizable(const ir::Function& function) {
     return result;
 }
 
+namespace {
+
+// Functions reachable from `root` through direct and token calls, `root` included.
+std::unordered_set<std::string> reachable_functions(const ir::Module& module,
+                                                    const std::string& root) {
+    std::unordered_map<std::string, const ir::Function*> by_name;
+    for (const ir::Function& function : module.functions) by_name.emplace(function.name, &function);
+    std::unordered_set<std::string> seen;
+    std::vector<std::string> pending{root};
+    while (!pending.empty()) {
+        const std::string name = std::move(pending.back());
+        pending.pop_back();
+        const auto found = by_name.find(name);
+        if (found == by_name.end() || !seen.insert(name).second) continue;
+        for (const ir::BasicBlock& block : found->second->blocks) {
+            for (const ir::Operation& operation : block.operations) {
+                if (const auto callee = operation.attributes.find("callee");
+                    callee != operation.attributes.end()) {
+                    pending.push_back(callee->second);
+                }
+                if (const auto callees = operation.attributes.find("callees");
+                    callees != operation.attributes.end()) {
+                    std::size_t begin = 0;
+                    while (begin <= callees->second.size()) {
+                        const std::size_t comma = callees->second.find(',', begin);
+                        const std::size_t end =
+                            comma == std::string::npos ? callees->second.size() : comma;
+                        if (end > begin) pending.push_back(callees->second.substr(begin, end - begin));
+                        if (comma == std::string::npos) break;
+                        begin = comma + 1;
+                    }
+                }
+            }
+        }
+    }
+    return seen;
+}
+
+// A kernel whose call graph cannot carry the trap status keeps compiling with
+// its device asserts dropped, exactly as before asserts were reported. Each
+// kernel is checked on its own so one printf kernel does not silence the
+// asserts of the others; a helper shared with such a kernel loses its asserts
+// for every caller. Returns nothing when there is no assert to drop, so the
+// original refusal stands.
+std::optional<ir::Module> drop_unreportable_asserts(const ir::Module& module) {
+    const auto calls_assert = [](const ir::Operation& operation) {
+        return operation.opcode == ir::OpCode::kCall &&
+               operation.attributes.contains("callee") &&
+               operation.attributes.at("callee") == kDeviceAssertTrapHelper;
+    };
+    std::unordered_set<std::string> strip;
+    std::vector<std::string> caveats;
+    for (const ir::Function& kernel : module.functions) {
+        if (!kernel.is_kernel) continue;
+        const std::unordered_set<std::string> reachable =
+            reachable_functions(module, kernel.name);
+        if (!reachable.contains(std::string(kDeviceAssertTrapHelper))) continue;
+        ir::Module alone = module;
+        std::erase_if(alone.functions, [&](const ir::Function& function) {
+            return !reachable.contains(function.name);
+        });
+        TrapCallGraph graph;
+        std::string error;
+        bool binding_conflict = kernel.arguments.size() > abi::kTrapStatusBindingIndex;
+        if (kernel.kernel_abi.has_value()) {
+            for (const ir::ArgumentDescriptor& argument : kernel.kernel_abi->arguments) {
+                for (const std::uint32_t index : argument.binding_indices) {
+                    binding_conflict |= index == abi::kTrapStatusBindingIndex;
+                }
+            }
+        }
+        if (binding_conflict) {
+            error = "a launch argument occupies the trap status binding";
+        } else if (analyze_trap_call_graph(alone, &graph, &error)) {
+            continue;
+        }
+        strip.insert(reachable.begin(), reachable.end());
+        caveats.push_back("device assert in kernel '" + kernel.name +
+                          "' is not reported (" + error + ")");
+    }
+    if (strip.empty()) return std::nullopt;
+    ir::Module result = module;
+    bool still_called = false;
+    for (ir::Function& function : result.functions) {
+        for (ir::BasicBlock& block : function.blocks) {
+            if (strip.contains(function.name)) {
+                std::erase_if(block.operations, calls_assert);
+            } else {
+                still_called |= std::any_of(block.operations.begin(), block.operations.end(),
+                                            calls_assert);
+            }
+        }
+    }
+    if (!still_called) {
+        std::erase_if(result.functions, [](const ir::Function& function) {
+            return function.name == kDeviceAssertTrapHelper;
+        });
+    }
+    result.semantic_caveats.insert(result.semantic_caveats.end(), caveats.begin(), caveats.end());
+    return result;
+}
+
+}  // namespace
+
 LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     LowerToMslResult result;
     if (metal_module.stage != ir::IrStage::kMetalLegalized) {
@@ -9407,6 +9526,14 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     if (metal_module.functions.empty()) {
         result.error = "MSL lowering requires at least one function";
         return result;
+    }
+    // Device asserts are reported through the trap status, which some kernels
+    // cannot carry (printf, grid sync, indirect or undefined device calls on
+    // the asserting path, or a launch argument at the status binding). Such a
+    // kernel still compiles, as it did before asserts were reported: its
+    // assert calls are dropped and the generated source says so.
+    if (std::optional<ir::Module> without_asserts = drop_unreportable_asserts(metal_module)) {
+        return lower_to_msl(*without_asserts);
     }
     TrapCallGraph trap_graph;
     if (!analyze_trap_call_graph(metal_module, &trap_graph, &result.error)) {

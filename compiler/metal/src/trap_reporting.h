@@ -33,6 +33,16 @@ struct TrapCallGraph {
 // reported but the guarded kernel keeps its structured, polling-free code.
 inline constexpr std::string_view kReportOnlyTrapHelper = "__cumetal_private_store_trap";
 
+// The device assert helper the NVVM importer calls in place of a failing
+// `assert`. It is report-only too, so a kernel with barriers or warp
+// collectives can still assert: the failing thread records the failure and
+// carries on, and the host reports cudaErrorAssert once the launch completes.
+inline constexpr std::string_view kDeviceAssertTrapHelper = "__cumetal_device_assert";
+
+inline bool is_report_only_trap_helper(std::string_view name) {
+    return name == kReportOnlyTrapHelper || name == kDeviceAssertTrapHelper;
+}
+
 // Analyze and validate direct call graphs rooted at kernels that can trap.
 // Barriers, collectives, printf, indirect calls, and undefined device calls
 // remain unsupported because they cannot participate in this cancellation ABI.

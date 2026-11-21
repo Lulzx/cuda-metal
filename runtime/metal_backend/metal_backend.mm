@@ -52,9 +52,16 @@ cudaError_t check_launch_status(id<MTLCommandBuffer> command_buffer,
                                 std::string* error_message) {
     const auto status = check_command_buffer_status(command_buffer, error_message);
     if (status != cudaSuccess) return status;
-    if (trap_status && *static_cast<const std::uint32_t*>(trap_status->contents()) != 0) {
-        if (error_message) *error_message = "PTX kernel executed trap";
-        return cudaErrorLaunchFailure;
+    if (trap_status) {
+        const std::uint32_t word = *static_cast<const std::uint32_t*>(trap_status->contents());
+        if ((word & cumetal::abi::kTrapStatusAssert) != 0) {
+            if (error_message) *error_message = "device-side assert triggered";
+            return cudaErrorAssert;
+        }
+        if (word != 0) {
+            if (error_message) *error_message = "PTX kernel executed trap";
+            return cudaErrorLaunchFailure;
+        }
     }
     return cudaSuccess;
 }
@@ -570,7 +577,9 @@ public:
             if (completion != MTLCommandBufferStatusCompleted && completion != MTLCommandBufferStatusError)
                 return cudaSuccess;
             const cudaError_t status = check_launch_status(front.command_buffer, front.trap_status, error_message);
-            if (front.trap_status && status == cudaErrorLaunchFailure) trap_error_ = status;
+            if (front.trap_status &&
+                (status == cudaErrorLaunchFailure || status == cudaErrorAssert))
+                trap_error_ = status;
             completed_ticket_ = front.ticket;
             pending_buffers_.erase(pending_buffers_.begin());
             if (status != cudaSuccess) return status;
