@@ -3,6 +3,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
 namespace {
 namespace ir = cumetal::ir;
@@ -306,10 +307,112 @@ bool record_contexts() {
     return ok;
 }
 
+// A helper takes two private record references, writes through `sink` and
+// then reads a pointer field of `request` (generativeqc's
+// accumulate_partition(Accumulator&, const PairGeometry&, ...), #218). The
+// callee alone cannot tell whether the references alias; every call site
+// must bind them to disjoint memory. `via_call` moves the write into a
+// nested helper so the call-effect summary path is exercised too.
+std::string two_record_fixture(const std::vector<std::string>& sinks, bool via_call) {
+    std::string source = R"ptx(.version 7.1
+.target sm_80
+.address_size 64
+)ptx";
+    if (via_call) source += R"ptx(.func write_sink(.param .b64 target) {
+ .reg .b64 %raw, %sink;
+ ld.param.b64 %raw, [target];
+ cvta.to.local.u64 %sink, %raw;
+ st.local.b64 [%sink+8], 7;
+ ret;
+}
+)ptx";
+    source += R"ptx(.func (.param .b32 result) read_two(.param .b64 request, .param .b64 sink) {
+ .reg .b64 %rraw, %record, %sraw, %sink, %pointer, %length;
+ .reg .b32 %value;
+ .reg .pred %empty;
+ .param .b64 nested;
+ ld.param.b64 %rraw, [request];
+ cvta.to.local.u64 %record, %rraw;
+ ld.param.b64 %sraw, [sink];
+ cvta.to.local.u64 %sink, %sraw;
+ ld.local.b64 %length, [%record+16];
+)ptx";
+    source += via_call ? " st.param.b64 [nested], %sraw;\n call.uni write_sink, (nested);\n"
+                       : " st.local.b64 [%sink+8], 7;\n";
+    source += R"ptx( ld.local.b64 %pointer, [%record+8];
+ mov.u32 %value, 0;
+ setp.eq.u64 %empty, %length, 0;
+ @%empty bra DONE;
+ ld.b8 %value, [%pointer];
+DONE:
+ st.param.b32 [result], %value;
+ ret;
+}
+.visible .entry probe(.param .u64 .ptr .global output) {
+ .local .align 16 .b8 depot[96];
+ .local .align 16 .b8 second[96];
+ .reg .b64 %base, %record, %payload, %other, %output, %sink;
+ .reg .b32 %value;
+ .param .b64 request_argument;
+ .param .b64 sink_argument;
+ .param .b32 answer;
+ ld.param.u64 %output, [output];
+ mov.u64 %base, depot;
+ mov.u64 %other, second;
+ add.u64 %payload, %base, 80;
+ st.local.u8 [%payload], 97;
+ mov.b64 %record, %base;
+ st.local.b64 [%record+8], %payload;
+ st.local.b64 [%record+16], 1;
+)ptx";
+    for (const auto& sink : sinks) {
+        source += " " + sink + "\n";
+        source += R"ptx( st.param.b64 [request_argument], %record;
+ st.param.b64 [sink_argument], %sink;
+ call.uni (answer), read_two, (request_argument, sink_argument);
+ ld.param.b32 %value, [answer];
+ st.global.u32 [%output], %value;
+)ptx";
+    }
+    source += " ret;\n}\n";
+    return source;
+}
+
+bool two_record_parameters() {
+    bool ok = true;
+    const std::string distinct = "mov.b64 %sink, %other;";
+    const std::string disjoint = "add.u64 %sink, %base, 32;";  // writes depot[40..48)
+    const std::string aliased = "mov.b64 %sink, %record;";     // writes depot[8..16)
+    const std::string overlapping = "add.u64 %sink, %base, 4;"; // writes depot[12..20)
+    for (const bool via_call : {false, true}) {
+        const std::string how = via_call ? " (nested write)" : " (direct write)";
+        for (const auto& [name, sinks] : std::vector<std::pair<std::string, std::vector<std::string>>>{
+                 {"distinct allocations", {distinct}},
+                 {"disjoint ranges of one depot", {disjoint}},
+                 {"two disjoint call sites", {distinct, disjoint}}}) {
+            const auto compiled = metal::compile_ptx_to_msl(two_record_fixture(sinks, via_call),
+                                                            {.entry_name = "probe"});
+            ok &= expect(compiled.ok, name + how + " proves the records disjoint: " + compiled.error);
+        }
+        for (const auto& [name, sinks] : std::vector<std::pair<std::string, std::vector<std::string>>>{
+                 {"aliased records", {aliased}},
+                 {"overlapping ranges", {overlapping}},
+                 {"one aliased call site", {distinct, aliased}}}) {
+            const auto compiled = metal::compile_ptx_to_msl(two_record_fixture(sinks, via_call),
+                                                            {.entry_name = "probe"});
+            ok &= expect(!compiled.ok &&
+                             compiled.error.find("private helper pointer field proof") != std::string::npos,
+                         name + how + " still refuses: " + compiled.error);
+        }
+    }
+    return ok;
+}
+
 } // namespace
 
 int main() {
     bool ok = record_contexts();
+    ok &= two_record_parameters();
     for (const std::string kind : {"private", "device", "constant"}) {
         ok &= positive(kind);
         ok &= positive(kind, "offset-copy");

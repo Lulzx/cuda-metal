@@ -551,6 +551,25 @@ cell that does not hold across all three Clang versions. CUDA Clang 22 and 23
 compile the same source without producing the join. Tracked upstream as issue
 \#76.
 
+A pointer field read from a private record that a helper receives by reference
+must not be clobbered by the helper's other writes. When a write goes through
+a *different* record parameter (`accumulate(Accumulator& sink, const Geometry&
+request)`), the proof walks every call site, recursively, and accepts it only
+when each binds the two references to distinct allocations or disjoint byte
+ranges of one; the same rule covers writes inside intervening calls. A
+helper whose parameters do alias at any call site is still refused. The
+call-effect summary's work budget scales with the module (16 units per IR
+operation, never below the 262,144 default), so a large generated module is no
+longer refused before any proof is attempted.
+
+Still refused: a write at a runtime-variable offset into the same stack frame
+that holds the record, such as a byte-wise zeroing loop over a neighbouring
+struct (`for (i = 0; i < 144; ++i) p[i] = 0`). The importer's runtime store
+guards (above) cover this for its own proofs, but the Metal-stage record field
+proof cannot request one. generativeqc's one-electron integral kernels stop
+here after #218's two reported blockers (`__nv_longlong_as_double`, `brx.idx`
+jump tables) were removed.
+
 ## Native AOT linkage
 
 `cumetalc` builds a native AOT executable by generating a separate registration

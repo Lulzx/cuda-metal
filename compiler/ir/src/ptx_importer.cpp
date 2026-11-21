@@ -711,6 +711,20 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
             .argument_types = {Type::floating(64)},
         };
     }
+    // __longlong_as_double / __double_as_longlong are a plain reinterpretation
+    // of the 64-bit storage word, like `mov.b64` between .f64 and .b64. clang
+    // leaves them as libdevice calls under -nocudalib; math_constants.h spells
+    // CUDART_INF and friends through __longlong_as_double, so without this
+    // any kernel using those constants failed typed-PTX import (#218).
+    if (name == "__nv_longlong_as_double" || name == "__nv_double_as_longlong") {
+        const bool to_double = name == "__nv_longlong_as_double";
+        return BuiltinSignature{
+            .attributes = {{"bitcast", "true"}},
+            .return_type = to_double ? Type::floating(64) : Type::integer(64),
+            .argument_types = {to_double ? Type::integer(64) : Type::floating(64)},
+            .opcode = OpCode::kConvert,
+        };
+    }
     // sinpi/cospi map to the Metal builtins; sincospi keeps the pointer-out
     // ABI like sincos. logb is the unbiased exponent as a float, ilogb as an
     // int. The double forms evaluate through binary32 like the rest of the
@@ -9066,6 +9080,10 @@ PtxImportResult import_ptx_once(std::string_view ptx, const PtxImportOptions& op
         return importer.result;
     }
     importer.result.warnings = parsed.warnings;
+    if (std::string branch_error; !detail::lower_indexed_branches(parsed.module, &branch_error)) {
+        importer.result.error = branch_error;
+        return importer.result;
+    }
     const auto block_requirements = detail::normalize_block_dimension_assertions(parsed.module);
     // A device assertion is a nonreturning fault. The guarded trap ABI keeps
     // divergent and spinning peers from hanging; synchronized graphs remain

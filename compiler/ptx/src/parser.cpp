@@ -86,6 +86,20 @@ std::string trim(std::string_view text) {
     return std::string(text.substr(begin, end - begin));
 }
 
+// Append each label of a `.branchtargets` list fragment (`$L_a, $L_b;`) as its
+// own operand; consumers treat every operand after the table name as one
+// target, so a multi-label line must not become a single operand.
+void append_branch_targets(std::vector<std::string>* operands, std::string_view text) {
+    std::size_t begin = 0;
+    while (begin <= text.size()) {
+        std::size_t end = text.find_first_of(",;", begin);
+        if (end == std::string_view::npos) end = text.size();
+        std::string label = trim(text.substr(begin, end - begin));
+        if (!label.empty()) operands->push_back(std::move(label));
+        begin = end + 1;
+    }
+}
+
 bool extract_balanced_body(const std::string& text,
                            std::size_t open_brace_index,
                            std::string* body,
@@ -982,10 +996,9 @@ void parse_instructions(const std::string& body,
                 line_text.pop_back();
                 line_text = trim(line_text);
             }
-            if (!line_text.empty()) {
-                entry->instructions[static_cast<std::size_t>(branch_table_instruction)]
-                    .operands.push_back(line_text);
-            }
+            append_branch_targets(
+                &entry->instructions[static_cast<std::size_t>(branch_table_instruction)].operands,
+                line_text);
             if (table_complete) branch_table_instruction = -1;
             continue;
         }
@@ -1138,6 +1151,12 @@ void parse_instructions(const std::string& body,
             table.line = current_line;
             table.opcode = "ptx.branchtargets";
             table.operands.push_back(trim(line_text.substr(0, table_marker)));
+            // Targets may start on the directive's own line:
+            // `$L_brx_0: .branchtargets $L_a, $L_b;`.
+            append_branch_targets(
+                &table.operands,
+                std::string_view(line_text).substr(table_marker +
+                                                   std::string_view(": .branchtargets").size()));
             table.supported = true;
             entry->instructions.push_back(std::move(table));
             if (line_text.find(';', table_marker) == std::string::npos) {

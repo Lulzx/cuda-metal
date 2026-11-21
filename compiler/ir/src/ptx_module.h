@@ -62,5 +62,12 @@ bool resolve_immutable_table_pointers(cumetal::ptx::ModuleInfo& module,
 // that dimension at kernel entry, before any barrier or divergent work.
 std::unordered_map<std::string, std::string> normalize_block_dimension_assertions(
     cumetal::ptx::ModuleInfo& module);
+// Rewrite every `brx.idx %r, $table;` jump table (clang's lowering of a dense
+// C++ switch) into a balanced tree of `setp.lt.u32` + `@p bra` over the
+// table's `.branchtargets`, and drop the table directives. The typed IR has
+// no switch terminator; ordinary conditional branches keep every later CFG
+// analysis and the MSL structurizer unchanged. Fails on a predicated brx, a
+// missing table or a table with no targets.
+bool lower_indexed_branches(cumetal::ptx::ModuleInfo& module, std::string* error);
 
 }  // namespace cumetal::ir::detail

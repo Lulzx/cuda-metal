@@ -883,4 +883,119 @@ std::unordered_map<std::string, std::string> normalize_block_dimension_assertion
     return requirements;
 }
 
+namespace {
+
+using PtxInstruction = cumetal::ptx::EntryFunction::Instruction;
+
+bool lower_function_indexed_branches(cumetal::ptx::EntryFunction& function,
+                                     std::size_t* next_id, std::string* error) {
+    bool has_indexed_branch = false;
+    std::unordered_map<std::string, std::vector<std::string>> tables;
+    for (const PtxInstruction& instruction : function.instructions) {
+        if (root_opcode(instruction.opcode) == "brx") has_indexed_branch = true;
+        if (instruction.opcode != "ptx.branchtargets" || instruction.operands.empty()) continue;
+        std::vector<std::string> targets;
+        for (std::size_t i = 1; i < instruction.operands.size(); ++i) {
+            // A continuation line may carry several comma-separated labels.
+            std::string_view rest = instruction.operands[i];
+            while (!rest.empty()) {
+                const std::size_t comma = rest.find(',');
+                const std::string label = trim(rest.substr(0, comma));
+                if (!label.empty()) targets.push_back(label);
+                if (comma == std::string_view::npos) break;
+                rest.remove_prefix(comma + 1);
+            }
+        }
+        tables[trim(instruction.operands.front())] = std::move(targets);
+    }
+    if (!has_indexed_branch) {
+        // An unreferenced table is a directive, not code.
+        std::erase_if(function.instructions, [](const PtxInstruction& instruction) {
+            return instruction.opcode == "ptx.branchtargets";
+        });
+        return true;
+    }
+
+    std::vector<PtxInstruction> rewritten;
+    rewritten.reserve(function.instructions.size());
+    for (const PtxInstruction& instruction : function.instructions) {
+        if (instruction.opcode == "ptx.branchtargets") continue;
+        if (root_opcode(instruction.opcode) != "brx") {
+            rewritten.push_back(instruction);
+            continue;
+        }
+        const auto fail = [&](const std::string& message) {
+            *error = "line " + std::to_string(instruction.line) + ": " + message;
+            return false;
+        };
+        if (instruction.opcode != "brx.idx" && instruction.opcode != "brx.idx.uni") {
+            return fail("PTX opcode '" + instruction.opcode + "' is not an indexed branch");
+        }
+        if (!instruction.predicate.empty()) {
+            return fail("predicated brx.idx is unsupported");
+        }
+        if (instruction.operands.size() != 2) {
+            return fail("brx.idx expects an index register and a target table");
+        }
+        const std::string index = trim(instruction.operands[0]);
+        const auto table = tables.find(trim(instruction.operands[1]));
+        if (table == tables.end()) {
+            return fail("unknown branch-target table '" + instruction.operands[1] + "'");
+        }
+        if (table->second.empty()) {
+            return fail("branch-target table '" + instruction.operands[1] + "' has no targets");
+        }
+        const std::vector<std::string>& targets = table->second;
+        const std::size_t id = (*next_id)++;
+        const std::string predicate = "%p_cm_brx" + std::to_string(id);
+        function.register_declarations.push_back({.name = predicate, .type = "pred"});
+        const auto emit = [&](std::string opcode, std::vector<std::string> operands,
+                              std::string guard = {}) {
+            PtxInstruction out;
+            out.predicate = std::move(guard);
+            out.opcode = std::move(opcode);
+            out.operands = std::move(operands);
+            out.line = instruction.line;
+            out.supported = true;
+            rewritten.push_back(std::move(out));
+        };
+        // [lo, hi) of the table. Index values past the table are undefined
+        // in PTX; the tree sends them to the last target.
+        std::size_t label_id = 0;
+        const auto lower = [&](const auto& self, std::size_t lo, std::size_t hi) -> void {
+            if (hi - lo == 1) {
+                emit("bra.uni", {targets[lo]});
+                return;
+            }
+            const std::size_t mid = lo + (hi - lo) / 2;
+            const std::string left = "$cm_brx_" + std::to_string(id) + "_" +
+                                     std::to_string(label_id++);
+            emit("setp.lt.u32", {predicate, index, std::to_string(mid)});
+            emit("bra", {left}, "@" + predicate);
+            self(self, mid, hi);
+            emit("ptx.label", {left});
+            self(self, lo, mid);
+        };
+        lower(lower, 0, targets.size());
+    }
+    function.instructions = std::move(rewritten);
+    return true;
+}
+
+}  // namespace
+
+bool lower_indexed_branches(cumetal::ptx::ModuleInfo& module, std::string* error) {
+    std::size_t next_id = 0;
+    for (auto* functions : {&module.entries, &module.functions}) {
+        for (auto& function : *functions) {
+            std::string function_error;
+            if (!lower_function_indexed_branches(function, &next_id, &function_error)) {
+                if (error != nullptr) *error = function.name + ": " + function_error;
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 }  // namespace cumetal::ir::detail

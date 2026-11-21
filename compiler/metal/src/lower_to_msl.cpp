@@ -1787,6 +1787,7 @@ private:
     std::vector<std::vector<std::vector<std::size_t>>> predecessors_;
     std::vector<std::vector<Location>> callers_;
     std::unordered_map<std::size_t, ir::detail::CallEffectSummary> call_effects_;
+    std::optional<ir::detail::CallEffectLimits> call_effect_limits_;
     std::size_t work_ = 0;
     std::string error_;
 
@@ -2063,13 +2064,34 @@ private:
         if (reaches_root.size() == visited.size()) cached = root;
         return cached;
     }
-    bool call_preserves_field(const ir::Operation& call, ir::ValueId root, std::int64_t offset) {
+    // The effect summary indexes every function it reaches before proving
+    // anything, so its fixed default budget refuses large generated modules
+    // (generativeqc's one-electron integrals inline thousands of operations
+    // per helper) without having attempted a proof. Scale it linearly with
+    // the module; the default stays the floor.
+    ir::detail::CallEffectLimits call_effect_limits() {
+        if (!call_effect_limits_) {
+            std::size_t operations = 0;
+            for (const auto& function : module_.functions) {
+                operations += function.arguments.size() + 1;
+                for (const auto& block : function.blocks)
+                    operations += block.arguments.size() + block.operations.size() + 1;
+            }
+            ir::detail::CallEffectLimits limits;
+            limits.work = std::max(limits.work, 16 * operations);
+            call_effect_limits_ = limits;
+        }
+        return *call_effect_limits_;
+    }
+    // `f` is the function containing `call`.
+    bool call_preserves_field(std::size_t f, const ir::Operation& call, ir::ValueId root,
+                              std::int64_t offset) {
         if (ir::detail::is_read_only_scalar_builtin(call)) return true;
         if (!callees_.contains(&call)) return false;
         const auto callee = callees_.at(&call);
         if (!call_effects_.contains(callee))
             call_effects_.emplace(callee, ir::detail::summarize_call_effects(
-                module_, module_.functions[callee].name));
+                module_, module_.functions[callee].name, call_effect_limits()));
         const auto& summary = call_effects_.at(callee);
         if (!summary.complete) return false;
         constexpr auto private_bit = std::uint8_t(1u << unsigned(ir::AddressSpace::kPrivate));
@@ -2084,11 +2106,15 @@ private:
                 if (allocation && *allocation != root) continue;
                 return false;
             }
+            const __int128 start = static_cast<__int128>(address->offset) + effect.offset;
             if (address->root != root) {
                 if (allocations_.contains(address->root) || allocations_.contains(root)) continue;
+                // Two record parameters of `f`: see roots_disjoint.
+                if (start < INT64_MIN || start > INT64_MAX) return false;
+                if (roots_disjoint(f, address->root, std::int64_t(start), effect.bytes, root, offset, 8))
+                    continue;
                 return false;
             }
-            const __int128 start = static_cast<__int128>(address->offset) + effect.offset;
             if (start < static_cast<__int128>(offset) + 8 &&
                 static_cast<__int128>(offset) < start + effect.bytes) return false;
         }
@@ -2113,6 +2139,42 @@ private:
         }
         return false;
     }
+    // True when [a_offset, a_offset + a_bytes) of root `a` and
+    // [b_offset, b_offset + b_bytes) of root `b` cannot overlap in function
+    // `f`. Distinct allocations never overlap; two incoming record parameters
+    // are disjoint only if every call site binds them to disjoint ranges,
+    // checked recursively through the callers (C++ lets two reference
+    // parameters alias, so the callee alone proves nothing).
+    bool roots_disjoint(std::size_t f, ir::ValueId a, std::int64_t a_offset, std::uint64_t a_bytes,
+                        ir::ValueId b, std::int64_t b_offset, std::uint64_t b_bytes,
+                        unsigned depth = 0) {
+        if (!charge()) return false;
+        if (a == b) {
+            const __int128 a_lo = a_offset, a_hi = a_lo + a_bytes;
+            const __int128 b_lo = b_offset, b_hi = b_lo + b_bytes;
+            return a_hi <= b_lo || b_hi <= a_lo;
+        }
+        if (allocations_.contains(a) || allocations_.contains(b)) return true;
+        if (depth > 16 || !arguments_.contains(a) || !arguments_.contains(b)) return false;
+        const auto [a_function, a_argument] = arguments_.at(a);
+        const auto [b_function, b_argument] = arguments_.at(b);
+        if (a_function != f || b_function != f || callers_[f].empty()) return false;
+        for (const auto caller : callers_[f]) {
+            const auto& call = operation_at(caller);
+            if (a_argument >= call.operands.size() || b_argument >= call.operands.size()) return false;
+            const auto actual_a = address_of(call.operands[a_argument]);
+            const auto actual_b = address_of(call.operands[b_argument]);
+            if (!actual_a || !actual_b) return false;
+            const __int128 a_sum = static_cast<__int128>(actual_a->offset) + a_offset;
+            const __int128 b_sum = static_cast<__int128>(actual_b->offset) + b_offset;
+            if (a_sum < INT64_MIN || a_sum > INT64_MAX || b_sum < INT64_MIN || b_sum > INT64_MAX)
+                return false;
+            if (!roots_disjoint(caller.function, actual_a->root, std::int64_t(a_sum), a_bytes,
+                                actual_b->root, std::int64_t(b_sum), b_bytes, depth + 1))
+                return false;
+        }
+        return true;
+    }
     bool prove(Location start, Address field, ir::ValueId loaded,
                std::optional<Location> selected_caller = {}, bool require_zero = false) {
         using State = std::tuple<std::size_t, std::size_t, std::size_t, ir::ValueId, std::int64_t>;
@@ -2131,7 +2193,7 @@ private:
                 if (!charge()) return false;
                 const auto& event = block.operations[i - 1];
                 if (event.opcode == ir::OpCode::kCall) {
-                    if (call_preserves_field(event, root, offset)) continue;
+                    if (call_preserves_field(f, event, root, offset)) continue;
                     const auto callee = event.attributes.find("callee");
                     error_ = "intervening call at " + event.location.str() + " (" +
                         (callee == event.attributes.end() ? "indirect" : callee->second) +
@@ -2162,7 +2224,25 @@ private:
                     // Distinct allocations, including an allocation and an
                     // incoming parameter, cannot denote the same object.
                     if (allocations_.contains(written->root) || allocations_.contains(root)) continue;
-                    error_ = "unresolved alias between record parameters";
+                    // Two record parameters: disjoint when every call site
+                    // passes disjoint objects. The write extent is the
+                    // stored value's width (a narrower PTX store is a
+                    // subset), or 8 bytes for an atomic.
+                    std::uint64_t write_bytes = 8;
+                    if (store && event.operands.size() >= 2) {
+                        const auto& value = event.operands[1];
+                        const bool scalar = value.type.kind == ir::TypeKind::kInteger ||
+                                            value.type.kind == ir::TypeKind::kFloat;
+                        // Unknown shapes get a wide extent: overestimating
+                        // only makes the proof more conservative.
+                        write_bytes = value.type.is_pointer() ? 8u
+                                      : scalar && value.type.bit_width >= 8 ? value.type.bit_width / 8
+                                                                            : 64u;
+                    }
+                    if (roots_disjoint(f, written->root, written->offset, write_bytes, root, offset, 8))
+                        continue;
+                    if (error_ != "proof budget exhausted")
+                        error_ = "unresolved alias between record parameters";
                     return false;
                 }
                 if (!store || event.operands.size() < 2) { error_ = "unsupported overlapping memory write"; return false; }

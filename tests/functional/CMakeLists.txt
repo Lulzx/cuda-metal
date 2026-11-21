@@ -3485,6 +3485,13 @@ if(APPLE)
     set_tests_properties(functional_ptx_driver_device_global
         PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
 
+    # #219: Rust-CUDA private globals in helpers, raw symbol address operands
+    # and integer-carried addresses, run on the GPU with exact references.
+    add_test(NAME functional_ptx_symbol_operands
+        COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_symbol_operands.py ${CMAKE_BINARY_DIR})
+    set_tests_properties(functional_ptx_symbol_operands
+        PROPERTIES TIMEOUT 180 SKIP_RETURN_CODE 77)
+
     add_test(NAME functional_ptx_commuted_pointer
         COMMAND python3 ${CMAKE_CURRENT_SOURCE_DIR}/run_ptx_commuted_pointer.py ${CMAKE_BINARY_DIR})
     set_tests_properties(functional_ptx_commuted_pointer PROPERTIES TIMEOUT 120)
