@@ -4421,6 +4421,34 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_cumetalc_device_only_kernel_warning
         PROPERTIES SKIP_RETURN_CODE 77)
 
+    # #225: pointers a kernel stored in device memory reach pinned host memory
+    # as host-usable pointers, and host-written pointers in pinned memory
+    # reach the device as GPU addresses, for synchronous, stream-ordered and
+    # driver-API copies, in both pointer modes.
+    add_test(
+        NAME functional_cumetalc_pinned_pointer_copies
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pinned_pointer_copies.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_pinned_pointer_copies
+                "--expect-output=PASS: embedded pointers survive pinned copies"
+    )
+    set_tests_properties(functional_cumetalc_pinned_pointer_copies
+        PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
+        NAME functional_cumetalc_pinned_pointer_copies_device_addresses
+        COMMAND ${CMAKE_COMMAND} -E env CUMETAL_USE_METAL_DEVICE_ADDRESSES=1
+                bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pinned_pointer_copies.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_pinned_pointer_copies_device_addresses
+                "--expect-output=PASS: embedded pointers survive pinned copies"
+    )
+    set_tests_properties(functional_cumetalc_pinned_pointer_copies_device_addresses
+        PROPERTIES SKIP_RETURN_CODE 77)
+
     # Shared memory past Metal's 32 KB threadgroup limit runs from the
     # kernel's spill variant: CUDA's 48 KB default, the 99 KB opt-in, static
     # shared above 32 KB, shared atomics and barriers in spilled memory, and

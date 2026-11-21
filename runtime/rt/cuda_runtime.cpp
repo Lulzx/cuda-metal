@@ -1420,9 +1420,12 @@ void relocate_embedded_device_pointers(
     relocate_embedded_device_pointers(bytes->data(), bytes->size(), resident_buffers);
 }
 
+bool use_metal_device_addresses();
+
 void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
     if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
+    const bool device_addresses = use_metal_device_addresses();
     if (state.allocations.pointer_relocation_is_identity(/*to_device=*/false)) {
         return;
     }
@@ -1436,6 +1439,13 @@ void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
         cumetal::rt::AllocationTable::ResolvedAllocation resolved;
         if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
             resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+            continue;
+        }
+        // Hand back the pointer the application was given: a device
+        // allocation's public pointer is its GPU address when
+        // CUMETAL_USE_METAL_DEVICE_ADDRESSES is set, which is what a kernel
+        // stored; pinned memory's public pointer is always its CPU mapping.
+        if (device_addresses && resolved.kind == cumetal::rt::AllocationKind::kDevice) {
             continue;
         }
         const std::uintptr_t host_base =
@@ -3643,6 +3653,36 @@ cudaError_t cudaFree(void* dev_ptr) {
     return fail(cudaSuccess);
 }
 
+}  // extern "C"
+
+namespace {
+
+// Device pointers stored in memory are GPU virtual addresses on the device
+// side and the application's public pointers on the host side. A copy that
+// moves bytes between the two sides rewrites them; which way is decided by
+// where the ends live, not by the cudaMemcpyKind: cudaMemcpyDefault between
+// pinned and device memory resolves to device-to-device, yet its pinned end
+// is read and written by the host (#225).
+enum class PointerFixup { kNone, kToDevice, kToHost };
+
+bool is_device_side_allocation(const void* ptr) {
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    return cumetal::rt::resolve_allocation_for_pointer(ptr, &resolved) &&
+           resolved.kind == cumetal::rt::AllocationKind::kDevice;
+}
+
+PointerFixup pointer_fixup_for_copy(const void* dst, const void* src) {
+    const bool dst_device = is_device_side_allocation(dst);
+    const bool src_device = is_device_side_allocation(src);
+    if (dst_device && !src_device) return PointerFixup::kToDevice;
+    if (!dst_device && src_device) return PointerFixup::kToHost;
+    return PointerFixup::kNone;
+}
+
+}  // namespace
+
+extern "C" {
+
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
     if ((dst == nullptr || src == nullptr) && count > 0) {
         return fail(cudaErrorInvalidValue);
@@ -3674,9 +3714,10 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
         // in the destination after a single copy; the caller's source is
         // never modified.
         std::memmove(host_dst, host_src, count);
-        if (resolved_kind == cudaMemcpyHostToDevice) {
+        const PointerFixup fixup = pointer_fixup_for_copy(dst, src);
+        if (fixup == PointerFixup::kToDevice) {
             relocate_embedded_device_pointers(static_cast<std::uint8_t*>(host_dst), count);
-        } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+        } else if (fixup == PointerFixup::kToHost) {
             restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
         }
     }
@@ -3731,9 +3772,15 @@ cudaError_t cudaMemcpyAsync(void* dst,
     // one device buffer to another between two kernels; it was 77% of a PDLP
     // iteration on datt256. It stays for the cases the blit cannot serve, which
     // is pageable host memory on either end.
+    //
+    // A blit copies bytes verbatim, so it serves only copies whose embedded
+    // pointers need no rewriting: both ends on the same side. Pinned host
+    // memory <-> device memory takes the host path, which rewrites them.
+    const PointerFixup fixup = count > 0 ? pointer_fixup_for_copy(dst, src) : PointerFixup::kNone;
     cumetal::rt::AllocationTable::ResolvedAllocation dst_alloc;
     cumetal::rt::AllocationTable::ResolvedAllocation src_alloc;
-    if (count > 0 && resolve_allocation_for_pointer(dst, &dst_alloc) &&
+    if (count > 0 && fixup == PointerFixup::kNone &&
+        resolve_allocation_for_pointer(dst, &dst_alloc) &&
         resolve_allocation_for_pointer(src, &src_alloc) &&
         dst_alloc.buffer != nullptr && src_alloc.buffer != nullptr &&
         dst_alloc.remaining_size >= count && src_alloc.remaining_size >= count) {
@@ -3764,7 +3811,7 @@ cudaError_t cudaMemcpyAsync(void* dst,
     // Uninitialized storage: a zero-filled vector cost as much as the copy
     // itself in unoptimized builds.
     std::shared_ptr<std::uint8_t[]> staged_h2d;
-    if (count > 0 && resolved_kind == cudaMemcpyHostToDevice) {
+    if (count > 0 && fixup == PointerFixup::kToDevice) {
         staged_h2d.reset(new std::uint8_t[count]);
         std::memcpy(staged_h2d.get(), host_src, count);
         relocate_embedded_device_pointers(staged_h2d.get(), count);
@@ -3775,11 +3822,11 @@ cudaError_t cudaMemcpyAsync(void* dst,
     const bool complete_before_return = count > 0 && is_pageable_host_memory(dst);
     const cudaError_t enqueue_status = enqueue_stream_host_op_pageable(
         stream, complete_before_return,
-        [host_dst, host_src, count, resolved_kind, staged_h2d]() {
+        [host_dst, host_src, count, fixup, staged_h2d]() {
             if (count == 0) return;
             if (staged_h2d != nullptr) {
                 std::memcpy(host_dst, staged_h2d.get(), count);
-            } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+            } else if (fixup == PointerFixup::kToHost) {
                 std::memmove(host_dst, host_src, count);
                 restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
             } else {
