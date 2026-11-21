@@ -1,6 +1,7 @@
 #include "registration.h"
 
 #include "cumetal/air_emitter/emitter.h"
+#include "cumetal/common/metal_support_path.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal_diag.h"
 #include "cumetal/ptx/lower_to_metal.h"
@@ -1432,13 +1433,11 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& module_ptx_source,
         }
         if (typed_msl_needs_fp64_support) {
             emit_options.precise_textual_include_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-                "metal" / "support" / "cumetal_fp64_inline_support.metal");
+                cumetal::common::metal_support_path("cumetal_fp64_inline_support.metal", CUMETAL_SOURCE_DIR));
         }
         if (typed_msl_needs_libdevice_support) {
             emit_options.textual_include_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-                "metal" / "support" / "cumetal_libdevice_support.metal");
+                cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR));
         }
     } else {
         REG_DEBUG("using LLVM IR lowering path for '%s'", kernel_name.c_str());
@@ -1486,14 +1485,12 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& module_ptx_source,
                  lower_options.fp64_mode)) ||
             lowered.llvm_ir.find("vf64_") != std::string::npos) {
             emit_options.precise_link_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-                "metal" / "support" / "cumetal_fp64_support.metal"
+                cumetal::common::metal_support_path("cumetal_fp64_support.metal", CUMETAL_SOURCE_DIR)
             );
         }
         if (lowered.llvm_ir.find("cm_libdevice_") != std::string::npos) {
             emit_options.additional_link_inputs.push_back(
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-                "metal" / "support" / "cumetal_libdevice_support.metal"
+                cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR)
             );
         }
     }

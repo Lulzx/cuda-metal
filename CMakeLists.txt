@@ -10,6 +10,15 @@ set(CMAKE_OBJCXX_STANDARD_REQUIRED ON)
 
 option(CUMETAL_BUILD_TESTS "Build test targets" ON)
 
+# Homebrew's LLVMSupport exports libz3 as a link dependency (LLVM is built
+# with Z3 for an optional SMT solver CuMetal never calls). Without dead
+# stripping, every binary that links LLVM records a load command for libz3, so
+# an installed cumetalc or runtime dylib aborts in dyld on a machine where z3
+# is absent. Drop dylibs whose symbols are never referenced.
+if(APPLE)
+    add_link_options(LINKER:-dead_strip_dylibs)
+endif()
+
 # Clang launches ptxas/fatbinary directly while compiling CUDA source. Native
 # shims avoid macOS provenance policy killing interpreter scripts when they are
 # spawned as compiler subprocesses.
@@ -814,127 +823,21 @@ if(APPLE)
     endif()
 endif()
 
-install(FILES
-    runtime/api/cumetal_native.h
-    runtime/api/cublas_v2.h
-    runtime/api/cuda.h
-    runtime/api/cuda_fp16.h
-    runtime/api/cumetal_float16_convert.h
-    runtime/api/cuda_runtime.h
-    runtime/api/cuda_runtime_api.h
-    runtime/api/cufft.h
-    runtime/api/cufftXt.h
-    runtime/api/curand.h
-    runtime/api/cusparse.h
-    runtime/api/cusolver_common.h
-    runtime/api/cusolverDn.h
-    runtime/api/cusolverSp.h
-    runtime/api/cublasLt.h
-    runtime/api/cudnn.h
-    runtime/api/nvml.h
-    runtime/api/nccl.h
-    runtime/api/nvrtc.h
-    runtime/api/nvPTXCompiler.h
-    runtime/api/cooperative_groups.h
-    runtime/api/cuComplex.h
-    runtime/api/device_launch_parameters.h
-    runtime/api/driver_types.h
-    runtime/api/library_types.h
-    runtime/api/channel_descriptor.h
-    runtime/api/device_atomic_functions.h
-    runtime/api/math_functions.h
-    runtime/api/cuda_profiler_api.h
-    runtime/api/cuda_occupancy.h
-    runtime/api/nvToolsExt.h
-    runtime/api/sm_20_intrinsics.h
-    runtime/api/sm_30_intrinsics.h
-    runtime/api/sm_60_intrinsics.h
-    runtime/api/sm_70_intrinsics.h
-    runtime/api/sm_80_intrinsics.h
-    runtime/api/cublas_api.h
-    runtime/api/cuda_pipeline.h
-    runtime/api/cuda_device_runtime_api.h
-    runtime/api/curand_kernel.h
-    runtime/api/cusparse_v2.h
+# Install every clean-room CUDA header. A hand-maintained list fell behind the
+# tree (cuda_bf16.h, vector_types.h, math_constants.h, mma.h, cuda/std/... were
+# all missing), so installed cumetalc refused programs the build tree accepted.
+install(DIRECTORY runtime/api/
     DESTINATION include
 )
 
-install(FILES
-    runtime/api/nvtx3/nvToolsExt.h
-    DESTINATION include/nvtx3
+# Metal sources cumetalc and the runtime compile alongside generated MSL
+# (software FP64, libdevice). They include VF64 by relative path, so both trees
+# keep their source-relative layout under share/cumetal/metal.
+install(DIRECTORY compiler/metal/support/
+    DESTINATION share/cumetal/metal/compiler/metal/support
+    FILES_MATCHING PATTERN "*.metal"
 )
-
-install(FILES
-    runtime/api/cooperative_groups/reduce.h
-    DESTINATION include/cooperative_groups
-)
-
-install(FILES
-    runtime/api/thrust/thrust.h
-    runtime/api/thrust/device_ptr.h
-    runtime/api/thrust/device_vector.h
-    runtime/api/thrust/host_vector.h
-    runtime/api/thrust/sort.h
-    runtime/api/thrust/reduce.h
-    runtime/api/thrust/scan.h
-    runtime/api/thrust/transform.h
-    runtime/api/thrust/functional.h
-    runtime/api/thrust/unique.h
-    runtime/api/thrust/pair.h
-    runtime/api/thrust/execution_policy.h
-    DESTINATION include/thrust
-)
-
-install(FILES
-    runtime/api/thrust/iterator/counting_iterator.h
-    runtime/api/thrust/iterator/zip_iterator.h
-    runtime/api/thrust/iterator/transform_iterator.h
-    runtime/api/thrust/iterator/constant_iterator.h
-    runtime/api/thrust/iterator/discard_iterator.h
-    runtime/api/thrust/iterator/permutation_iterator.h
-    DESTINATION include/thrust/iterator
-)
-
-install(FILES
-    runtime/api/thrust/system/cuda/vector.h
-    runtime/api/thrust/system/cuda/execution_policy.h
-    DESTINATION include/thrust/system/cuda
-)
-
-install(FILES
-    runtime/api/thrust/system/cuda/detail/par.h
-    DESTINATION include/thrust/system/cuda/detail
-)
-
-install(FILES
-    runtime/api/cub/cub.h
-    DESTINATION include/cub
-)
-
-install(FILES
-    runtime/api/cub/block/block_reduce.h
-    runtime/api/cub/block/block_scan.h
-    runtime/api/cub/block/block_scan.cuh
-    runtime/api/cub/block/block_exchange.h
-    runtime/api/cub/block/block_load.h
-    runtime/api/cub/block/block_store.h
-    DESTINATION include/cub/block
-)
-
-install(FILES
-    runtime/api/cub/warp/warp_reduce.h
-    runtime/api/cub/warp/warp_scan.h
-    DESTINATION include/cub/warp
-)
-
-install(FILES
-    runtime/api/cub/device/device_reduce.h
-    runtime/api/cub/device/device_scan.h
-    runtime/api/cub/device/device_radix_sort.h
-    runtime/api/cub/device/device_select.h
-    runtime/api/cub/device/device_histogram.h
-    runtime/api/cub/device/device_run_length_encode.h
-    runtime/api/cub/device/device_partition.h
-    runtime/api/cub/device/device_merge_sort.h
-    DESTINATION include/cub/device
+install(DIRECTORY third_party/VF64-metal/Sources/VF64Metal/Shaders/
+    DESTINATION share/cumetal/metal/third_party/VF64-metal/Sources/VF64Metal/Shaders
+    FILES_MATCHING PATTERN "*.metal" PATTERN "*.h"
 )

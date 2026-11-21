@@ -615,6 +615,18 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         result.logs.push_back(cmd.output);
         if (!cmd.started || cmd.exit_code != 0) {
             result.error = "failed to compile .metal to .air with xcrun metal";
+            // Keep the first of Apple's diagnostics: without them the only
+            // clue is a temporary file that has already been removed.
+            constexpr std::size_t kMaxDiagnosticBytes = 2048;
+            std::string diagnostics = cmd.output.substr(0, kMaxDiagnosticBytes);
+            while (!diagnostics.empty() &&
+                   std::isspace(static_cast<unsigned char>(diagnostics.back())) != 0) {
+                diagnostics.pop_back();
+            }
+            if (!diagnostics.empty()) {
+                result.error += ":\n" + diagnostics;
+                if (cmd.output.size() > kMaxDiagnosticBytes) result.error += "\n...";
+            }
             std::filesystem::remove_all(temp_dir);
             return result;
         }

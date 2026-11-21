@@ -1,4 +1,5 @@
 #include "cumetal/air_emitter/emitter.h"
+#include "cumetal/common/metal_support_path.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal/ir/ir.h"
 #include "cumetal/ir/nvvm_importer.h"
@@ -1443,13 +1444,11 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     if (metal_text.find("cm_fp64_") != std::string::npos ||
         metal_text.find("vf64_") != std::string::npos) {
         emit.precise_textual_include_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_fp64_inline_support.metal");
+            cumetal::common::metal_support_path("cumetal_fp64_inline_support.metal", CUMETAL_SOURCE_DIR));
     }
     if (metal_text.find("cm_libdevice_") != std::string::npos) {
         emit.textual_include_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_libdevice_support.metal");
+            cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR));
     }
     const auto emitted = cumetal::air_emitter::emit_metallib(emit);
     if (!emitted.ok) {
@@ -2831,17 +2830,15 @@ int main(int argc, char** argv) {
         auto& support_inputs = typed_msl ? options.precise_textual_include_inputs
                                          : options.precise_link_inputs;
         support_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / (typed_msl ? "cumetal_fp64_inline_support.metal"
-                                     : "cumetal_fp64_support.metal"));
+            cumetal::common::metal_support_path((typed_msl ? "cumetal_fp64_inline_support.metal"
+                                     : "cumetal_fp64_support.metal"), CUMETAL_SOURCE_DIR));
     }
     if (needs_libdevice_support) {
         const bool typed_msl = options.input.extension() == ".metal";
         auto& support_inputs = typed_msl ? options.textual_include_inputs
                                          : options.additional_link_inputs;
         support_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" / "metal" /
-            "support" / "cumetal_libdevice_support.metal");
+            cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR));
     }
     // --use_fast_math and -fmad apply to metallib output exactly as they do
     // to linked executables.

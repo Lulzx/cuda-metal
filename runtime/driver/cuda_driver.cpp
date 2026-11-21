@@ -1,6 +1,7 @@
 #include "cuda.h"
 
 #include "cumetal/air_emitter/emitter.h"
+#include "cumetal/common/metal_support_path.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 #include "cumetal/ptx/lower_to_metal.h"
@@ -825,14 +826,12 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
          cumetal::ptx::fp64_mode_links_vf64_support(lower_opts.fp64_mode)) ||
         lowered.llvm_ir.find("vf64_") != std::string::npos) {
         emit_options.precise_link_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-            "metal" / "support" / "cumetal_fp64_support.metal"
+            cumetal::common::metal_support_path("cumetal_fp64_support.metal", CUMETAL_SOURCE_DIR)
         );
     }
     if (lowered.llvm_ir.find("cm_libdevice_") != std::string::npos) {
         emit_options.additional_link_inputs.push_back(
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "compiler" /
-            "metal" / "support" / "cumetal_libdevice_support.metal"
+            cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR)
         );
     }
 

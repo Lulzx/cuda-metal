@@ -4521,6 +4521,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 ${CMAKE_BINARY_DIR}
                 ${CMAKE_SOURCE_DIR}/samples/vectorAdd/vectorAdd.cu
                 ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                ${CMAKE_CURRENT_SOURCE_DIR}/installed_fp64_bf16.cu
     )
     set_tests_properties(
         functional_installed_cumetalc_link_executable
