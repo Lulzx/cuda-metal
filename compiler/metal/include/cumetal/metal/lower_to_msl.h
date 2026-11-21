@@ -9,6 +9,13 @@
 
 namespace cumetal::metal {
 
+// Builtin callees for CTA-wide barrier reductions (__syncthreads_or/_and/
+// _count, PTX bar.red.{or,and}.pred and bar.red.popc.u32). Each is a full
+// threadgroup barrier backed by threadgroup scratch.
+inline bool is_cta_reduction_callee(std::string_view callee) {
+    return callee == "cm_cta_any" || callee == "cm_cta_all" || callee == "cm_cta_count";
+}
+
 struct MetalLegalizeResult {
     bool ok = false;
     ir::Module module;

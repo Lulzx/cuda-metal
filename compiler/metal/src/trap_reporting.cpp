@@ -1,6 +1,7 @@
 #include "trap_reporting.h"
 
 #include "cumetal/ir/call_write_effects.h"
+#include "cumetal/metal/lower_to_msl.h"
 
 #include <algorithm>
 #include <unordered_map>
@@ -213,7 +214,7 @@ bool analyze_trap_call_graph(const ir::Module& module, TrapCallGraph* graph,
                 // CTA votes are barrier-backed and block-scoped like
                 // bar.sync. A grid barrier spins on lanes that may have left,
                 // so it stays unsupported below.
-                if (callee->second == "cm_cta_any" || callee->second == "cm_cta_count") {
+                if (cumetal::metal::is_cta_reduction_callee(callee->second)) {
                     synchronizing.emplace(function->name, operation.location.str());
                     continue;
                 }

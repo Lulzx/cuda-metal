@@ -137,7 +137,16 @@ ret;
     const auto cta_result = metal::compile_ptx_to_msl(cta_reduce);
     ok &= expect(cta_result.ok && cta_result.source.find("cm_cta_any") != std::string::npos,
                  "CTA reduction defines its predicate result: " + cta_result.error);
-    for (const auto& replacement : {"bar.red.and.pred %p2,0,%p1;", "bar.red.or.pred %p2,1,%p1;",
+    {
+        auto all = cta_reduce;
+        const std::string original = "bar.red.or.pred %p2,0,%p1;";
+        all.replace(all.find(original), original.size(), "bar.red.and.pred %p2,0,%p1;");
+        const auto all_result = metal::compile_ptx_to_msl(all);
+        ok &= expect(all_result.ok && all_result.source.find("cm_cta_all(") != std::string::npos &&
+                         all_result.source.find("atomic_fetch_and_explicit") != std::string::npos,
+                     "CTA and-reduction lowers to an and-folding helper: " + all_result.error);
+    }
+    for (const auto& replacement : {"bar.red.or.pred %p2,1,%p1;",
                                     "bar.red.or.pred %p2,0,32,%p1;", "@%p1 bar.red.or.pred %p2,0,%p1;"}) {
         auto invalid = cta_reduce;
         const std::string original = "bar.red.or.pred %p2,0,%p1;";

@@ -952,12 +952,56 @@ MslFunction make_indirect_dispatcher(const std::string& name,
     return dispatcher;
 }
 
-MslFunction make_cta_any_helper(bool count = false) {
+// __fadd_rn/__fsub_rn/__fmul_rn (PTX add/sub/mul.rn.f32): one IEEE operation
+// that Metal's -ffp-contract=fast must not fuse with a neighbour. The body is
+// compiled under `#pragma METAL fp contract(off)`, so the AIR instruction has
+// no `contract` flag and stays separate after inlining.
+bool is_uncontracted_f32_op(const ir::Operation& operation) {
+    return (operation.opcode == ir::OpCode::kAdd || operation.opcode == ir::OpCode::kSub ||
+            operation.opcode == ir::OpCode::kMul) &&
+           operation.attributes.contains("fp_contract") &&
+           operation.attributes.at("fp_contract") == "off" &&
+           !operation.attributes.contains("fp64_mode") &&
+           operation.result_types.size() == 1 &&
+           operation.result_types.front().kind == ir::TypeKind::kFloat &&
+           operation.result_types.front().bit_width == 32 &&
+           operation.result_types.front().is_scalar();
+}
+
+std::string uncontracted_f32_helper_name(ir::OpCode opcode) {
+    return opcode == ir::OpCode::kAdd ? "cm_fadd_rn"
+         : opcode == ir::OpCode::kSub ? "cm_fsub_rn"
+                                      : "cm_fmul_rn";
+}
+
+MslFunction make_uncontracted_f32_helper(ir::OpCode opcode) {
+    const MslType f32 = MslType::floating(32);
+    MslFunction helper;
+    helper.name = uncontracted_f32_helper_name(opcode);
+    helper.return_type = f32;
+    helper.parameters = {{.type = f32, .name = "a"}, {.type = f32, .name = "b"}};
+    helper.fp_contract_off = true;
+    helper.internal_linkage = true;
+    helper.statements.push_back(MslStatement::return_statement(MslExpression::binary(
+        opcode == ir::OpCode::kAdd ? "+" : opcode == ir::OpCode::kSub ? "-" : "*",
+        MslExpression::identifier("a", f32), MslExpression::identifier("b", f32), f32)));
+    return helper;
+}
+
+enum class CtaReduction { kAny, kAll, kCount };
+
+// One CTA-wide barrier reduction. The leader seeds the threadgroup word with
+// the operation's identity (0 for or/popc, 1 for and), every thread folds its
+// predicate in between two barriers, and a third barrier keeps the next
+// reduction's seed from overwriting a value another thread has yet to read.
+MslFunction make_cta_reduction_helper(CtaReduction kind) {
+    const bool count = kind == CtaReduction::kCount;
     const auto pointer = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
     const auto uint3 = MslType::vector(MslType::uint(), 3);
     const auto scratch = MslExpression::identifier("scratch", pointer);
     const auto position = MslExpression::identifier("position", uint3);
     const auto zero = MslExpression::literal("0u", MslType::uint());
+    const auto seed = kind == CtaReduction::kAll ? MslExpression::literal("1u", MslType::uint()) : zero;
     const auto order = MslExpression::identifier("memory_order_relaxed", memory_order_type());
     const auto component = [&](const char* name) { return MslExpression::member(position, name, MslType::uint()); };
     const auto leader = MslExpression::binary("==", MslExpression::binary("|",
@@ -966,15 +1010,21 @@ MslFunction make_cta_any_helper(bool count = false) {
     const auto barrier = [] { return MslStatement::expression(MslExpression::call(
         "threadgroup_barrier", {MslExpression::literal("mem_flags::mem_threadgroup | mem_flags::mem_device", MslType::uint())}, MslType::void_type())); };
     MslFunction helper;
-    helper.name = count ? "cm_cta_count" : "cm_cta_any";
+    helper.name = kind == CtaReduction::kCount ? "cm_cta_count"
+                : kind == CtaReduction::kAll   ? "cm_cta_all"
+                                               : "cm_cta_any";
     const auto result_type = count ? MslType::uint() : MslType::boolean();
     helper.return_type = result_type;
+    helper.internal_linkage = true;
     helper.parameters = {{.type=MslType::boolean(), .name="predicate"},
         {.type=pointer, .name="scratch"}, {.type=uint3, .name="position"}};
     helper.statements.push_back(MslStatement::if_statement(leader, {
-        MslStatement::expression(MslExpression::call("atomic_store_explicit", {scratch, zero, order}, MslType::void_type()))}));
+        MslStatement::expression(MslExpression::call("atomic_store_explicit", {scratch, seed, order}, MslType::void_type()))}));
     helper.statements.push_back(barrier());
-    helper.statements.push_back(MslStatement::expression(MslExpression::call(count ? "atomic_fetch_add_explicit" : "atomic_fetch_or_explicit",
+    const char* fold = kind == CtaReduction::kCount ? "atomic_fetch_add_explicit"
+                     : kind == CtaReduction::kAll   ? "atomic_fetch_and_explicit"
+                                                    : "atomic_fetch_or_explicit";
+    helper.statements.push_back(MslStatement::expression(MslExpression::call(fold,
         {scratch, MslExpression::cast(MslType::uint(), MslExpression::identifier("predicate", MslType::boolean())), order}, MslType::uint())));
     helper.statements.push_back(barrier());
     const auto loaded = MslExpression::call("atomic_load_explicit", {scratch, order}, MslType::uint());
@@ -3111,7 +3161,7 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
                         callee->second == "cm_device_clock") {
                         direct.device_clock = true;
                     }
-                    if (callee != operation.attributes.end() && (callee->second == "cm_cta_any" || callee->second == "cm_cta_count")) {
+                    if (callee != operation.attributes.end() && cumetal::metal::is_cta_reduction_callee(callee->second)) {
                         direct.cta_any = true;
                         direct.thread_position = true;
                     }
@@ -3206,7 +3256,7 @@ BarrierUsageMap analyze_barrier_usage(const ir::Module& module) {
             for (const ir::Operation& operation : block.operations) {
                 direct = direct || operation.opcode == ir::OpCode::kMetalBarrier ||
                     (operation.opcode == ir::OpCode::kCall && operation.attributes.contains("callee") &&
-                     (operation.attributes.at("callee") == "cm_cta_any" || operation.attributes.at("callee") == "cm_cta_count"));
+                     cumetal::metal::is_cta_reduction_callee(operation.attributes.at("callee")));
             }
         }
         usage[function.name] = direct;
@@ -3804,6 +3854,12 @@ struct AstLowerer {
                 return declare_result(
                     operation, MslExpression::call(
                                    callee, {left, right}, expression_type));
+            }
+            if (is_uncontracted_f32_op(operation)) {
+                return declare_result(
+                    operation, MslExpression::call(
+                                   uncontracted_f32_helper_name(operation.opcode),
+                                   {left, right}, expression_type));
             }
             if (operation.attributes.contains("signed") &&
                 operation.attributes.at("signed") == "true" &&
@@ -4684,14 +4740,28 @@ struct AstLowerer {
                         ? tick
                         : MslExpression::cast(return_type, tick));
             }
-            if ((callee->second == "cm_cta_any" || callee->second == "cm_cta_count")) {
+            if (cumetal::metal::is_cta_reduction_callee(callee->second)) {
                 const auto scratch_type = MslType::pointer(atomic_uint_type(), MslAddressSpace::kThreadgroup);
-                return declare_result(operation, MslExpression::call(callee->second,
-                    {expression_for(operation.operands.front()),
+                if (operation.operands.size() != 1 || operation.results.size() != 1) {
+                    fail(&operation, "malformed CTA barrier reduction");
+                    return std::nullopt;
+                }
+                // NVVM's barrier0.{popc,and,or} take and return int; the
+                // helpers take a predicate and return bool or uint.
+                MslExpr predicate = expression_for(operation.operands.front());
+                if (!(predicate->type == MslType::boolean()))
+                    predicate = MslExpression::binary("!=", predicate,
+                        MslExpression::literal("0", predicate->type), MslType::boolean());
+                const MslType helper_type =
+                    callee->second == "cm_cta_count" ? MslType::uint() : MslType::boolean();
+                MslExpr reduced = MslExpression::call(callee->second,
+                    {predicate,
                      MslExpression::cast(scratch_type, MslExpression::identifier("cm_cta_scratch",
                          MslType::pointer(MslType::uint(8), MslAddressSpace::kThreadgroup)), true),
                      MslExpression::identifier("cm_thread_position", MslType::vector(MslType::uint(),3))},
-                    callee->second == "cm_cta_count" ? MslType::uint() : MslType::boolean()));
+                    helper_type);
+                if (!(return_type == helper_type)) reduced = MslExpression::cast(return_type, reduced);
+                return declare_result(operation, reduced);
             }
             if (callee->second == "cm_grid_sync") {
                 return MslStatement::expression(MslExpression::call(
@@ -5851,11 +5921,26 @@ struct AstLowerer {
                             ">>", control,
                             MslExpression::literal("8u", uint_type), uint_type),
                         five_bits, uint_type);
+                    // PTX ISA, shfl.sync:
+                    //   maxLane = (lane & segmask) | (cval & ~segmask)
+                    //   minLane = (lane & segmask)
+                    //   up:   j = lane - b;            valid = j >= maxLane
+                    //   down: j = lane + b;            valid = j <= maxLane
+                    //   bfly: j = lane ^ b;            valid = j <= maxLane
+                    //   idx:  j = minLane | (b & ~segmask); valid = j <= maxLane
+                    // cval must be masked by ~segmask: CUDA encodes width w as
+                    // ((32 - w) << 8) | 0x1f, and without the mask maxLane is
+                    // always 31, so down/bfly would read past the segment end.
                     const MslExpr minimum_lane = MslExpression::binary(
                         "&", lane, segment_mask, uint_type);
                     const MslExpr maximum_lane = MslExpression::binary(
                         "|", minimum_lane,
-                        MslExpression::binary("&", control, five_bits, uint_type),
+                        MslExpression::binary(
+                            "&",
+                            MslExpression::binary("&", control, five_bits, uint_type),
+                            MslExpression::binary(
+                                "^", segment_mask, five_bits, uint_type),
+                            uint_type),
                         uint_type);
                     MslExpr requested_lane;
                     MslExpr valid_lane;
@@ -5879,22 +5964,19 @@ struct AstLowerer {
                     } else if (kind == "up") {
                         requested_lane = MslExpression::binary(
                             "-", lane, source_or_delta, uint_type);
+                        // j >= maxLane without the unsigned wrap of lane - b.
                         valid_lane = MslExpression::binary(
                             ">=", lane,
                             MslExpression::binary(
-                                "+", minimum_lane, source_or_delta, uint_type),
+                                "+", maximum_lane, source_or_delta, uint_type),
                             MslType::boolean());
                     } else {
+                        // A butterfly partner in an earlier segment is
+                        // readable; only one past the segment end is not.
                         requested_lane = MslExpression::binary(
                             "^", lane, source_or_delta, uint_type);
                         valid_lane = MslExpression::binary(
-                            "&&",
-                            MslExpression::binary(
-                                ">=", requested_lane, minimum_lane,
-                                MslType::boolean()),
-                            MslExpression::binary(
-                                "<=", requested_lane, maximum_lane,
-                                MslType::boolean()),
+                            "<=", requested_lane, maximum_lane,
                             MslType::boolean());
                     }
                     // `shfl.sync.down.b32 r0|p, ...`: p reports whether the
@@ -7051,7 +7133,7 @@ struct AstLowerer {
                    operation.opcode == ir::OpCode::kBarrier ||
                    (operation.opcode == ir::OpCode::kCall &&
                     callee != operation.attributes.end() &&
-                    (callee->second == "cm_cta_any" || callee->second == "cm_cta_count"));
+                    cumetal::metal::is_cta_reduction_callee(callee->second));
         };
         for (std::size_t block = 0; block < count; ++block) {
             const auto& operations = function.blocks[block].operations;
@@ -7179,7 +7261,7 @@ struct AstLowerer {
                     operation.opcode == ir::OpCode::kBarrier ||
                     (operation.opcode == ir::OpCode::kCall &&
                      callee != operation.attributes.end() &&
-                     (callee->second == "cm_cta_any" || callee->second == "cm_cta_count"))) {
+                     cumetal::metal::is_cta_reduction_callee(callee->second))) {
                     return false;
                 }
             }
@@ -7680,7 +7762,7 @@ struct AstLowerer {
                     const auto callee = op.attributes.find("callee");
                     if (op.opcode == ir::OpCode::kMetalBarrier ||
                         (op.opcode == ir::OpCode::kCall && callee != op.attributes.end() &&
-                         (callee->second == "cm_cta_any" || callee->second == "cm_cta_count" ||
+                         (cumetal::metal::is_cta_reduction_callee(callee->second) ||
                           (barriers.contains(callee->second) && barriers.at(callee->second)))))
                         return fail(&terminator, "general natural loop header paths do not reconverge in-loop before synchronization");
                 }
@@ -9494,6 +9576,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     bool needs_threadgroup_float_add = false;
     bool needs_warp_aggregated_device = false;
     bool needs_warp_aggregated_threadgroup = false;
+    std::set<ir::OpCode> uncontracted_f32_ops;
     std::unordered_set<std::string> warp_aggregated_minmax_helpers;
     std::unordered_set<std::string> wide_atomic_helpers;
     std::vector<MslFunction> wide_atomic_helper_functions;
@@ -9501,6 +9584,7 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         for (const ir::BasicBlock& block : function.blocks) {
             for (const ir::Operation& operation : block.operations) {
                 needs_fp64_support |= operation.attributes.contains("fp64_mode");
+                if (is_uncontracted_f32_op(operation)) uncontracted_f32_ops.insert(operation.opcode);
                 const bool f64_add = is_lock_backed_f64_add(operation);
                 needs_fp64_support |= f64_add;
                 if (f64_add || (operation.opcode == ir::OpCode::kMetalAtomic &&
@@ -9628,9 +9712,12 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
         [](const auto& item) { return item.second.grid_barrier; });
     if (std::any_of(builtin_usage.begin(), builtin_usage.end(),
             [](const auto& item) { return item.second.cta_any; })) {
-        result.ast.functions.push_back(make_cta_any_helper());
-        result.ast.functions.push_back(make_cta_any_helper(true));
+        result.ast.functions.push_back(make_cta_reduction_helper(CtaReduction::kAny));
+        result.ast.functions.push_back(make_cta_reduction_helper(CtaReduction::kAll));
+        result.ast.functions.push_back(make_cta_reduction_helper(CtaReduction::kCount));
     }
+    for (const ir::OpCode opcode : uncontracted_f32_ops)
+        result.ast.functions.push_back(make_uncontracted_f32_helper(opcode));
     if (needs_device_clock) result.ast.functions.push_back(make_device_clock_helper());
     if (needs_grid_barrier) result.ast.functions.push_back(make_grid_sync_helper());
     const bool needs_device_heap = std::any_of(

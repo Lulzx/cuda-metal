@@ -36,6 +36,34 @@ EOF
   rg "define void @${case_name}" "$ll_file" >/dev/null
 }
 
+# A case the legacy backend must refuse with a diagnostic instead of lowering.
+run_reject_case() {
+  local case_name="$1"
+  local body="$2"
+  local ptx_file="$OUT_DIR/${case_name}.ptx"
+  local ll_file="$OUT_DIR/${case_name}.ll"
+
+  cat >"$ptx_file" <<EOF
+.version 8.0
+.target sm_90
+.address_size 64
+.visible .entry ${case_name}(
+  .param .u64 p0,
+  .param .u64 p1
+)
+{
+  ${body}
+  ret;
+}
+EOF
+
+  if "$PTX2LLVM" --input "$ptx_file" --output "$ll_file" --entry "$case_name" \
+      --strict --overwrite >/dev/null 2>&1; then
+    echo "expected legacy lowering of ${case_name} to fail" >&2
+    return 1
+  fi
+}
+
 run_case "sweep_add_s32" "add.s32 %r1, %r2, %r3;"
 run_case "sweep_sub_s32" "sub.s32 %r1, %r2, %r3;"
 run_case "sweep_mul_lo_s32" "mul.lo.s32 %r1, %r2, %r3;"
@@ -345,11 +373,12 @@ run_case "sweep_exit"               "exit;"
 # Conservative: full threadgroup barrier
 run_case "sweep_bar_arrive"         "bar.arrive 0, %r1;"
 
-# bar.red: barrier-level predicate reductions (sync + reduce at named barrier)
-# Conservative: map to simdgroup-level operations (spec §9.7, barrier instructions)
-run_case "sweep_bar_red_and"        "bar.red.and.pred %p1, 0, %r1, %p2;"
-run_case "sweep_bar_red_or"         "bar.red.or.pred  %p1, 0, %r1, %p2;"
-run_case "sweep_bar_red_popc"       "bar.red.popc.u32 %r1, 0, %r2, %p1;"
+# bar.red: CTA-wide predicate reductions. The typed backend implements them
+# with threadgroup scratch; the legacy LLVM backend refuses rather than
+# writing a constant result (it used to return 0 from __syncthreads_count).
+run_reject_case "sweep_bar_red_and"  "bar.red.and.pred %p1, 0, %p2;"
+run_reject_case "sweep_bar_red_or"   "bar.red.or.pred  %p1, 0, %p2;"
+run_reject_case "sweep_bar_red_popc" "bar.red.popc.u32 %r1, 0, %p1;"
 
 # prefetch / prefetchu: cache prefetch hints → no-op on UMA (spec §8, __ldg() note)
 run_case "sweep_prefetch_global_L1" "prefetch.global.L1 [%rd1];"

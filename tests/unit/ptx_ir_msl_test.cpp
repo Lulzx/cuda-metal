@@ -4748,6 +4748,23 @@ ret;
 )ptx");
     ok &= expect(captured_pointer_spill.ok,
                  "captured address with global conversion retains type through spill: " + captured_pointer_spill.error);
+    {
+        // PTX ISA: add/sub/mul with an explicit .rn are never fused into an
+        // FMA (nvcc's __fadd_rn/__fmul_rn); unadorned add/mul.f32 may be.
+        std::string explicit_rn = kVectorAddPtx;
+        const std::string plain_add = "add.f32 %f3, %f1, %f2;";
+        explicit_rn.replace(explicit_rn.find(plain_add), plain_add.size(),
+                            "mul.rn.f32 %f3, %f1, %f2;\n    add.rn.f32 %f3, %f3, %f2;");
+        const auto rounded = metal::compile_ptx_to_msl(explicit_rn);
+        ok &= expect(rounded.ok && rounded.source.find("cm_fmul_rn(") != std::string::npos &&
+                         rounded.source.find("cm_fadd_rn(") != std::string::npos &&
+                         rounded.source.find("#pragma METAL fp contract(off)") != std::string::npos,
+                     "explicit .rn float add/mul lower to uncontracted helpers: " + rounded.error);
+        const auto plain = metal::compile_ptx_to_msl(kVectorAddPtx);
+        ok &= expect(plain.ok && plain.source.find("cm_fadd_rn") == std::string::npos &&
+                         plain.source.find("#pragma METAL fp contract") == std::string::npos,
+                     "unadorned add.f32 stays contractable");
+    }
     if (!ok) return 1;
     std::cout << "PTX -> CuMetal IR -> typed MSL tests passed\n";
     return 0;

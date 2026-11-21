@@ -985,8 +985,9 @@ $L_done:
                     contains(masked_vote_lowered.llvm_ir,
                              "call i32 @air.simd_shuffle_xor.u.i32") &&
                     count_occurrences(masked_vote_lowered.llvm_ir,
-                                      " = trunc i32 1 to i16") == 3,
-                "directional AIR shuffles receive the PTX delta or XOR mask")) {
+                                      " = trunc i32 1 to i16") == 2 &&
+                    contains(masked_vote_lowered.llvm_ir, " = and i32 1, 31"),
+                "directional AIR shuffles receive the PTX delta or the 5-bit XOR mask")) {
         return 1;
     }
     if (!expect(contains(masked_vote_lowered.llvm_ir,

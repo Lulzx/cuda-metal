@@ -597,6 +597,9 @@ int run_legacy_executable_driver(const ExecutableDriverOptions& options,
         " -D__CUDACC__=1 -D__NVCC__=1 -I " +
         quote_shell(layout.include_dir.string()) + " -include cuda_runtime.h";
     compile_prefix += cuda_inline_flags(compiler, options.cuda_inline_threshold);
+    // --fmad=false has to reach clang: device IR and PTX carry the
+    // contraction decision (contract flags, fma.rn) before Metal sees them.
+    if (!g_fp_contract) compile_prefix += " -Xarch_device -ffp-contract=off";
     for (const auto& dir : options.include_dirs) {
         compile_prefix += " -I " + quote_shell(dir.string());
     }
@@ -1172,6 +1175,9 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         quote_shell(compiler.string()) + " --cuda-arch " +
         quote_shell(options.cuda_arch) + " --fp64=" +
         std::string(cumetal::ptx::fp64_mode_name(options.fp64_mode));
+    // The device frontend decides contraction (clang contract flags, the
+    // NVVM importer's fma), so it needs the caller's --fmad.
+    if (!g_fp_contract) device_compile += " --fmad=false";
     if (!options.cuda_inline_threshold.empty()) {
         device_compile += " --cuda-inline-threshold " +
                           quote_shell(options.cuda_inline_threshold);
@@ -2357,6 +2363,7 @@ int main(int argc, char** argv) {
             " -Xclang -target-feature -Xclang +ptx70"
             " -nocudainc -nocudalib -Wno-unknown-cuda-version -Wno-pass-failed"
             " -D__CUDACC__=1 -D__NVCC__=1";
+        if (!g_fp_contract) command += " -ffp-contract=off";
         command += cuda_inline_flags(compiler, cuda_inline_threshold);
         if (std::filesystem::exists(runtime_api_dir) &&
             std::filesystem::is_directory(runtime_api_dir)) {
@@ -2666,6 +2673,7 @@ int main(int argc, char** argv) {
                             "-gline-tables-only ") +
                 "-nocudainc -nocudalib "
                 "--cuda-gpu-arch=" + quote_shell(arch) + " ";
+            if (!g_fp_contract) command += "-ffp-contract=off ";
             if (!ptx_feature.empty()) {
                 command += "-Xclang -target-feature -Xclang " +
                            quote_shell(ptx_feature) + " ";

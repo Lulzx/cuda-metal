@@ -533,11 +533,14 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
     };
     if (const auto arith = kFp64ArithBuiltins.find(std::string(name));
         arith != kFp64ArithBuiltins.end()) {
-        return BuiltinSignature{
+        BuiltinSignature signature{
             .return_type = Type::floating(64),
             .argument_types = {Type::floating(64), Type::floating(64)},
             .opcode = arith->second,
         };
+        // __dadd_rn/__dsub_rn/__dmul_rn are never contracted into an FMA.
+        if (arith->second != OpCode::kDiv) signature.attributes.push_back({"fp_contract", "off"});
+        return signature;
     }
     static const std::unordered_map<std::string, OpCode> kFloatArithBuiltins = {
         {"__nv_fadd_rn", OpCode::kAdd}, {"__nv_fsub_rn", OpCode::kSub},
@@ -547,11 +550,17 @@ std::optional<BuiltinSignature> cuda_builtin_signature(std::string_view name) {
     if (const auto arith = kFloatArithBuiltins.find(std::string(name));
         arith != kFloatArithBuiltins.end()) {
         const std::size_t arity = arith->second == OpCode::kFma ? 3 : 2;
-        return BuiltinSignature{
+        BuiltinSignature signature{
             .return_type = Type::floating(32),
             .argument_types = std::vector<Type>(arity, Type::floating(32)),
             .opcode = arith->second,
         };
+        // CUDA guarantees __fadd_rn/__fsub_rn/__fmul_rn are never contracted
+        // into an FMA, whatever --fmad says.
+        if (arith->second == OpCode::kAdd || arith->second == OpCode::kSub ||
+            arith->second == OpCode::kMul)
+            signature.attributes.push_back({"fp_contract", "off"});
+        return signature;
     }
     // Directed-rounding interval intrinsics stay calls (metal_name is the
     // stem plus suffix, e.g. "fadd_rd"); both lowerings route them through
@@ -1868,7 +1877,7 @@ struct Importer {
                 if (inferred.kind == TypeKind::kVoid) return fail(&instruction, "void PTX call has a return slot");
             } else if (root == "clz" || root == "popc") inferred = Type::integer(32);
             else if (root == "cvt") inferred = ptx_cvt_result_type(instruction.opcode);
-            else if (root == "setp" || root == "isspacep" || instruction.opcode == "bar.red.or.pred") inferred = Type::predicate();
+            else if (root == "setp" || root == "isspacep" || instruction.opcode == "bar.red.or.pred" || instruction.opcode == "bar.red.and.pred") inferred = Type::predicate();
             else if (root == "vote") inferred = instruction.opcode.find(".ballot.") != std::string::npos
                 ? Type::integer(32) : Type::predicate();
             else if (root == "mov" && instruction.operands.size() == 2 &&
@@ -6774,11 +6783,14 @@ struct Importer {
             operation.operands.push_back(
                 bit_container_operand(2, operation.result_types.front()));
         } else if (root == "bar" && starts_with(instruction.opcode, "bar.red.")) {
-            if ((instruction.opcode != "bar.red.or.pred" && instruction.opcode != "bar.red.popc.u32") || instruction.operands.size() != 3 ||
+            if ((instruction.opcode != "bar.red.or.pred" && instruction.opcode != "bar.red.and.pred" &&
+                 instruction.opcode != "bar.red.popc.u32") || instruction.operands.size() != 3 ||
                 trim(instruction.operands[1]) != "0" || !instruction.predicate.empty())
-                return fail(&instruction, "unsupported PTX barrier reduction (requires full CTA or.pred/popc.u32 on barrier 0)");
+                return fail(&instruction, "unsupported PTX barrier reduction (requires full CTA or.pred/and.pred/popc.u32 on barrier 0)");
             operation.opcode = OpCode::kCall;
-            operation.attributes["callee"] = instruction.opcode == "bar.red.popc.u32" ? "cm_cta_count" : "cm_cta_any";
+            operation.attributes["callee"] = instruction.opcode == "bar.red.popc.u32" ? "cm_cta_count"
+                                           : instruction.opcode == "bar.red.and.pred" ? "cm_cta_all"
+                                                                                      : "cm_cta_any";
             operation.attributes["builtin"] = "true";
             operation.operands = {source_operand(2, Type::predicate())};
         } else if (root == "bar") {
@@ -7979,6 +7991,15 @@ struct Importer {
                 }
             } else if (root == "mad") {
                 operation.attributes["combined"] = "mul_add";
+            }
+            // PTX ISA: add/sub/mul with an explicit rounding modifier are
+            // "treated conservatively" and never fused into an FMA. This is
+            // how nvcc spells __fadd_rn/__fmul_rn; plain add.f32/mul.f32
+            // may still be contracted.
+            if ((root == "add" || root == "sub" || root == "mul") &&
+                instruction.opcode.find(".rn.") != std::string::npos &&
+                (instruction.opcode.ends_with(".f32") || instruction.opcode.ends_with(".f64"))) {
+                operation.attributes["fp_contract"] = "off";
             }
             if (root == "mul" &&
                 instruction.opcode.find(".hi.") != std::string::npos) {

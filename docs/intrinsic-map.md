@@ -37,9 +37,9 @@ Complete CUDA/PTX → AIR intrinsic mapping table for the CuMetal intrinsic lowe
 | `bar.sync N` | `air.threadgroup_barrier` | `__syncthreads()` — threadgroup scope |
 | `bar.warp.sync mask` | `air.simdgroup.barrier(i32 2, i32 4)` | `__syncwarp(mask)` — SIMD-group scope and threadgroup-memory visibility; divergent half-warp ordering GPU-tested |
 | `bar.arrive N, count` | `air.threadgroup_barrier` | Cooperative-groups barrier arrive (conservative: full threadgroup barrier) |
-| `bar.red.and.pred d, bar, cnt, pred` | `air.simdgroup.all` | Barrier predicate AND-reduction (conservative simdgroup lowering) |
-| `bar.red.or.pred d, bar, cnt, pred` | `air.simdgroup.any` | Barrier predicate OR-reduction |
-| `bar.red.popc.u32 d, bar, cnt, pred` | `air.simdgroup.reduce_add` | Barrier population-count reduction |
+| `bar.red.and.pred d, 0, pred` | `cm_cta_all`: threadgroup atomic AND between barriers | `__syncthreads_and` — typed backend only; full CTA on barrier 0 |
+| `bar.red.or.pred d, 0, pred` | `cm_cta_any`: threadgroup atomic OR between barriers | `__syncthreads_or` — typed backend only; full CTA on barrier 0 |
+| `bar.red.popc.u32 d, 0, pred` | `cm_cta_count`: threadgroup atomic add between barriers | `__syncthreads_count` — typed backend only; full CTA on barrier 0. The legacy LLVM backend refuses `bar.red` (it used to return 0) |
 | `membar.gl` | `air.mem.barrier.device` | `__threadfence()` — device-wide memory fence |
 | `membar.sys` | `air.mem.barrier.device` | `__threadfence_system()` — system-wide fence (lowered to device scope) |
 | `membar.cta` | `air.mem.barrier.threadgroup` | `__threadfence_block()` — threadgroup memory fence |
@@ -91,6 +91,13 @@ Apple Silicon SIMD-group width is architecturally fixed at 32 (matching CUDA war
 | `shfl.sync.down.b32 dst, src, delta, clamp, mask` | `air.simdgroup.shuffle_down` | `__shfl_down_sync` |
 | `shfl.sync.up.b32 dst, src, delta, clamp, mask` | `air.simdgroup.shuffle_up` | `__shfl_up_sync` |
 | `shfl.sync.bfly.b32 dst, src, lanexor, clamp, mask` | `air.simdgroup.shuffle_xor` | `__shfl_xor_sync` |
+
+Every form follows the PTX ISA lane rule, with `segmask = c[12:8]`,
+`minLane = lane & segmask` and `maxLane = minLane | (c[4:0] & ~segmask)`:
+`up` reads `lane - b` when it is `>= maxLane`, `down` reads `lane + b` and
+`bfly` reads `lane ^ b` when it is `<= maxLane`, and otherwise the lane keeps
+its own value. So with `width < 32`, `__shfl_xor_sync` may read a lane in an
+earlier segment, and `__shfl_down_sync` never reads past its segment's end.
 | `vote.sync.ballot.b32 dst, pred, mask` | `air.simd_ballot.i64` + truncate/mask | `__ballot_sync` — active predicate bits intersected with member mask |
 | `vote.sync.any.pred dst, pred, mask` | masked `air.simd_ballot.i64` != 0 | `__any_sync` |
 | `vote.sync.all.pred dst, pred, mask` | masked predicate ballot == masked active ballot | `__all_sync` |

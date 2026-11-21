@@ -323,6 +323,21 @@ in the active FP64 mode's own arithmetic, and the
 conversion intrinsics plus `__nv_hiloint2double`/`__nv_double2hi/loint` are
 exact through the software-FP64 conversion helpers.
 
+FMA contraction follows nvcc's default `--fmad=true` only where CuMetal can
+see it. The NVVM importer fuses a single-use `fmul contract` that feeds an
+`fadd contract` in the same block into `fma`; other contractable pairs
+(`a * b - c`, a product with several uses) are left to Metal's
+`-ffp-contract=fast`, whose choices can differ from NVPTX's.
+`__fadd_rn`/`__fsub_rn`/`__fmul_rn` and PTX `add/sub/mul.rn.f32` are never
+fused. If a kernel computes the same product both as a multi-use contractable
+`a * b` and as `__fmul_rn(a, b)`, Metal's GVN may merge the two and drop the
+contraction from the plain form.
+
+`__syncthreads_count`/`_and`/`_or` (PTX `bar.red.{popc,and,or}`) are
+implemented on the typed backend for a full block on barrier 0. A named
+barrier or a thread-count operand is refused, and the legacy LLVM backend
+refuses every `bar.red`.
+
 A typed-backend kernel that uses software FP64 is compiled as one safe-mode
 Metal module so VF64 keeps IEEE semantics (see
 [FP64 policy](../fp64-policy.md)). Under `--use_fast_math` its user float code

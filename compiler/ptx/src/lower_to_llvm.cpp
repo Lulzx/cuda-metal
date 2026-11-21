@@ -9755,12 +9755,18 @@ class GenericLlvmEmitter {
             valid = ok;
             declarations_.insert("declare i32 @air.simd_shuffle_up.u.i32(i32, i16)");
         } else if (is_bfly) {
-            const std::string tlocal = next_tmp("shfl_tlocal");
-            os << "  " << tlocal << " = xor i32 " << local << ", " << *sel << "\n";
+            // PTX: j = lane ^ b[4:0], valid iff j <= maxLane (the end of the
+            // caller's segment). A partner in an earlier segment is valid;
+            // testing the segment-local xor against the width refused it.
+            const std::string mask5 = next_tmp("shfl_mask5");
+            os << "  " << mask5 << " = and i32 " << *sel << ", 31\n";
+            sel = mask5;
             const std::string t = next_tmp("shfl_t");
-            os << "  " << t << " = add i32 " << base << ", " << tlocal << "\n";
+            os << "  " << t << " = xor i32 " << lane << ", " << mask5 << "\n";
+            const std::string limit = next_tmp("shfl_limit");
+            os << "  " << limit << " = add i32 " << base << ", " << width << "\n";
             const std::string ok = next_tmp("shfl_ok");
-            os << "  " << ok << " = icmp ult i32 " << tlocal << ", " << width << "\n";
+            os << "  " << ok << " = icmp ult i32 " << t << ", " << limit << "\n";
             target = t;
             valid = ok;
             declarations_.insert("declare i32 @air.simd_shuffle_xor.u.i32(i32, i16)");
@@ -9848,14 +9854,11 @@ class GenericLlvmEmitter {
             return true;
         }
         if (starts_with(instr.opcode, "bar.red")) {
-            declarations_.insert("declare void @air.wg.barrier(i32, i32)");
-            os << "  call void @air.wg.barrier(i32 2, i32 1)\n";
-            if (!instr.operands.empty() && is_register_name(instr.operands[0])) {
-                const std::string& dst = instr.operands[0];
-                const int slot_bits = ensure_reg_slot(dst).bits;
-                emit_store_reg_bits(os, dst, slot_bits, "0", std::min(slot_bits, 32));
-            }
-            return true;
+            // The legacy backend has no CTA reduction scratch. It used to
+            // emit a plain barrier and write 0, which made __syncthreads_count
+            // and friends silently wrong; the typed backend implements them.
+            return fail(instr, "legacy LLVM backend does not implement PTX barrier reductions (" +
+                                   instr.opcode + "); use the typed cumetal-ir backend");
         }
         return fail(instr, "unsupported barrier opcode");
     }

@@ -311,15 +311,12 @@ static __device__ __forceinline__ __half2 __shfl_up_sync(unsigned int mask, __ha
 }
 static __device__ __forceinline__ __half2 __shfl_xor_sync(unsigned int mask, __half2 val, int laneMask, int width = 32) {
     float2 f = __half22float2(val);
-    unsigned int laneid;
-    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
-    const int srcLane = static_cast<int>(laneid) ^ laneMask;
     int x_bits, y_bits, out_bits;
     __builtin_memcpy(&x_bits, &f.x, sizeof(x_bits));
-    out_bits = __cumetal_shfl_sync_idx_i32(mask, x_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    out_bits = __cumetal_shfl_sync_bfly_i32(mask, x_bits, laneMask, ((32 - width) << 8) | 0x1f);
     __builtin_memcpy(&f.x, &out_bits, sizeof(f.x));
     __builtin_memcpy(&y_bits, &f.y, sizeof(y_bits));
-    out_bits = __cumetal_shfl_sync_idx_i32(mask, y_bits, srcLane, ((32 - width) << 8) | 0x1f);
+    out_bits = __cumetal_shfl_sync_bfly_i32(mask, y_bits, laneMask, ((32 - width) << 8) | 0x1f);
     __builtin_memcpy(&f.y, &out_bits, sizeof(f.y));
     return __float22half2_rn(f);
 }

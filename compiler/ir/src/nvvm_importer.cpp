@@ -352,6 +352,46 @@ std::optional<DemotedFloatMultiply> match_demotable_float_multiply(
     return std::nullopt;
 }
 
+// A binary32 `fadd contract` whose operand is a single-use `fmul contract` in
+// the same block. NVPTX fuses this pair into fma.rn.f32 at instruction
+// selection; doing it here makes the contraction explicit instead of leaving
+// it to Metal, whose GVN merges an identical uncontracted __fmul_rn/__fadd_rn
+// pair with the contractable one and drops the contraction from both.
+struct ContractedFloatMulAdd {
+    const llvm::BinaryOperator* multiply = nullptr;
+    const llvm::Value* addend = nullptr;
+};
+
+std::optional<ContractedFloatMulAdd> match_contracted_float_mul_add(
+    const llvm::Instruction& instruction) {
+    const auto* add = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+    if (add == nullptr || add->getOpcode() != llvm::Instruction::FAdd ||
+        !add->getType()->isFloatTy() || !add->hasAllowContract()) {
+        return std::nullopt;
+    }
+    for (unsigned i = 0; i < 2; ++i) {
+        const auto* multiply = llvm::dyn_cast<llvm::BinaryOperator>(add->getOperand(i));
+        if (multiply != nullptr && multiply->getOpcode() == llvm::Instruction::FMul &&
+            multiply->getType()->isFloatTy() && multiply->hasAllowContract() &&
+            multiply->hasOneUse() && multiply->getParent() == add->getParent()) {
+            return ContractedFloatMulAdd{multiply, add->getOperand(1 - i)};
+        }
+    }
+    return std::nullopt;
+}
+
+bool is_contracted_into_fma(const llvm::Instruction& instruction) {
+    const auto* multiply = llvm::dyn_cast<llvm::BinaryOperator>(&instruction);
+    if (multiply == nullptr || multiply->getOpcode() != llvm::Instruction::FMul ||
+        !multiply->hasOneUse()) {
+        return false;
+    }
+    const auto* user = llvm::dyn_cast<llvm::Instruction>(*multiply->user_begin());
+    if (user == nullptr) return false;
+    const auto fused = match_contracted_float_mul_add(*user);
+    return fused.has_value() && fused->multiply == multiply;
+}
+
 bool write_constant_bytes(const llvm::Constant& constant, std::uint64_t offset,
                           std::vector<std::uint8_t>* bytes,
                           const llvm::DataLayout& layout) {
@@ -1904,6 +1944,49 @@ struct Importer {
             operation->attributes["builtin"] = "true";
             return true;
         }
+        // __syncthreads_count/_and/_or. Older LLVM spells them
+        // barrier0.{popc,and,or}(i32) -> i32; LLVM 21+ spells them
+        // barrier.cta.red.{popc,and,or}.aligned.all(i32 barrier, i1) with
+        // an i32 or i1 result. Only a full-CTA reduction on barrier 0 is
+        // modelled; the .count forms name a thread subset and are refused.
+        {
+            std::string_view reduction;
+            bool takes_barrier_id = false;
+            if (name == "llvm.nvvm.barrier0.popc") reduction = "popc";
+            else if (name == "llvm.nvvm.barrier0.and") reduction = "and";
+            else if (name == "llvm.nvvm.barrier0.or") reduction = "or";
+            else if (name.starts_with("llvm.nvvm.barrier.cta.red.")) {
+                const std::string_view rest =
+                    std::string_view(name).substr(sizeof("llvm.nvvm.barrier.cta.red.") - 1);
+                for (std::string_view kind : {"popc", "and", "or"}) {
+                    if (rest == std::string(kind) + ".aligned.all" ||
+                        rest == std::string(kind) + ".all") {
+                        reduction = kind;
+                        takes_barrier_id = true;
+                    }
+                }
+                if (reduction.empty())
+                    return fail(&call, "unsupported CTA barrier reduction '" + name +
+                                           "' (only full-CTA popc/and/or on barrier 0)");
+            }
+            if (!reduction.empty()) {
+                if (call.arg_size() != (takes_barrier_id ? 2u : 1u))
+                    return fail(&call, "malformed CTA barrier reduction '" + name + "'");
+                if (takes_barrier_id) {
+                    const auto* barrier = llvm::dyn_cast<llvm::ConstantInt>(call.getArgOperand(0));
+                    if (barrier == nullptr || !barrier->isZero())
+                        return fail(&call, "CTA barrier reduction requires constant barrier 0");
+                }
+                operation->opcode = OpCode::kCall;
+                operation->attributes["callee"] = reduction == "popc" ? "cm_cta_count"
+                                                : reduction == "and"  ? "cm_cta_all"
+                                                                      : "cm_cta_any";
+                operation->attributes["builtin"] = "true";
+                operation->operands.push_back(import_operand(
+                    *call.getArgOperand(takes_barrier_id ? 1 : 0), *state));
+                return true;
+            }
+        }
         if (name == "llvm.nvvm.barrier0" ||
             name.starts_with("llvm.nvvm.barrier.cta.sync")) {
             operation->opcode = OpCode::kBarrier;
@@ -1973,6 +2056,12 @@ struct Importer {
         if (const auto arith = kArithBuiltins.find(name);
             arith != kArithBuiltins.end()) {
             operation->opcode = arith->second;
+            // CUDA guarantees __fmul_rn/__fadd_rn/__fsub_rn (and the
+            // double forms) are never merged into a fused multiply-add,
+            // whatever --fmad says. Only the add/sub/mul forms can be.
+            if (arith->second == OpCode::kAdd || arith->second == OpCode::kSub ||
+                arith->second == OpCode::kMul)
+                operation->attributes["fp_contract"] = "off";
             for (const llvm::Use& argument : call.args()) {
                 operation->operands.push_back(import_operand(*argument.get(), *state));
             }
@@ -2721,6 +2810,21 @@ struct Importer {
                 match_demotable_float_multiply(*truncation).has_value()) {
                 return true;
             }
+        }
+        if (is_contracted_into_fma(instruction)) return true;
+        if (const auto fused = match_contracted_float_mul_add(instruction)) {
+            Operation fma;
+            fma.opcode = OpCode::kFma;
+            fma.results = {state->values.at(&instruction)};
+            fma.result_types = {Type::floating(32)};
+            fma.operands = {
+                import_operand(*fused->multiply->getOperand(0), *state),
+                import_operand(*fused->multiply->getOperand(1), *state),
+                import_operand(*fused->addend, *state),
+            };
+            fma.location = import_location(instruction, fallback_source);
+            output_block->operations.push_back(std::move(fma));
+            return true;
         }
         const bool uses_fp64 = contains_fp64(instruction.getType()) ||
             std::any_of(instruction.op_begin(), instruction.op_end(),
