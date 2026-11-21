@@ -4184,6 +4184,13 @@ cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
     if (d == nullptr && width > 0 && height > 0) {
         return fail(cudaErrorInvalidValue);
     }
+    // Like cudaMemset: a kernel still queued that touches this memory must
+    // finish before the host-side fill, or the fill lands out of order.
+    std::string sync_error;
+    const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+    if (sync_status != cudaSuccess) {
+        return fail(sync_status);
+    }
     for (size_t row = 0; row < height; ++row) {
         if (width > 0) {
             std::memset(d + row * pitch, value, width);
@@ -4207,6 +4214,77 @@ cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
     }));
 }
 
+// Element-sized fills for the driver API's cuMemsetD16/D32 and the pitched
+// cuMemsetD2D8/16/32 families. `value` holds the element in its low
+// `element_size` bytes. A synchronous fill is ordered like cudaMemset (after
+// all prior device work); an asynchronous one is ordered on `stream` like
+// cudaMemsetAsync, including graph capture.
+cudaError_t cumetalRuntimeMemsetElements(void* dev_ptr, size_t pitch, unsigned int value,
+                                         size_t element_size, size_t width, size_t height,
+                                         cudaStream_t stream, int synchronous) {
+    if (element_size != 1 && element_size != 2 && element_size != 4) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const size_t row_bytes = width * element_size;
+    if (width != 0 && row_bytes / element_size != width) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const bool empty = width == 0 || height == 0;
+    if (!empty && (dev_ptr == nullptr || (height > 1 && pitch < row_bytes))) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    if (!synchronous) {
+        if (cudaGraph_t graph = get_capture_graph(stream)) {
+            (void)graph;
+            const bool captured = cumetal::rt::capture_library_call(
+                stream, [=](cudaStream_t replay) {
+                    return cumetalRuntimeMemsetElements(dev_ptr, pitch, value, element_size,
+                                                        width, height, replay, 0);
+                });
+            return fail(captured ? cudaSuccess : cudaErrorMemoryAllocation);
+        }
+    }
+    auto* base = static_cast<unsigned char*>(host_accessible_pointer(
+        dev_ptr, empty ? 0 : (height - 1) * pitch + row_bytes));
+    if (base == nullptr && !empty) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto fill = [=]() {
+        if (empty) return;
+        for (size_t row = 0; row < height; ++row) {
+            unsigned char* out = base + row * pitch;
+            switch (element_size) {
+            case 1:
+                std::memset(out, static_cast<int>(value & 0xffu), width);
+                break;
+            case 2: {
+                const auto element = static_cast<std::uint16_t>(value);
+                for (size_t i = 0; i < width; ++i) std::memcpy(out + i * 2, &element, 2);
+                break;
+            }
+            default:
+                for (size_t i = 0; i < width; ++i) std::memcpy(out + i * 4, &value, 4);
+                break;
+            }
+        }
+    };
+    if (synchronous) {
+        std::string sync_error;
+        const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+        if (sync_status != cudaSuccess) {
+            return fail(sync_status);
+        }
+        fill();
+        return fail(cudaSuccess);
+    }
+    return fail(enqueue_stream_host_op_pageable(
+        stream, !empty && is_pageable_host_memory(dev_ptr), fill));
+}
+
 // cudaMemset3D — fills a 3D pitched allocation plane-by-row.
 cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent) {
     if (pitchedDevPtr.ptr == nullptr && (extent.width > 0 && extent.height > 0 && extent.depth > 0)) {
@@ -4226,6 +4304,11 @@ cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent ext
         host_accessible_pointer(pitchedDevPtr.ptr, span));
     if (base == nullptr && extent.width > 0 && extent.height > 0 && extent.depth > 0) {
         return fail(cudaErrorInvalidValue);
+    }
+    std::string sync_error;
+    const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+    if (sync_status != cudaSuccess) {
+        return fail(sync_status);
     }
     for (size_t z = 0; z < extent.depth; ++z) {
         for (size_t y = 0; y < extent.height; ++y) {
@@ -6248,7 +6331,10 @@ cudaError_t cudaLaunchKernel(const void* func,
                          func,
                          registered_kernel.kernel_name.c_str(),
                          registered_kernel.metallib_path.c_str());
-            return launch_fail(cudaErrorInvalidValue, "registered kernel missing metallib/name");
+            // CUDA reports a kernel with no loadable image for this device as
+            // cudaErrorNoKernelImageForDevice at the launch (#223).
+            return launch_fail(cudaErrorNoKernelImageForDevice,
+                               "registered kernel missing metallib/name");
         }
 
         // A kernel that takes no parameters may be launched with a null argv --

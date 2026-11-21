@@ -4381,6 +4381,46 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_cumetalc_native_aot_device_assert
         PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Driver-API 16/32-bit and pitched memsets are ordered on their stream,
+    # after prior device work when synchronous, across an event wait, and
+    # only at graph launch when captured (#211).
+    add_test(
+        NAME functional_cumetalc_driver_memset_stream_order
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/driver_memset_stream_order.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_driver_memset_stream_order
+                "--expect-output=PASS: driver memsets are ordered on their streams"
+    )
+    set_tests_properties(functional_cumetalc_driver_memset_stream_order
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # #223: a pure copy kernel runs and host-side half conversions match the
+    # device's; a kernel only the device pass sees compiles with a warning
+    # instead of silently producing no metallib.
+    add_test(
+        NAME functional_cumetalc_copy_kernel_host_half
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/copy_kernel_host_half.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_copy_kernel_host_half
+                "--expect-output=PASS: copy kernel and host half conversions"
+    )
+    set_tests_properties(functional_cumetalc_copy_kernel_host_half
+        PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
+        NAME functional_cumetalc_device_only_kernel_warning
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_device_only_kernel.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_only_kernel.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_device_only_kernel
+    )
+    set_tests_properties(functional_cumetalc_device_only_kernel_warning
+        PROPERTIES SKIP_RETURN_CODE 77)
+
     # Shared memory past Metal's 32 KB threadgroup limit runs from the
     # kernel's spill variant: CUDA's 48 KB default, the 99 KB opt-in, static
     # shared above 32 KB, shared atomics and barriers in spilled memory, and

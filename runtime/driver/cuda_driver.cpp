@@ -81,6 +81,10 @@ extern "C" cudaError_t cumetalSetMaxDynamicSharedBytes(
 extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
 extern "C" int cumetalRuntimeIsManaged(const void* ptr);
 extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
+extern "C" cudaError_t cumetalRuntimeMemsetElements(void* dev_ptr, size_t pitch, unsigned int value,
+                                                    size_t element_size, size_t width,
+                                                    size_t height, cudaStream_t stream,
+                                                    int synchronous);
 
 constexpr int kCudaCompatVersion = 12000;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
@@ -3073,163 +3077,73 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
                           sharedMemBytes, hStream, kernelParams, nullptr);
 }
 
-// Memset 16/32-bit variants backed by the existing 8-bit path (via loop for correctness).
+// 16/32-bit and pitched memsets share the runtime's element fill, so the
+// synchronous forms are ordered after prior device work like cuMemsetD8 and
+// the *Async forms are ordered on their stream (and captured into graphs).
+namespace {
+CUresult memset_elements(CUdeviceptr dst, size_t pitch, unsigned int value, size_t element_size,
+                         size_t width, size_t height, CUstream stream, bool synchronous) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    return map_cuda_error(cumetalRuntimeMemsetElements(
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(dst)), pitch, value, element_size,
+        width, height, reinterpret_cast<cudaStream_t>(stream), synchronous ? 1 : 0));
+}
+}  // namespace
+
 CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
-    if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    auto* ptr = static_cast<unsigned short*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned short)));
-    if (ptr == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = us;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, N * sizeof(unsigned short), us, sizeof(unsigned short), N, 1,
+                           nullptr, true);
 }
 
 CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
-    if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    auto* ptr = static_cast<unsigned int*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned int)));
-    if (ptr == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = ui;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, N * sizeof(unsigned int), ui, sizeof(unsigned int), N, 1,
+                           nullptr, true);
 }
 
-CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD16(dstDevice, us, N);
+CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N, CUstream hStream) {
+    return memset_elements(dstDevice, N * sizeof(unsigned short), us, sizeof(unsigned short), N, 1,
+                           hStream, false);
 }
 
-CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD32(dstDevice, ui, N);
+CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream) {
+    return memset_elements(dstDevice, N * sizeof(unsigned int), ui, sizeof(unsigned int), N, 1,
+                           hStream, false);
 }
 
 // 2D strided memset — fills Width elements per row for Height rows (pitch stride).
 CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned char uc, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        std::memset(base + row * dstPitch, static_cast<int>(uc), Width);
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, uc, 1, Width, Height, nullptr, true);
 }
 
 CUresult cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned short us, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned short)));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        auto* row_ptr = reinterpret_cast<unsigned short*>(base + row * dstPitch);
-        for (size_t col = 0; col < Width; ++col) row_ptr[col] = us;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, us, sizeof(unsigned short), Width, Height, nullptr,
+                           true);
 }
 
 CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned int ui, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned int)));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        auto* row_ptr = reinterpret_cast<unsigned int*>(base + row * dstPitch);
-        for (size_t col = 0; col < Width; ++col) row_ptr[col] = ui;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, ui, sizeof(unsigned int), Width, Height, nullptr,
+                           true);
 }
 
-// Async variants enqueue their host-coherent fill in the CUDA stream timeline.
 CUresult cuMemsetD2D8Async(CUdeviceptr d, size_t p, unsigned char uc,
                             size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned char value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, uc};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row)
-                std::memset(data->base + row * data->pitch, data->value, data->width);
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, uc, 1, W, H, s, false);
 }
+
 CUresult cuMemsetD2D16Async(CUdeviceptr d, size_t p, unsigned short us,
                              size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned short)));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned short value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, us};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row) {
-                auto* values = reinterpret_cast<unsigned short*>(
-                    data->base + row * data->pitch);
-                std::fill_n(values, data->width, data->value);
-            }
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, us, sizeof(unsigned short), W, H, s, false);
 }
+
 CUresult cuMemsetD2D32Async(CUdeviceptr d, size_t p, unsigned int ui,
                              size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned int)));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned int value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, ui};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row) {
-                auto* values = reinterpret_cast<unsigned int*>(
-                    data->base + row * data->pitch);
-                std::fill_n(values, data->width, data->value);
-            }
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, ui, sizeof(unsigned int), W, H, s, false);
 }
 
 // cuMemGetAddressRange — returns the base address and size of the allocation
