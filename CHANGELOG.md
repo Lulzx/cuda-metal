@@ -70,6 +70,11 @@ All notable changes to CuMetal are documented here. Format follows
   stride above 32 bits failed the launch with `cudaErrorInvalidDevicePointer`.
   An entry that marks its pointers `.ptr` (Clang's convention) now binds its
   unqualified 64-bit parameters as scalars.
+- **Host cost per kernel launch** (#228). Every launch read the environment
+  up to five times (`CUMETAL_TRACE_GPU` twice, the llm.c emulation switches,
+  the GGML validation switch, and the printf buffer override, which also took
+  the heap mutex for kernels without `printf`). These are now read once per
+  process or only when relevant.
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the

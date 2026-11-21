@@ -1922,8 +1922,12 @@ bool llmc_emulation_enabled() {
     // which made a successful CUDA launch indistinguishable from CPU
     // emulation.  Keep that implementation only as an explicit diagnostic
     // escape hatch for comparing results while bringing up a new lowering.
-    return env_truthy(std::getenv("CUMETAL_ENABLE_LLMC_CPU_EMULATION")) &&
-           !env_truthy(std::getenv("CUMETAL_DISABLE_LLMC_EMULATION"));
+    // Read once: every registered launch asks, and getenv walks the whole
+    // environment under a lock.
+    static const bool enabled =
+        env_truthy(std::getenv("CUMETAL_ENABLE_LLMC_CPU_EMULATION")) &&
+        !env_truthy(std::getenv("CUMETAL_DISABLE_LLMC_EMULATION"));
+    return enabled;
 }
 
 bool llmc_emulation_skips_kernel(const std::string& kernel_name) {
@@ -6481,7 +6485,9 @@ cudaError_t cudaLaunchKernel(const void* func,
 
     // Printf ring buffer size: cudaDeviceSetLimit controls the process value;
     // CUMETAL_PRINTF_BUFFER_SIZE remains an explicit per-process override.
-    const std::uint32_t kPrintfCapWords = [&]() -> std::uint32_t {
+    // Evaluated only for kernels that print: it takes the heap mutex and reads
+    // the environment, which every other launch would pay for nothing.
+    const auto printf_cap_words = [&]() -> std::uint32_t {
         RuntimeState& state = runtime_state();
         std::size_t configured_bytes = 0;
         {
@@ -6501,8 +6507,9 @@ cudaError_t cudaLaunchKernel(const void* func,
         const std::size_t words = configured_bytes / sizeof(std::uint32_t);
         return static_cast<std::uint32_t>(std::clamp<std::size_t>(
             words, 1u, std::numeric_limits<std::uint32_t>::max()));
-    }();
+    };
     const bool needs_printf = use_registered_kernel && !registered_kernel.printf_formats.empty();
+    const std::uint32_t kPrintfCapWords = needs_printf ? printf_cap_words() : 0u;
     const bool needs_device_heap =
         use_registered_kernel && registered_kernel.uses_device_heap;
     const bool needs_device_launch_queue =
@@ -6816,9 +6823,11 @@ cudaError_t cudaLaunchKernel(const void* func,
     // Opt-in model-level oracle for GGML RMS norm. It validates the exact
     // buffers and packed broadcast metadata bound by llama.cpp, after the Metal
     // command completes, so synthetic probes cannot hide an ABI mismatch.
+    // The kernel name is tested first: reading the environment on every
+    // registered launch was a measurable share of host launch cost.
     if (status == cudaSuccess && use_registered_kernel &&
-        cumetal::diag_env_truthy("CUMETAL_VALIDATE_GGML_RMS") &&
-        kernel_name_contains(registered_kernel.kernel_name, "rms_norm_f32")) {
+        kernel_name_contains(registered_kernel.kernel_name, "rms_norm_f32") &&
+        cumetal::diag_env_truthy("CUMETAL_VALIDATE_GGML_RMS")) {
         std::string sync_error;
         const cudaError_t sync_status =
             cumetal::metal_backend::stream_synchronize(backend_stream, &sync_error);

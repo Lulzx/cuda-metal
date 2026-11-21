@@ -77,7 +77,8 @@ synchronizes direct launches.
 ## GPU provenance
 
 Set `CUMETAL_TRACE_GPU=1` to print one `CUMETAL_PROVENANCE` record per completed
-Metal dispatch. Records identify:
+Metal dispatch. The launch path reads it once per process, so set it before the
+program starts rather than with `setenv` mid-run. Records identify:
 
 - the Metal device;
 - the kernel name;
