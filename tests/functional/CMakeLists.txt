@@ -4769,3 +4769,22 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_nvcc_host_options
 )
 set_tests_properties(functional_cumetalc_nvcc_host_options PROPERTIES SKIP_RETURN_CODE 77)
+
+# #230: NVIDIA's _v2 driver names are exported as aliases. The test loads the
+# library with dlopen, so it does not link against it; it uses the libcuda
+# alias when the binary shim is enabled, else libcumetal itself.
+add_executable(cumetal_driver_v2_symbols_test driver_v2_symbols_test.cpp)
+target_compile_options(cumetal_driver_v2_symbols_test PRIVATE -Wall -Wextra -Wpedantic)
+add_dependencies(cumetal_driver_v2_symbols_test cumetal_runtime)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    set(CUMETAL_V2_TEST_DRIVER "$<TARGET_FILE_DIR:cumetal_runtime>/libcuda.dylib")
+else()
+    set(CUMETAL_V2_TEST_DRIVER "$<TARGET_FILE:cumetal_runtime>")
+endif()
+add_test(
+    NAME functional_driver_v2_symbols
+    COMMAND $<TARGET_FILE:cumetal_driver_v2_symbols_test>
+            ${CUMETAL_V2_TEST_DRIVER}
+            ${CMAKE_SOURCE_DIR}/runtime/driver/driver_v2_aliases.txt
+)
+set_tests_properties(functional_driver_v2_symbols PROPERTIES SKIP_RETURN_CODE 77)
