@@ -339,6 +339,10 @@ add_executable(cumetal_driver_memset_test
     driver_memset_test.cpp
 )
 
+add_executable(cumetal_driver_raw_ptx_module_test
+    driver_raw_ptx_module_test.cpp
+)
+
 add_executable(cumetal_driver_mem_get_info_test
     driver_mem_get_info_test.cpp
 )
@@ -1109,6 +1113,11 @@ target_link_libraries(cumetal_driver_async_memcpy_test
 )
 
 target_link_libraries(cumetal_driver_memset_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_driver_raw_ptx_module_test
     PRIVATE
         cumetal_runtime
 )
@@ -3076,6 +3085,22 @@ add_test(
     COMMAND cumetal_driver_memset_test
 )
 
+# #222: raw PTX through the driver API -- a two-entry FP32 module, a mixed
+# FP32/FP64/static-shared module, a module above the old 1 MiB direct-PTX
+# bound, CUDA_ERROR_INVALID_PTX and CUDA_ERROR_NOT_FOUND -- on the default
+# backend, strict typed, and the legacy lowering (one metallib per entry; it
+# refuses binary64 memory access).
+foreach(raw_ptx_backend IN ITEMS default cumetal-ir legacy)
+    add_test(
+        NAME functional_driver_raw_ptx_module_${raw_ptx_backend}
+        COMMAND cumetal_driver_raw_ptx_module_test
+    )
+    if(NOT raw_ptx_backend STREQUAL "default")
+        set_tests_properties(functional_driver_raw_ptx_module_${raw_ptx_backend}
+            PROPERTIES ENVIRONMENT "CUMETAL_PTX_BACKEND=${raw_ptx_backend}")
+    endif()
+endforeach()
+
 add_test(
     NAME functional_driver_mem_get_info
     COMMAND cumetal_driver_mem_get_info_test
@@ -4447,6 +4472,22 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 "--expect-output=PASS: embedded pointers survive pinned copies"
     )
     set_tests_properties(functional_cumetalc_pinned_pointer_copies_device_addresses
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+
+    # #222: an FP64 kernel does not send an FP32 kernel of the same module
+    # down the FP64 path on the registration JIT.
+    add_test(
+        NAME functional_cumetalc_registration_fp64_neighbor
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/fp64_neighbor_kernel.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_registration_fp64_neighbor
+                --backend=legacy
+                "--expect-output=PASS: FP64 handling is decided per kernel"
+    )
+    set_tests_properties(functional_cumetalc_registration_fp64_neighbor
         PROPERTIES SKIP_RETURN_CODE 77)
 
     # Shared memory past Metal's 32 KB threadgroup limit runs from the
