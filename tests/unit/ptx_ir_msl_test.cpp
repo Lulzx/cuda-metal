@@ -2092,6 +2092,60 @@ bool test_trap_reporting_accepts_scalar_math_builtins() {
     return ok;
 }
 
+bool test_special_registers_and_unresolved_operands() {
+    using namespace cumetal;
+    bool ok = true;
+    // cuda-samples simpleHyperQ/graphMemoryFootprint spin on clock(): nvcc
+    // and Clang read %clock (or %clock64). The typed importer used to pass
+    // the register name through as a literal, so Metal rejected "%clock".
+    for (const char* reg : {"%clock", "%clock64"}) {
+        const bool wide = std::string(reg) != "%clock";
+        const std::string source = std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry spin(.param .u64 out) {
+    .reg .b32 %r<2>;
+    .reg .b64 %rd<3>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    )ptx") + (wide ? std::string("mov.u64 %rd1, ") + reg + ";\n    cvt.u32.u64 %r1, %rd1;"
+                   : std::string("mov.u32 %r1, ") + reg + ";") + R"ptx(
+    st.global.u32 [%rd2], %r1;
+    ret;
+}
+)ptx";
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(compiled.ok && compiled.source.find("cm_device_clock(") != std::string::npos &&
+                         compiled.source.find('%') == std::string::npos,
+                     std::string(reg) + " lowers to the device clock helper: " + compiled.error);
+    }
+    // A name the importer cannot resolve (cuda-samples LargeKernelParameter
+    // takes the address of an uninitialized __constant__ symbol) must refuse
+    // the import, so registration falls back, instead of reaching Metal as an
+    // undeclared identifier.
+    for (const char* operand : {"%clock_hi", "unknown_symbol"}) {
+        const std::string source = std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.visible .entry unresolved(.param .u64 out) {
+    .reg .b64 %rd<4>;
+    ld.param.u64 %rd1, [out];
+    cvta.to.global.u64 %rd2, %rd1;
+    mov.u64 %rd3, )ptx") + operand + R"ptx(;
+    st.global.u64 [%rd2], %rd3;
+    ret;
+}
+)ptx";
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        ok &= expect(!compiled.ok && compiled.error.find("unresolved PTX operand") != std::string::npos,
+                     std::string("an unresolved operand '") + operand + "' is refused: " +
+                         (compiled.ok ? std::string("accepted") : compiled.error));
+    }
+    return ok;
+}
+
 }  // namespace
 
 int main() {
@@ -2104,6 +2158,7 @@ int main() {
     ok &= test_unbounded_private_store_guard();
     ok &= test_helper_private_store_guard_survives_caller_proof();
     ok &= test_spilled_parameter_pointer_inference();
+    ok &= test_special_registers_and_unresolved_operands();
     const auto packed_atomic = metal::compile_ptx_to_msl(R"ptx(
 .version 7.0
 .target sm_80

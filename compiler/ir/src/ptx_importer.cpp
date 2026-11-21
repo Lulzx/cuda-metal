@@ -1100,6 +1100,51 @@ struct Importer {
     std::optional<Operand> function_return;
     std::map<std::int64_t, Operand> function_return_fields;
 
+    // Operand spellings operand_for could not resolve while translating the
+    // current instruction.
+    std::vector<std::string> unresolved_operands;
+
+    static bool is_ptx_numeric_literal(std::string_view text) {
+        if (text.empty()) return false;
+        if (text == "null") return true;
+        std::size_t i = 0;
+        if (text[i] == '-' || text[i] == '+') ++i;
+        if (i >= text.size()) return false;
+        std::string_view body = text.substr(i);
+        if (!body.empty() && (body.back() == 'U' || body.back() == 'u')) body.remove_suffix(1);
+        if (body.empty()) return false;
+        const auto all_of = [](std::string_view digits, auto predicate) {
+            return !digits.empty() &&
+                   std::all_of(digits.begin(), digits.end(),
+                               [&](char c) { return predicate(static_cast<unsigned char>(c)); });
+        };
+        if (body.size() > 2 && body[0] == '0') {
+            const char kind = body[1];
+            const std::string_view rest = body.substr(2);
+            if (kind == 'x' || kind == 'X' || kind == 'f' || kind == 'F' || kind == 'd' || kind == 'D')
+                return all_of(rest, [](unsigned char c) { return std::isxdigit(c) != 0; });
+            if (kind == 'b' || kind == 'B')
+                return all_of(rest, [](unsigned char c) { return c == '0' || c == '1'; });
+        }
+        bool digit = false;
+        bool exponent = false;
+        bool dot = false;
+        for (std::size_t j = 0; j < body.size(); ++j) {
+            const char c = body[j];
+            if (std::isdigit(static_cast<unsigned char>(c))) {
+                digit = true;
+            } else if (c == '.' && !dot && !exponent) {
+                dot = true;
+            } else if ((c == 'e' || c == 'E') && digit && !exponent) {
+                exponent = true;
+                if (j + 1 < body.size() && (body[j + 1] == '-' || body[j + 1] == '+')) ++j;
+            } else {
+                return false;
+            }
+        }
+        return digit;
+    }
+
     bool fail(const Instruction* instruction, std::string message) {
         if (instruction != nullptr && instruction->line != 0) {
             message = "line " + std::to_string(instruction->line) + ": " + message;
@@ -4429,6 +4474,11 @@ struct Importer {
         if (spelling.size() == 10 && starts_with(spelling, "0f")) {
             return Operand::immediate(spelling, Type::floating(32));
         }
+        // Anything left must be a PTX literal. A special register this
+        // importer does not model, or a symbol it cannot resolve, would
+        // otherwise reach Metal as raw text; translate_instruction refuses
+        // the instruction instead so the caller can fall back.
+        if (!is_ptx_numeric_literal(spelling)) unresolved_operands.push_back(spelling);
         return Operand::immediate(spelling, fallback_type);
     }
 
@@ -5431,7 +5481,12 @@ struct Importer {
                                const Instruction& instruction,
                                std::unordered_map<std::string, ValueId>* environment) {
         const std::size_t begin = block->operations.size();
+        unresolved_operands.clear();
         if (!translate_instruction_impl(function, block, instruction, environment)) return false;
+        if (!unresolved_operands.empty()) {
+            return fail(&instruction, "unresolved PTX operand '" + unresolved_operands.front() +
+                                          "' in " + instruction.opcode);
+        }
         for (std::size_t i = begin; i < block->operations.size(); ++i) {
             const auto& operation = block->operations[i];
             for (std::size_t j = 0; j < operation.results.size(); ++j) {
@@ -6332,6 +6387,24 @@ struct Importer {
         } else if (root == "mov" && instruction.operands.size() >= 2 &&
                    instruction.operands[1].find("%laneid") != std::string::npos) {
             operation.opcode = OpCode::kLaneId;
+        } else if (root == "mov" && instruction.operands.size() >= 2 &&
+                   (trim(instruction.operands[1]) == "%clock" ||
+                    trim(instruction.operands[1]) == "%clock64")) {
+            // Same model as the NVVM importer: a monotonic per-launch
+            // counter, not GPU cycles (Metal exposes no cycle counter).
+            operation.opcode = OpCode::kCall;
+            operation.attributes["callee"] = "cm_device_clock";
+            operation.attributes["builtin"] = "true";
+            if (result.module.semantic_quality == SemanticQuality::kExact) {
+                result.module.semantic_quality = SemanticQuality::kSemanticEmulation;
+            }
+            const std::string caveat =
+                "CUDA device clock uses a monotonic atomic quantum, not GPU cycles";
+            if (std::find(result.module.semantic_caveats.begin(),
+                          result.module.semantic_caveats.end(), caveat) ==
+                result.module.semantic_caveats.end()) {
+                result.module.semantic_caveats.push_back(caveat);
+            }
         } else if (root == "mov" && instruction.operands.size() >= 2 &&
                    trim(instruction.operands[1]).starts_with("%lanemask_")) {
             // Pure functions of the lane index (CUB's radix sort reads
