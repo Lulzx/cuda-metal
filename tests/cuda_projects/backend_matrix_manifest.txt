@@ -23,6 +23,7 @@ tests/cuda_projects/descriptor_copy/descriptor_copy.cu fail pass fail pass
 tests/cuda_projects/device_calls/device_calls.cu fail pass pass pass
 tests/cuda_projects/device_graph_probe/device_graph_probe.cu fail pass pass pass
 tests/cuda_projects/device_printf_clang/device_printf_clang.cu fail pass pass pass
+tests/cuda_projects/device_printf_clang/device_printf_literals.cu fail pass pass fail
 tests/cuda_projects/device_sync_primitives/device_sync_primitives.cu fail pass pass pass
 tests/cuda_projects/dynamic_cooperative_groups/dynamic_cooperative_groups.cu fail pass pass pass
 tests/cuda_projects/flash_attn/flash_standalone.cu fail pass pass pass
@@ -38,6 +39,7 @@ tests/cuda_projects/fp64_vf64_math/fp64_vf64_math.cu fail pass pass pass
 tests/cuda_projects/ggml_output_ops/ggml_output_ops.cu fail pass pass pass
 tests/cuda_projects/initialized_global/initialized_global.cu fail pass pass pass
 tests/cuda_projects/inline_ptx_idioms/inline_ptx_idioms.cu fail pass pass pass
+tests/cuda_projects/intrinsic_conformance/intrinsic_conformance.cu fail pass pass pass
 tests/cuda_projects/libdevice/libdevice_math.cu fail pass pass pass
 tests/cuda_projects/libdevice_frexp/libdevice_frexp.cu fail pass pass pass
 tests/cuda_projects/local_const_tables/local_const_tables.cu fail pass pass pass
@@ -59,7 +61,7 @@ tests/cuda_projects/transpose/transpose_standalone.cu fail pass pass pass
 tests/cuda_projects/vector_add/vector_add.cu fail pass pass pass
 tests/cuda_projects/wide_atomic_contention/wide_atomic_contention.cu fail pass pass pass
 tests/cuda_projects/wide_atomics/wide_atomics.cu fail pass pass pass
-tests/cuda_projects/cta_reduce/cta_reduce.cu fail pass pass pass
+tests/cuda_projects/cta_reduce/cta_reduce.cu fail pass fail pass
 tests/cuda_projects/kokkos_compat/kokkos_compat.cu fail pass pass pass
 tests/cuda_projects/lanemask/lanemask.cu fail pass pass pass
 tests/cuda_projects/thrust_gpu_sort/thrust_gpu_sort.cu fail pass pass pass

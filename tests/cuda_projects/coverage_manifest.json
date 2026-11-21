@@ -85,6 +85,17 @@
       "harness": "standard"
     },
     {
+      "name": "device_printf_literals",
+      "subdir": "device_printf_clang",
+      "source": "device_printf_literals.cu",
+      "binary": "device_printf_literals",
+      "harness": "strict",
+      "expect_pattern": "lit=literal pct=%",
+      "backends": [
+        "native-aot"
+      ]
+    },
+    {
       "name": "device_calls",
       "subdir": "device_calls",
       "source": "device_calls.cu",
@@ -408,6 +419,18 @@
       "source": "cta_reduce.cu",
       "binary": "cta_reduce",
       "harness": "standard"
+    },
+    {
+      "name": "intrinsic_conformance",
+      "subdir": "intrinsic_conformance",
+      "source": "intrinsic_conformance.cu",
+      "binary": "intrinsic_conformance",
+      "harness": "strict",
+      "expect_pattern": "PASS: CUDA intrinsic conformance on Apple GPU",
+      "backends": [
+        "cumetal-ir",
+        "native-aot"
+      ]
     },
     {
       "name": "kokkos_compat",
