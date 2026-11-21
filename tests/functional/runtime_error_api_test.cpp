@@ -272,23 +272,25 @@ int main(int argc, char** argv) {
                            nullptr,
                            nullptr,
                            nullptr);
+    // A registered kernel with no image reports cudaErrorNoKernelImageForDevice,
+    // as CUDA does (#223).
     void* no_kernel_arguments[] = {nullptr};
     (void)cudaLaunchKernel(reinterpret_cast<const void*>(&missing_registered_kernel_stub),
                            dim3(1), dim3(1), no_kernel_arguments, 0, nullptr);
-    if (cudaGetLastError() != cudaErrorInvalidValue ||
+    if (cudaGetLastError() != cudaErrorNoKernelImageForDevice ||
         cudaGetLastError() != cudaSuccess) {
         std::fprintf(stderr,
                      "FAIL: registered launch should expose its immediate validation error\n");
         __cudaUnregisterFatBinary(empty_fatbin);
         return 1;
     }
-    if (cudaDeviceSynchronize() != cudaErrorInvalidValue) {
+    if (cudaDeviceSynchronize() != cudaErrorNoKernelImageForDevice) {
         std::fprintf(stderr,
                      "FAIL: synchronization swallowed an early registered-launch failure\n");
         __cudaUnregisterFatBinary(empty_fatbin);
         return 1;
     }
-    if (cudaGetLastError() != cudaErrorInvalidValue ||
+    if (cudaGetLastError() != cudaErrorNoKernelImageForDevice ||
         cudaGetLastError() != cudaSuccess ||
         cudaDeviceSynchronize() != cudaSuccess) {
         std::fprintf(stderr,
