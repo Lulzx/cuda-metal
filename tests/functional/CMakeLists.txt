@@ -3291,6 +3291,43 @@ add_test(
 )
 set_tests_properties(functional_cooperative_grid_barrier_stress PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60)
 
+# The same grid barrier through the legacy PTX->LLVM lowering.
+add_test(
+    NAME functional_cooperative_grid_barrier_legacy
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative_grid_barrier_probe.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cooperative_grid_barrier_probe_legacy
+            --backend=legacy
+)
+set_tests_properties(functional_cooperative_grid_barrier_legacy PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 30)
+
+# A grid sync one threadgroup never reaches ends in cudaErrorLaunchTimeout from
+# the watchdog (cumetal::abi::kGridSyncSpinBudget, about 6-8 s on an M4 Pro)
+# instead of hanging the host (#175), on both lowerings.
+add_test(
+    NAME functional_cooperative_grid_barrier_timeout
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_grid_sync_timeout.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative_grid_barrier_timeout.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cooperative_grid_barrier_timeout
+)
+add_test(
+    NAME functional_cooperative_grid_barrier_timeout_legacy
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_grid_sync_timeout.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/cooperative_grid_barrier_timeout.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/cooperative_grid_barrier_timeout_legacy
+            --backend=legacy
+)
+set_tests_properties(
+    functional_cooperative_grid_barrier_timeout
+    functional_cooperative_grid_barrier_timeout_legacy
+    PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 60 RUN_SERIAL TRUE)
+
 add_test(
     NAME functional_driver_module_load_data_ptx
     COMMAND bash

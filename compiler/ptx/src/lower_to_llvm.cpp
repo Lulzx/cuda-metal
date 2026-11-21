@@ -1,4 +1,5 @@
 #include "cumetal/ptx/lower_to_llvm.h"
+#include "cumetal/common/kernel_abi.h"
 
 #include "cumetal/passes/phase1_pipeline.h"
 #include "cumetal/ptx/parser.h"
@@ -5319,15 +5320,72 @@ class GenericLlvmEmitter {
                << ", i32 1 release\n";
             os << "  br label %" << arrive_done_label << "\n\n";
 
+            // Watchdog (see cumetal::abi::kGridSyncSpinBudget): a waiter that
+            // never sees the generation flip, because Metal did not make the
+            // whole grid co-resident, leaves after a bounded number of polls
+            // and raises the timeout word, which the runtime reports as
+            // cudaErrorLaunchTimeout instead of hanging (#175).
+            const std::string spin_count_label =
+                "grid_sync_spin_count_" + std::to_string(tmp_id_++);
+            const std::string spin_check_label =
+                "grid_sync_spin_check_" + std::to_string(tmp_id_++);
+            const std::string spin_budget_label =
+                "grid_sync_spin_budget_" + std::to_string(tmp_id_++);
+            const std::string spin_timeout_label =
+                "grid_sync_spin_timeout_" + std::to_string(tmp_id_++);
+            const std::string spin_next_label =
+                "grid_sync_spin_next_" + std::to_string(tmp_id_++);
+            const std::string spins = next_tmp("grid_sync_spins");
+            const std::string spins_next = next_tmp("grid_sync_spins_next");
             os << spin_label << ":\n";
             const std::string observed = next_tmp("grid_sync_observed");
             const std::string released = next_tmp("grid_sync_released");
+            os << "  " << spins << " = phi i32 [ 0, %" << leader_label << " ], [ "
+               << spins_next << ", %" << spin_next_label << " ]\n";
             os << "  " << observed << " = load atomic volatile i32, i32 addrspace(1)* "
                << gen_ptr << " acquire, align 4\n";
             os << "  " << released << " = icmp ne i32 " << observed << ", "
                << generation << "\n";
             os << "  br i1 " << released << ", label %" << arrive_done_label
-               << ", label %" << spin_label << "\n\n";
+               << ", label %" << spin_count_label << "\n\n";
+
+            os << spin_count_label << ":\n";
+            const std::string masked = next_tmp("grid_sync_spin_masked");
+            const std::string due = next_tmp("grid_sync_spin_due");
+            os << "  " << spins_next << " = add i32 " << spins << ", 1\n";
+            os << "  " << masked << " = and i32 " << spins_next << ", "
+               << (cumetal::abi::kGridSyncFlagCheckInterval - 1u) << "\n";
+            os << "  " << due << " = icmp eq i32 " << masked << ", 0\n";
+            os << "  br i1 " << due << ", label %" << spin_check_label
+               << ", label %" << spin_next_label << "\n\n";
+
+            os << spin_check_label << ":\n";
+            const std::string flag_ptr = next_tmp("grid_sync_timeout_ptr");
+            const std::string flag = next_tmp("grid_sync_timeout");
+            const std::string flag_set = next_tmp("grid_sync_timeout_set");
+            os << "  " << flag_ptr
+               << " = getelementptr inbounds i32, i32 addrspace(1)* %__cumetal_grid_barrier, i64 "
+               << cumetal::abi::kGridBarrierTimeoutWord << "\n";
+            os << "  " << flag << " = load atomic volatile i32, i32 addrspace(1)* "
+               << flag_ptr << " acquire, align 4\n";
+            os << "  " << flag_set << " = icmp ne i32 " << flag << ", 0\n";
+            os << "  br i1 " << flag_set << ", label %" << arrive_done_label
+               << ", label %" << spin_budget_label << "\n\n";
+
+            os << spin_budget_label << ":\n";
+            const std::string spent = next_tmp("grid_sync_spin_spent");
+            os << "  " << spent << " = icmp uge i32 " << spins_next << ", "
+               << cumetal::abi::kGridSyncSpinBudget << "\n";
+            os << "  br i1 " << spent << ", label %" << spin_timeout_label
+               << ", label %" << spin_next_label << "\n\n";
+
+            os << spin_timeout_label << ":\n";
+            os << "  store atomic i32 1, i32 addrspace(1)* " << flag_ptr
+               << " release, align 4\n";
+            os << "  br label %" << arrive_done_label << "\n\n";
+
+            os << spin_next_label << ":\n";
+            os << "  br label %" << spin_label << "\n\n";
 
             os << arrive_done_label << ":\n";
             os << "  br label %" << done_label << "\n\n";

@@ -1,3 +1,4 @@
+#include "cumetal/common/kernel_abi.h"
 #include "cumetal/ir/nvvm_importer.h"
 #include "cumetal/metal/lower_to_msl.h"
 
@@ -3220,6 +3221,16 @@ declare double @__nv_hypot(double, double)
         ok &= expect(snapshot != std::string::npos && arrival != std::string::npos &&
                          fence != std::string::npos && fence < arrival,
                      "grid-sync leader fences its generation snapshot before arriving");
+        // A waiter whose generation never flips gives up after a bounded
+        // number of polls and raises the watchdog word (#175).
+        const std::size_t spin = source.find("while (atomic_load_explicit(&barrier[1u]");
+        const std::size_t flag = source.find("atomic_store_explicit(&barrier[2u], 1u", spin);
+        const std::size_t budget =
+            source.find("spins >= " + std::to_string(cumetal::abi::kGridSyncSpinBudget) + "u", spin);
+        ok &= expect(spin != std::string::npos && flag != std::string::npos &&
+                         budget != std::string::npos && budget < flag &&
+                         source.find("atomic_load_explicit(&barrier[2u]", spin) != std::string::npos,
+                     "grid-sync waiters bound their spin and raise the watchdog flag");
     }
 
     const metal::NvvmToMslResult oversized_constant = metal::compile_nvvm_to_msl(
