@@ -5134,13 +5134,38 @@ cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
     return fail(cudaSuccess);
 }
 
+namespace {
+cudaError_t instantiate_graph(cudaGraphExec_t* pGraphExec, cudaGraph_t graph);
+}  // namespace
+
+// CUDA 12's exported form. AUTO_FREE_ON_LAUNCH is honoured; UPLOAD belongs to
+// the WithParams form, and device launch and node priorities are not
+// implemented, so those bits are refused rather than ignored.
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
-                                  cudaGraphNode_t* pErrorNode, char* /*pLogBuffer*/,
-                                  size_t /*bufferSize*/) {
+                                  unsigned long long flags) {
+    if ((flags & ~static_cast<unsigned long long>(
+                     cudaGraphInstantiateFlagAutoFreeOnLaunch)) != 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t status = instantiate_graph(pGraphExec, graph);
+    if (status == cudaSuccess && pGraphExec != nullptr && *pGraphExec != nullptr) {
+        (*pGraphExec)->auto_free_on_launch =
+            (flags & cudaGraphInstantiateFlagAutoFreeOnLaunch) != 0;
+    }
+    return fail(status);
+}
+
+cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
+                                           cudaGraph_t graph,
+                                           unsigned long long flags) {
+    return cudaGraphInstantiate(pGraphExec, graph, flags);
+}
+
+namespace {
+cudaError_t instantiate_graph(cudaGraphExec_t* pGraphExec, cudaGraph_t graph) {
     if (pGraphExec == nullptr || graph == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    if (pErrorNode) { *pErrorNode = nullptr; }
     // Keep the availability check and instance-count reservation atomic. A
     // split check/increment lets two concurrent instantiations both observe
     // zero and violates CUDA's one-executable rule for memory-node graphs.
@@ -5190,21 +5215,7 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
     return fail(cudaSuccess);
 }
 
-cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
-                                           cudaGraph_t graph,
-                                           unsigned long long flags) {
-    if ((flags & ~static_cast<unsigned long long>(
-                     cudaGraphInstantiateFlagAutoFreeOnLaunch)) != 0) {
-        return fail(cudaErrorInvalidValue);
-    }
-    const cudaError_t status =
-        cudaGraphInstantiate(pGraphExec, graph, nullptr, nullptr, 0);
-    if (status == cudaSuccess && pGraphExec != nullptr && *pGraphExec != nullptr) {
-        (*pGraphExec)->auto_free_on_launch =
-            (flags & cudaGraphInstantiateFlagAutoFreeOnLaunch) != 0;
-    }
-    return fail(status);
-}
+}  // namespace
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
     if (graphExec == nullptr) {

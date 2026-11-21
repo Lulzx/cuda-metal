@@ -222,7 +222,7 @@ CUresult cuDriverGetVersion(int* driverVersion);
 // binaries that dlsym "cuGetProcAddress" get the 4-argument ABI they expect.
 CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
                              uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
-#ifndef CUMETAL_DRIVER_DEFINES_UNVERSIONED_GET_PROC_ADDRESS
+#ifndef CUMETAL_DRIVER_API_IMPLEMENTATION
 #define cuGetProcAddress cuGetProcAddress_v2
 #endif
 CUresult cuDeviceGetCount(int* count);
@@ -823,9 +823,30 @@ CUresult cuPointerGetAttributes(unsigned int numAttributes,
 // ── CUDA Graphs (Driver API) ─────────────────────────────────────────────────
 CUresult cuGraphCreate(CUgraph* phGraph, unsigned int flags);
 CUresult cuGraphDestroy(CUgraph hGraph);
-CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
-                             CUgraphNode* phErrorNode, char* logBuffer,
-                             size_t bufferSize);
+typedef enum CUgraphInstantiate_flags_enum {
+    CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH = 1,
+    CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD = 2,
+    CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH = 4,
+    CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY = 8,
+} CUgraphInstantiate_flags;
+// The library exports CUDA 11's 5-argument cuGraphInstantiate (also as
+// cuGraphInstantiate_v2) and CUDA 11.4's cuGraphInstantiateWithFlags. As in
+// NVIDIA's CUDA 12 header, source-level cuGraphInstantiate is the 3-argument
+// flags form from CUDA_VERSION 12000, and the _v2 form before.
+// cuGraphInstantiateWithFlags honours CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
+// any other flag bit is refused with CUDA_ERROR_INVALID_VALUE.
+CUresult cuGraphInstantiate_v2(CUgraphExec* phGraphExec, CUgraph hGraph,
+                               CUgraphNode* phErrorNode, char* logBuffer,
+                               size_t bufferSize);
+CUresult cuGraphInstantiateWithFlags(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags);
+#ifndef CUMETAL_DRIVER_API_IMPLEMENTATION
+#if CUDA_VERSION >= 12000
+#define cuGraphInstantiate cuGraphInstantiateWithFlags
+#else
+#define cuGraphInstantiate cuGraphInstantiate_v2
+#endif
+#endif
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
 CUresult cuGraphExecDestroy(CUgraphExec hGraphExec);
 

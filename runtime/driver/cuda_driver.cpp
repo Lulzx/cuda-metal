@@ -1,6 +1,7 @@
-// This file defines both cuGetProcAddress ABIs under their exported names, so
-// it opts out of cuda.h's source-level cuGetProcAddress -> _v2 mapping.
-#define CUMETAL_DRIVER_DEFINES_UNVERSIONED_GET_PROC_ADDRESS 1
+// This file defines the driver entry points under their exported names
+// (both cuGetProcAddress ABIs, CUDA 11's 5-argument cuGraphInstantiate), so
+// it opts out of cuda.h's source-level versioned-name mappings.
+#define CUMETAL_DRIVER_API_IMPLEMENTATION 1
 #include "cuda.h"
 
 #include "cumetal/air_emitter/emitter.h"
@@ -1153,6 +1154,9 @@ CUresult cuInit(unsigned int flags) {
 // argument dereferenced. cuda.h maps source-level calls to `_v2`.
 extern "C" CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
                                      uint64_t flags);
+extern "C" CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                       CUgraphNode* phErrorNode, char* logBuffer,
+                                       size_t bufferSize);
 
 CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
                              uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
@@ -1175,13 +1179,24 @@ CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
     if (std::strncmp(symbol, "cu", 2) != 0 || symbol[2] < 'A' || symbol[2] > 'Z') {
         return CUDA_ERROR_NOT_FOUND;
     }
-    // The one entry point whose versions are different functions here: a
-    // CUDA 12 caller asking for "cuGetProcAddress" expects
-    // PFN_cuGetProcAddress_v12000 (5 arguments), an older one the 4-argument
-    // form. Every other versioned name is an alias of one implementation.
-    if (std::strcmp(symbol, "cuGetProcAddress") == 0) {
-        *pfn = cudaVersion >= 12000 ? reinterpret_cast<void*>(&cuGetProcAddress_v2)
-                                    : reinterpret_cast<void*>(&cuGetProcAddress);
+    // Names whose ABI changed at CUDA 12.0 and that CuMetal implements in
+    // both forms: a caller asking with cudaVersion >= 12000 expects the
+    // PFN_*_v12000 signature, an older one the previous form. Every other
+    // versioned name is an alias of one implementation.
+    struct VersionedName {
+        const char* name;
+        void* before_12000;
+        void* from_12000;
+    };
+    const VersionedName versioned[] = {
+        {"cuGetProcAddress", reinterpret_cast<void*>(&cuGetProcAddress),
+         reinterpret_cast<void*>(&cuGetProcAddress_v2)},
+        {"cuGraphInstantiate", reinterpret_cast<void*>(&cuGraphInstantiate),
+         reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)},
+    };
+    for (const VersionedName& entry : versioned) {
+        if (std::strcmp(symbol, entry.name) != 0) continue;
+        *pfn = cudaVersion >= 12000 ? entry.from_12000 : entry.before_12000;
         if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
         return CUDA_SUCCESS;
     }
@@ -3751,18 +3766,33 @@ CUresult cuGraphDestroy(CUgraph hGraph) {
     return err == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 
+// CUDA 11's 5-argument form, exported as cuGraphInstantiate and (through the
+// alias list) cuGraphInstantiate_v2. CUDA 12 callers reach the 3-argument
+// cuGraphInstantiateWithFlags instead: cuda.h maps the source spelling and
+// cuGetProcAddress maps the name by requested version.
 CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
-                             CUgraphNode* phErrorNode, char* logBuffer,
-                             size_t bufferSize) {
+                            CUgraphNode* phErrorNode, char* logBuffer,
+                            size_t bufferSize) {
+    if (phErrorNode != nullptr) *phErrorNode = nullptr;
+    // No instantiation diagnostics are produced; leave an empty log.
+    if (logBuffer != nullptr && bufferSize != 0) logBuffer[0] = '\0';
+    return cuGraphInstantiateWithFlags(phGraphExec, hGraph, 0);
+}
+
+CUresult cuGraphInstantiateWithFlags(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags) {
     if (phGraphExec == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
+    // cudaGraphInstantiateWithFlags honours AUTO_FREE_ON_LAUNCH and refuses
+    // every other bit: UPLOAD applies only to the WithParams form, and device
+    // launch and node priorities are not implemented.
+    static_assert(static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH) ==
+                  static_cast<unsigned long long>(cudaGraphInstantiateFlagAutoFreeOnLaunch));
     cudaGraphExec_t exec = nullptr;
-    cudaGraphNode_t errNode = nullptr;
-    cudaError_t err = cudaGraphInstantiate(
-        &exec, reinterpret_cast<cudaGraph_t>(hGraph), &errNode, logBuffer, bufferSize);
+    const cudaError_t err = cudaGraphInstantiateWithFlags(
+        &exec, reinterpret_cast<cudaGraph_t>(hGraph), flags);
     *phGraphExec = reinterpret_cast<CUgraphExec>(exec);
-    if (phErrorNode) { *phErrorNode = reinterpret_cast<CUgraphNode>(errNode); }
     return err == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 

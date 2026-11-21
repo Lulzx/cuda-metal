@@ -3,7 +3,9 @@
 //
 // Versioned driver entry-point typedefs in the shape of NVIDIA's
 // cudaTypedefs.h. CuMetal exports each entry point once with the CUDA 12
-// ABI, so every version of a name shares one signature.
+// ABI, so every version of a name shares one signature, except the names
+// whose ABI changed at CUDA 12.0 (cuGetProcAddress, cuGraphInstantiate),
+// which also carry their pre-12.0 typedefs.
 #ifndef CUMETAL_CUDA_TYPEDEFS_H
 #define CUMETAL_CUDA_TYPEDEFS_H
 
@@ -46,13 +48,12 @@ typedef CUresult (CUDAAPI *PFN_cuEventRecord_v2000)(CUevent hEvent, CUstream hSt
 typedef CUresult (CUDAAPI *PFN_cuEventRecordWithFlags_v11010)(CUevent hEvent, CUstream hStream, unsigned int flags);
 typedef CUresult (CUDAAPI *PFN_cuEventSynchronize_v2000)(CUevent hEvent);
 typedef CUresult (CUDAAPI *PFN_cuFuncSetAttribute_v9000)(CUfunction hfunc, CUfunc_attribute attrib, int value);
-typedef CUresult (CUDAAPI *PFN_cuFuncLoad_v12000)(CUfunction function);
-typedef CUresult (CUDAAPI *PFN_cuFuncIsLoaded_v12000)(CUfunctionLoadingState* state, CUfunction function);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorName_v6000)(CUresult error, const char** pStr);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorString_v6000)(CUresult error, const char** pStr);
-typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v11030)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags);
 typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v12000)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
 typedef CUresult (CUDAAPI *PFN_cuGraphAddNode_v12030)(CUgraphNode* phGraphNode, CUgraph hGraph, const CUgraphNode* dependencies, const CUgraphEdgeData* dependencyData, size_t numDependencies, CUgraphNodeParams* nodeParams);  // not implemented; cuGetProcAddress reports NOT_FOUND
+typedef CUresult (CUDAAPI *PFN_cuGraphInstantiate_v12000)(CUgraphExec* phGraphExec, CUgraph hGraph, unsigned long long flags);
+typedef CUresult (CUDAAPI *PFN_cuGraphInstantiateWithFlags_v11040)(CUgraphExec* phGraphExec, CUgraph hGraph, unsigned long long flags);
 typedef CUresult (CUDAAPI *PFN_cuGraphNodeGetDependentNodes_v10000)(CUgraphNode hNode, CUgraphNode* dependentNodes, size_t* numDependentNodes);  // not implemented; cuGetProcAddress reports NOT_FOUND
 typedef CUresult (CUDAAPI *PFN_cuGraphNodeGetType_v10000)(CUgraphNode hNode, CUgraphNodeType* type);  // not implemented; cuGetProcAddress reports NOT_FOUND
 typedef CUresult (CUDAAPI *PFN_cuGraphicsMapResources_v3000)(unsigned int count, CUgraphicsResource* resources, CUstream hStream);  // not implemented; cuGetProcAddress reports NOT_FOUND
@@ -112,6 +113,9 @@ typedef CUresult (CUDAAPI *PFN_cuStreamUpdateCaptureDependencies_v11030)(CUstrea
 typedef CUresult (CUDAAPI *PFN_cuStreamWaitEvent_v3020)(CUstream hStream, CUevent hEvent, unsigned int flags);
 typedef CUresult (CUDAAPI *PFN_cuTexObjectCreate_v5000)(CUtexObject* pTexObject, const CUDA_RESOURCE_DESC* pResDesc, const CUDA_TEXTURE_DESC* pTexDesc, const CUDA_RESOURCE_VIEW_DESC* pResViewDesc);
 typedef CUresult (CUDAAPI *PFN_cuTexObjectDestroy_v5000)(CUtexObject texObject);
+typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v11030)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags);  // pre-CUDA 12 ABI
+typedef CUresult (CUDAAPI *PFN_cuGraphInstantiate_v10000)(CUgraphExec* phGraphExec, CUgraph hGraph, CUgraphNode* phErrorNode, char* logBuffer, size_t bufferSize);  // pre-CUDA 12 ABI
+typedef CUresult (CUDAAPI *PFN_cuGraphInstantiate_v11000)(CUgraphExec* phGraphExec, CUgraph hGraph, CUgraphNode* phErrorNode, char* logBuffer, size_t bufferSize);  // pre-CUDA 12 ABI
 
 // Unversioned aliases for the CUDA 12 ABI, as NVIDIA's header defines them.
 #define PFN_cuArray3DCreate  PFN_cuArray3DCreate_v3020
@@ -147,12 +151,12 @@ typedef CUresult (CUDAAPI *PFN_cuTexObjectDestroy_v5000)(CUtexObject texObject);
 #define PFN_cuEventRecordWithFlags  PFN_cuEventRecordWithFlags_v11010
 #define PFN_cuEventSynchronize  PFN_cuEventSynchronize_v2000
 #define PFN_cuFuncSetAttribute  PFN_cuFuncSetAttribute_v9000
-#define PFN_cuFuncLoad          PFN_cuFuncLoad_v12000
-#define PFN_cuFuncIsLoaded      PFN_cuFuncIsLoaded_v12000
 #define PFN_cuGetErrorName  PFN_cuGetErrorName_v6000
 #define PFN_cuGetErrorString  PFN_cuGetErrorString_v6000
 #define PFN_cuGetProcAddress  PFN_cuGetProcAddress_v12000
 #define PFN_cuGraphAddNode  PFN_cuGraphAddNode_v12030
+#define PFN_cuGraphInstantiate  PFN_cuGraphInstantiate_v12000
+#define PFN_cuGraphInstantiateWithFlags  PFN_cuGraphInstantiateWithFlags_v11040
 #define PFN_cuGraphNodeGetDependentNodes  PFN_cuGraphNodeGetDependentNodes_v10000
 #define PFN_cuGraphNodeGetType  PFN_cuGraphNodeGetType_v10000
 #define PFN_cuGraphicsMapResources  PFN_cuGraphicsMapResources_v3000

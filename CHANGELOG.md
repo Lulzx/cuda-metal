@@ -70,6 +70,21 @@ All notable changes to CuMetal are documented here. Format follows
   the form the requested CUDA version expects: `_v2` from 12.0, the
   four-argument form before. Warp, which `dlsym`s the plain name and passes a
   NULL fifth argument, is unaffected.
+- **Graph instantiation has CUDA 12's ABI.** The runtime exported
+  `cudaGraphInstantiate` with CUDA 11's five arguments, so a CUDA 12 caller's
+  `flags` landed in `pErrorNode` and was written through. The exported
+  function now takes `(exec, graph, flags)`, and the five-argument spelling is
+  a C++ inline overload, as in NVIDIA's CUDA 12 `cuda_runtime.h`. The driver
+  adds `cuGraphInstantiateWithFlags`. `cuda.h` maps `cuGraphInstantiate` to it
+  from `CUDA_VERSION` 12000, while the exported `cuGraphInstantiate` and
+  `cuGraphInstantiate_v2` keep CUDA 11's five-argument ABI. `cuGetProcAddress`
+  and `cudaGetDriverEntryPoint{,ByVersion}` return `WithFlags` for
+  `"cuGraphInstantiate"` from 12.0 and the five-argument form before.
+  `AUTO_FREE_ON_LAUNCH` is honoured. `UPLOAD`, `DEVICE_LAUNCH`,
+  `USE_NODE_PRIORITY` and unknown bits return `CUDA_ERROR_INVALID_VALUE` /
+  `cudaErrorInvalidValue` instead of being ignored. `cudaTypedefs.h` gains
+  `PFN_cuGraphInstantiate_v{10000,11000,12000}`,
+  `PFN_cuGraphInstantiateWithFlags_v11040` and `PFN_cuGetProcAddress_v11030`.
 - **Run-time FP64 PTX takes the typed path with exact argument metadata
   (#231).** `max.f64`/`min.f64` were accepted by the typed importer but had no
   software-FP64 lowering, so every module with them (xgrid-gpu's
