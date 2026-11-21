@@ -80,10 +80,12 @@ holds the exact boundary.
 - Cooperative grid sync only up to one resident block per reported GPU core.
 - 31 argument buffer slots; kernels using hidden features lose slots 25-30.
 - Stream priorities are always zero; device clocks are not cycle counts.
-- A pointer passed as a plain 64-bit integer kernel argument and dereferenced
-  only after a round trip through memory is honoured as a device address only
-  under `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`; by default the GPU reads through
-  the host address and gets garbage. Parameter inference recognises a handle
+- A pointer passed as a plain 64-bit integer kernel argument, or written by
+  the host straight into managed or mapped memory, is honoured as a device
+  address only under `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, which costs
+  cross-stream concurrency; by default the GPU reads through the host address
+  and gets garbage. Pointers kernels store and pointers copied in with
+  `cudaMemcpy*` work in either mode. Parameter inference recognises a handle
   spilled into a stack struct that a helper dereferences (COLMAP's texture
   objects); other shapes are not detected.
 - `nvcc --default-stream per-thread` is accepted and defines

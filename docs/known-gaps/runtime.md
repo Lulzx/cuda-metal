@@ -179,19 +179,29 @@ fire-and-forget graph semantics are not implemented.
   carveout attributes are validated advisory calls only; they cannot change a
   Metal pipeline's cache or bank organization.
 - Memory-pool attributes exceed the allocator's current reuse behavior.
-- A kernel that dereferences a device pointer it *loaded from device memory*,
-  rather than received as a launch argument, needs
-  `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`. Without it the load silently reads
-  zeros for any allocation larger than a few KiB: no error is raised, because
-  from Metal's side nothing invalid happened -- the allocation simply was not
-  resident for that dispatch. This affects every framework that keeps a
-  device-side table of pointers, which is the normal way to express a
-  multi-buffer kernel: PhysX's descriptor structs
-  ([feasibility notes](../physx-feasibility.md)) and AMReX's per-box `Array4`
-  array ([AMReX demo](../../demos/amrex/README.md)) both hit it. The mode marks
-  every live allocation resident on every dispatch, which costs cross-stream
-  concurrency, so it is opt-in. Detecting the pattern at lowering time and
-  warning is open work.
+- A kernel may dereference a device pointer it *loaded from device memory*
+  rather than received as a launch argument (PhysX's descriptor structs,
+  AMReX's per-box `Array4` array). Every allocation is kept in a Metal
+  residency set attached to every command queue, so such a pointer reaches a
+  resident allocation in either pointer mode; before, the default mode read
+  zeros and dropped writes for any allocation from 1 MiB up, with no error.
+  What still decides the mode is how the stored pointer was *written*:
+  - Pointers a kernel stored, and pointers the host copied in with
+    `cudaMemcpy*` or `cuMemcpy*` (which rewrite them to GPU addresses), work
+    in the default mode.
+  - Pointers the host writes straight into memory the GPU reads -- managed,
+    mapped-pinned or registered host memory filled through its CPU mapping --
+    are CPU addresses in the default mode and read garbage on the GPU. So is a
+    pointer passed as a plain 64-bit integer argument. These need
+    `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, under which public device pointers
+    are GPU addresses.
+  - That mode also declares every live allocation read-write on every
+    dispatch, because a kernel's pointer-reached accesses are otherwise
+    invisible to Metal's hazard tracking. The declarations order every
+    dispatch after every other, which removes cross-stream concurrency.
+    Replacing them with residency alone would leave dispatches on one stream
+    unordered against each other's pointer-reached writes, so the mode keeps
+    them until stream ordering no longer depends on Metal's tracking.
 
 ## Textures, surfaces, and printf
 

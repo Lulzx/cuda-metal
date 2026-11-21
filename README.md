@@ -103,6 +103,11 @@ limits, and
 - FP64 uses emulation with mode-dependent precision; it is not native Metal FP64.
 - Cooperative grids, dynamic launch, graphs, and textures have bounded or
   incomplete support. See [known gaps](docs/known-gaps.md) for exact limits.
+- Device pointers the host writes directly into managed or mapped memory, or
+  passes as plain integers, need `CUMETAL_USE_METAL_DEVICE_ADDRESSES=1`, which
+  serializes work across streams. Pointers stored by kernels or copied in with
+  `cudaMemcpy*` need nothing
+  ([details](docs/known-gaps/runtime.md#memory-and-pointers)).
 
 ## Documentation
 

@@ -52,6 +52,42 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Allocations reached through stored device addresses are resident (#224).**
+  A kernel following a pointer it loaded from device memory touched an
+  allocation it never bound; in the default pointer mode the GPU read zeros
+  and dropped the writes for every allocation from 1 MiB up, with no error.
+  Every allocation now joins a Metal residency set on every command queue.
+  Residency declares no usage, so cross-stream concurrency is unaffected.
+- **Embedded pointers survive pinned-memory copies (#225).** A stream-ordered
+  copy between pinned host memory and device memory used a verbatim blit, so
+  pointers a kernel wrote reached the host as GPU addresses (PhysX contact
+  reports crashed dereferencing them) and host-written pointers reached
+  kernels as CPU addresses. The rewrite direction now follows where each end
+  lives, not the `cudaMemcpyKind` (`cudaMemcpyDefault` between pinned and
+  device memory resolves to device-to-device), and only copies needing no
+  rewrite stay on the blit. Restored device pointers are the application's
+  public pointers in both pointer modes.
+- **Driver memsets are stream-ordered (#211).** `cuMemsetD16Async` and
+  `cuMemsetD32Async` ignored their stream and wrote at once, and the
+  synchronous D16/D32/D2D forms and `cudaMemset2D`/`3D` did not wait for queued
+  kernels, so a clear could land before a kernel still writing the buffer.
+  All of them now share one element fill ordered like `cudaMemset` or
+  `cudaMemsetAsync`, including event waits and graph capture.
+- **Raw PTX through the driver API (#222).** `cuModuleLoadData` recognised
+  direct PTX text only up to 1 MiB; the bound is now 1 GiB. A module whose
+  kernels needed the FP64 or libdevice helpers left the typed driver JIT for
+  the legacy lowering, which built only the first entry and wrote no ABI
+  sidecar, so other kernels were missing and launches guessed argument counts.
+  The typed path now includes the helpers in each entry's translation unit and
+  retries a declined entry with the legacy MSL lowering; the legacy LLVM path
+  builds one metallib per entry. A module the JIT cannot compile reports
+  `CUDA_ERROR_INVALID_PTX`, and `cuModuleGetFunction` on a name a JIT-built
+  module lacks reports `CUDA_ERROR_NOT_FOUND`.
+- **Failure paths that looked like success (#223).** A registered kernel with
+  no metallib fails its launch with `cudaErrorNoKernelImageForDevice` instead
+  of `cudaErrorInvalidValue`, and `cumetalc` warns when device-only kernels
+  (for example under `#ifdef __CUDA_ARCH__`) get no metallib.
+
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the
