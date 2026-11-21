@@ -68,8 +68,8 @@ CUDA C++ / PTX → CuMetal compiler → Metal Shading Language → Apple tools �
   atomics use device-coherent payload pointers and device fences, covering
   binary64 `atomicAdd` and cross-block scan descriptors.
 
-The proof rules behind the PTX path are in
-[compiler architecture](docs/compiler-architecture.md#ptx-memory-proof-rules);
+The proof rules behind the PTX path are in the "PTX memory proof rules"
+section of [compiler architecture](docs/compiler-architecture.md);
 [known gaps](docs/known-gaps.md) lists memory-provenance and legacy-backend
 limits.
 
