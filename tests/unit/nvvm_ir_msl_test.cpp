@@ -65,6 +65,75 @@ declare i32 @llvm.nvvm.read.ptx.sreg.ntid.x()
 declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
 )llvm";
 
+// __fadd_rn(__fmul_rn(a, b), c) next to the same a * b + c spelled with
+// contract flags. The explicit-rounding pair must stay two roundings and the
+// contractable pair must become one fma, or Metal's GVN merges them.
+constexpr const char* kNvvmExplicitRounding = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @contract(ptr %a, ptr %b, ptr %c, ptr %expr, ptr %split, ptr %product) {
+entry:
+  %thread = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %wide = sext i32 %thread to i64
+  %pa = getelementptr float, ptr %a, i64 %wide
+  %va = load float, ptr %pa, align 4
+  %pb = getelementptr float, ptr %b, i64 %wide
+  %vb = load float, ptr %pb, align 4
+  %pc = getelementptr float, ptr %c, i64 %wide
+  %vc = load float, ptr %pc, align 4
+  %m = fmul contract float %va, %vb
+  %e = fadd contract float %m, %vc
+  %pe = getelementptr float, ptr %expr, i64 %wide
+  store float %e, ptr %pe, align 4
+  %rm = call float @__nv_fmul_rn(float %va, float %vb)
+  %rs = call float @__nv_fadd_rn(float %rm, float %vc)
+  %ps = getelementptr float, ptr %split, i64 %wide
+  store float %rs, ptr %ps, align 4
+  %shared = fmul contract float %va, %vc
+  %twice = fadd contract float %shared, %shared
+  %pp = getelementptr float, ptr %product, i64 %wide
+  store float %twice, ptr %pp, align 4
+  ret void
+}
+
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+declare float @__nv_fmul_rn(float, float)
+declare float @__nv_fadd_rn(float, float)
+)llvm";
+
+constexpr const char* kNvvmCtaReductions = R"llvm(
+target datalayout = "e-p:64:64-i64:64-n16:32:64"
+target triple = "nvptx64-nvidia-cuda"
+
+define ptx_kernel void @votes(ptr %in, ptr %out) {
+entry:
+  %thread = call i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+  %wide = sext i32 %thread to i64
+  %pi = getelementptr i32, ptr %in, i64 %wide
+  %v = load i32, ptr %pi, align 4
+  %p = icmp ne i32 %v, 0
+  %count = call i32 @llvm.nvvm.barrier.cta.red.popc.aligned.all(i32 0, i1 %p)
+  %all = call i1 @llvm.nvvm.barrier.cta.red.and.aligned.all(i32 0, i1 %p)
+  %any = call i1 @llvm.nvvm.barrier.cta.red.or.aligned.all(i32 0, i1 %p)
+  %old = call i32 @llvm.nvvm.barrier0.and(i32 %v)
+  %all32 = zext i1 %all to i32
+  %any32 = zext i1 %any to i32
+  %s0 = add i32 %count, %all32
+  %s1 = add i32 %s0, %any32
+  %s2 = add i32 %s1, %old
+  %po = getelementptr i32, ptr %out, i64 %wide
+  store i32 %s2, ptr %po, align 4
+  ret void
+}
+
+declare i32 @llvm.nvvm.read.ptx.sreg.tid.x()
+declare i32 @llvm.nvvm.barrier.cta.red.popc.aligned.all(i32, i1)
+declare i1 @llvm.nvvm.barrier.cta.red.and.aligned.all(i32, i1)
+declare i1 @llvm.nvvm.barrier.cta.red.or.aligned.all(i32, i1)
+declare i32 @llvm.nvvm.barrier0.and(i32)
+)llvm";
+
 constexpr const char* kNvvmButterflyReduce = R"llvm(
 target datalayout = "e-p:64:64-i64:64-n16:32:64"
 target triple = "nvptx64-nvidia-cuda"
@@ -4261,6 +4330,41 @@ DONE:
                  "PTX packed parameter with padding word lowers through typed IR");
     if (!packed.ok) {
         std::cerr << packed.error << "\n";
+    }
+
+    {
+        const metal::NvvmToMslResult rounding =
+            metal::compile_nvvm_to_msl(kNvvmExplicitRounding, "rounding.ll", "contract");
+        const std::string& msl = rounding.source;
+        ok &= expect(rounding.ok && msl.find("cm_fmul_rn(") != std::string::npos &&
+                         msl.find("cm_fadd_rn(") != std::string::npos &&
+                         msl.find("#pragma METAL fp contract(off)") != std::string::npos,
+                     "__nv_fmul_rn/__nv_fadd_rn lower to uncontracted helpers: " + rounding.error);
+        std::size_t fmas = 0;
+        for (std::size_t at = msl.find("fma("); at != std::string::npos; at = msl.find("fma(", at + 1))
+            ++fmas;
+        ok &= expect(fmas == 1,
+                     "a single-use contract fmul feeding a contract fadd becomes one fma, "
+                     "and a multi-use product is left to Metal");
+    }
+    {
+        const metal::NvvmToMslResult votes =
+            metal::compile_nvvm_to_msl(kNvvmCtaReductions, "votes.ll", "votes");
+        ok &= expect(votes.ok && votes.source.find("cm_cta_count(") != std::string::npos &&
+                         votes.source.find("cm_cta_all(") != std::string::npos &&
+                         votes.source.find("cm_cta_any(") != std::string::npos &&
+                         votes.source.find("atomic_fetch_and_explicit") != std::string::npos,
+                     "__syncthreads_count/_and/_or intrinsics lower to CTA reductions: " + votes.error);
+        std::string named = kNvvmCtaReductions;
+        const std::string barrier0 = "popc.aligned.all(i32 0, i1 %p)";
+        named.replace(named.find(barrier0), barrier0.size(), "popc.aligned.all(i32 1, i1 %p)");
+        ok &= expect(!metal::compile_nvvm_to_msl(named, "votes.ll", "votes").ok,
+                     "a CTA reduction on a named barrier other than 0 is refused");
+        std::string counted = kNvvmCtaReductions;
+        for (std::size_t at = 0; (at = counted.find("or.aligned.all", at)) != std::string::npos;)
+            counted.replace(at, 14, "or.aligned.count");
+        ok &= expect(!metal::compile_nvvm_to_msl(counted, "votes.ll", "votes").ok,
+                     "a thread-count CTA reduction is refused rather than run on the whole block");
     }
 
     if (!ok) return 1;

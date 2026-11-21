@@ -132,6 +132,7 @@ public:
         // non-kernel function before emitting definitions in source order.
         for (const MslFunction& function : module.functions) {
             if (function.is_kernel) continue;
+            if (function.internal_linkage) out_ << "static inline ";
             out_ << function.return_type.str() << " "
                  << sanitize_identifier(function.name) << "(";
             for (std::size_t i = 0; i < function.parameters.size(); ++i) {
@@ -158,6 +159,7 @@ public:
             if (function.is_kernel) {
                 out_ << "kernel ";
             }
+            if (function.internal_linkage) out_ << "static inline ";
             out_ << function.return_type.str() << " " << name;
             // Kernel attributes (e.g. max_total_threads_per_threadgroup)
             // sit between the function name and the parameter list in MSL.
@@ -188,6 +190,7 @@ public:
                 out_ << (i + 1 == function.parameters.size() ? "\n" : ",\n");
             }
             out_ << ") {\n";
+            if (function.fp_contract_off) out_ << "#pragma METAL fp contract(off)\n";
             for (const MslStmt& statement : function.statements) {
                 print_statement(statement, 1);
             }

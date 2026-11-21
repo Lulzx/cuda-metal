@@ -237,6 +237,13 @@ struct MslFunction {
     std::vector<MslParameter> parameters;
     std::vector<MslAttribute> attributes;
     std::vector<MslStmt> statements;
+    // Emit `#pragma METAL fp contract(off)` at the top of the body, so no
+    // operation in it is fused into an FMA even after inlining.
+    bool fp_contract_off = false;
+    // `static inline`: a module-private helper. Each entry of a multi-kernel
+    // PTX module may be lowered to its own .metal file and linked into one
+    // metallib, so an external helper defined by two of them collides.
+    bool internal_linkage = false;
 };
 
 struct MslStructField {

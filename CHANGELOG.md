@@ -75,6 +75,30 @@ All notable changes to CuMetal are documented here. Format follows
 - **Metal compile errors carry Apple's diagnostics.** "failed to compile
   .metal to .air" now includes the first 2 KB of `xcrun metal` output.
 
+- **`__fmul_rn`/`__fadd_rn`/`__fsub_rn` are never contracted** (Cuport-Matrix
+  `fp-semantics/fma-contraction-001`, #208). They and PTX `add/sub/mul.rn.f32`
+  lower to `cm_f{add,sub,mul}_rn` helpers compiled under
+  `#pragma METAL fp contract(off)`. The NVVM importer now contracts a
+  single-use `fmul contract` feeding an `fadd contract` into `fma` itself, as
+  NVPTX does; leaving that to Metal let its GVN merge an uncontracted
+  `__fmul_rn`/`__fadd_rn` pair with an identical `a * b + c` and drop the
+  contraction from both. `--fmad=false` now also reaches clang
+  (`-ffp-contract=off`); before, the PTX and device IR were already fused.
+- **`__shfl_xor_sync` and `__shfl_down_sync` with `width < 32`** (Cuport-Matrix
+  `warp-primitives/shfl-xor-width-001`, #206). The xor overloads were an
+  indexed shuffle of `lane ^ laneMask`, which wraps the partner into the
+  caller's segment; CUDA lets a lane read an earlier segment. They now use
+  `shfl.sync.bfly`, and every backend applies the PTX `maxLane` rule:
+  the typed backend ignored the segment mask in `maxLane`, so `down`/`bfly`
+  read past the end of a segment, and both legacy backends refused
+  earlier-segment butterfly partners.
+- **`__syncthreads_count`, `__syncthreads_and`, `__syncthreads_or`**
+  (Cuport-Matrix `shared-memory-barriers/syncthreads-count-001`). The NVVM
+  importer accepts `llvm.nvvm.barrier.cta.red.{popc,and,or}.aligned.all` and
+  `llvm.nvvm.barrier0.{popc,and,or}`, and the typed PTX path adds
+  `bar.red.and.pred`, all as threadgroup reductions. A named barrier other
+  than 0 or a `.count` subset is refused. The legacy LLVM backend refuses
+  `bar.red` instead of emitting a barrier and writing 0.
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
   returns the border colour (zero) outside the texture instead of clamping,
   for unnormalized coordinates too, and `tex2DLayered` honours

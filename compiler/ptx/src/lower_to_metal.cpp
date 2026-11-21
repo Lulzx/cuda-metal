@@ -2949,11 +2949,12 @@ std::string emit_metal_source_generic(const std::string& entry_name,
                 metal << "    bool " << valid_v << " = " << local_v << " >= " << delta_v << ";\n";
             } else if (op.find(".bfly.") != std::string::npos) {
                 const std::string xor_v = "__cm_shfl_xor_" + std::to_string(sid);
-                const std::string tlocal_v = "__cm_shfl_tlocal_" + std::to_string(sid);
-                metal << "    uint " << xor_v << " = (uint)(" << lane << ");\n";
-                metal << "    uint " << tlocal_v << " = " << local_v << " ^ " << xor_v << ";\n";
-                metal << "    uint " << target_v << " = " << base_v << " + " << tlocal_v << ";\n";
-                metal << "    bool " << valid_v << " = " << tlocal_v << " < " << width_v << ";\n";
+                // PTX: j = lane ^ b[4:0], valid iff j <= maxLane. A partner
+                // in an earlier segment is readable; only one past the end of
+                // the caller's segment keeps the caller's own value.
+                metal << "    uint " << xor_v << " = (uint)(" << lane << ") & 31u;\n";
+                metal << "    uint " << target_v << " = " << lane_id_v << " ^ " << xor_v << ";\n";
+                metal << "    bool " << valid_v << " = " << target_v << " < (" << base_v << " + " << width_v << ");\n";
             } else {
                 const std::string src_local_v = "__cm_shfl_src_local_" + std::to_string(sid);
                 metal << "    uint " << src_local_v << " = ((uint)(" << lane << ")) & (" << width_v << " - 1u);\n";

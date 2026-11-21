@@ -891,6 +891,15 @@ set_tests_properties(functional_cuda_projects_cta_reduce PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir")
 
+add_test(NAME functional_cuda_projects_intrinsic_conformance
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        intrinsic_conformance intrinsic_conformance.cu intrinsic_conformance
+        "PASS: CUDA intrinsic conformance on Apple GPU")
+set_tests_properties(functional_cuda_projects_intrinsic_conformance PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir")
+
 add_test(NAME functional_cuda_projects_thrust_gpu_sort
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
         ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}

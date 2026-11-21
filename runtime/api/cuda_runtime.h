@@ -3070,6 +3070,18 @@ static __device__ __forceinline__ int __cumetal_shfl_sync_down_i32(unsigned int 
     return out;
 }
 
+// __shfl_xor_sync is a real butterfly, not an indexed shuffle of lane^mask:
+// PTX shfl.bfly lets a lane read an earlier width-segment and keeps its own
+// value only when the partner lies past the end of its segment. An indexed
+// shuffle wraps the partner back into the caller's segment instead.
+static __device__ __forceinline__ int __cumetal_shfl_sync_bfly_i32(unsigned int mask, int val, int laneMask, int clamp) {
+    int out;
+    asm volatile("shfl.sync.bfly.b32 %0, %1, %2, %3, %4;"
+                 : "=r"(out)
+                 : "r"(val), "r"(laneMask), "r"(clamp), "r"(mask));
+    return out;
+}
+
 static __device__ __forceinline__ int __cumetal_shfl_sync_up_i32(unsigned int mask, int val, unsigned int delta, int clamp) {
     int out;
     asm volatile("shfl.sync.up.b32 %0, %1, %2, %3, %4;"
@@ -3207,25 +3219,16 @@ static __device__ __forceinline__ double __shfl_up_sync(
     return out;
 }
 static __device__ __forceinline__ int __shfl_xor_sync(unsigned int mask, int val, int laneMask, int width = 32) {
-    unsigned int laneid;
-    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
-    const int srcLane = static_cast<int>(laneid) ^ laneMask;
-    return __cumetal_shfl_sync_idx_i32(mask, val, srcLane, __cumetal_shfl_clamp(width, 0x1f));
+    return __cumetal_shfl_sync_bfly_i32(mask, val, laneMask, __cumetal_shfl_clamp(width, 0x1f));
 }
 static __device__ __forceinline__ float __shfl_xor_sync(unsigned int mask, float val, int laneMask, int width = 32) {
-    unsigned int laneid;
-    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
-    const int srcLane = static_cast<int>(laneid) ^ laneMask;
-    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), srcLane,
-                                                     __cumetal_shfl_clamp(width, 0x1f));
+    const int out_bits = __cumetal_shfl_sync_bfly_i32(mask, __cumetal_shfl_f32_bits_to_i32(val), laneMask,
+                                                      __cumetal_shfl_clamp(width, 0x1f));
     return __cumetal_shfl_i32_bits_to_f32(out_bits);
 }
 static __device__ __forceinline__ unsigned int __shfl_xor_sync(unsigned int mask, unsigned int val, int laneMask, int width = 32) {
-    unsigned int laneid;
-    asm("mov.u32 %0, %%laneid;" : "=r"(laneid));
-    const int srcLane = static_cast<int>(laneid) ^ laneMask;
-    const int out_bits = __cumetal_shfl_sync_idx_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), srcLane,
-                                                     __cumetal_shfl_clamp(width, 0x1f));
+    const int out_bits = __cumetal_shfl_sync_bfly_i32(mask, __cumetal_shfl_u32_bits_to_i32(val), laneMask,
+                                                      __cumetal_shfl_clamp(width, 0x1f));
     return __cumetal_shfl_i32_bits_to_u32(out_bits);
 }
 static __device__ __forceinline__ unsigned long long __shfl_xor_sync(
