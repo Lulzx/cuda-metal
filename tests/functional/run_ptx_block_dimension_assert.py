@@ -52,7 +52,7 @@ with tempfile.TemporaryDirectory(prefix='cumetal-block-assert-') as work:
             cases.append((count,stream,words))
         for count,stream,words in cases:
             bad = traps(count)
-            api('cuStreamSynchronize', [ptr], stream, expected=719 if bad else 0)
+            api('cuStreamSynchronize', [ptr], stream, expected=710 if bad else 0)  # CUDA_ERROR_ASSERT
             if not bad:
                 # The kernel stores the guarded register: ntid.y, or tid.y once
                 # the guard is lane-dependent.

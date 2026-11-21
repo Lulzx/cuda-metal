@@ -76,6 +76,8 @@ namespace {
 extern "C" int cumetalRuntimeIsDevicePointer(const void* ptr);
 extern "C" cudaError_t cumetalFuncAttributesFromKernelProperties(
     const cumetal::metal_backend::KernelProperties& kernel, cudaFuncAttributes* attr);
+extern "C" cudaError_t cumetalSetMaxDynamicSharedBytes(
+    const cumetal::metal_backend::KernelProperties& kernel, int value);
 extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
 extern "C" int cumetalRuntimeIsManaged(const void* ptr);
 extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
@@ -1165,11 +1167,12 @@ CUresult cuDeviceGetAttribute(int* pi, CUdevice_attribute attrib, CUdevice dev) 
             *pi = prop.maxGridSize[2];
             break;
         case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK:
-        // Metal has one threadgroup memory limit, with no opt-in tier above the
-        // default the way NVIDIA's carve-out works, so the opt-in query answers
-        // with the same budget rather than refusing.
-        case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN:
             *pi = static_cast<int>(prop.sharedMemPerBlock);
+            break;
+        // Past Metal's threadgroup limit a kernel's shared memory spills to
+        // device memory, up to the opt-in ceiling the runtime reports.
+        case CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN:
+            *pi = static_cast<int>(prop.sharedMemPerBlockOptin);
             break;
         // Apple Silicon exposes no PCI enumeration. A host asking for the PCI
         // triple is building a device identity or comparing two ordinals, and
@@ -3399,11 +3402,11 @@ CUresult cuOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
     int memory_bound = thread_bound;
     const size_t total_shared =
         kernel.static_threadgroup_memory_bytes + dynamicSMemSize;
-    if (total_shared > static_cast<size_t>(device.sharedMemPerBlock))
+    if (total_shared > device.sharedMemPerBlockOptin)
         return CUDA_ERROR_INVALID_VALUE;
     if (total_shared > 0)
         memory_bound = std::max(
-            1, static_cast<int>(device.sharedMemPerBlock / total_shared));
+            1, static_cast<int>(device.sharedMemPerMultiprocessor / total_shared));
     *numBlocks = std::min(thread_bound, memory_bound);
     return CUDA_SUCCESS;
 }
@@ -3526,18 +3529,7 @@ CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) 
         case CU_FUNC_ATTRIBUTE_SHARED_SIZE_BYTES:
             *pi = static_cast<int>(kernel.static_threadgroup_memory_bytes);
             break;
-        case CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES: {
-            cudaDeviceProp device{};
-            if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
-                return CUDA_ERROR_INVALID_VALUE;
-            *pi = kernel.static_threadgroup_memory_bytes >=
-                          static_cast<size_t>(device.sharedMemPerBlock)
-                      ? 0
-                      : static_cast<int>(
-                            static_cast<size_t>(device.sharedMemPerBlock) -
-                            kernel.static_threadgroup_memory_bytes);
-            break;
-        }
+        case CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES:
         case CU_FUNC_ATTRIBUTE_NUM_REGS:
         case CU_FUNC_ATTRIBUTE_PTX_VERSION:
         case CU_FUNC_ATTRIBUTE_BINARY_VERSION: {
@@ -3547,7 +3539,9 @@ CUresult cuFuncGetAttribute(int* pi, CUfunc_attribute attrib, CUfunction hfunc) 
             if (status != cudaSuccess) return CUDA_ERROR_INVALID_VALUE;
             *pi = attrib == CU_FUNC_ATTRIBUTE_NUM_REGS      ? attributes.numRegs
                   : attrib == CU_FUNC_ATTRIBUTE_PTX_VERSION ? attributes.ptxVersion
-                                                            : attributes.binaryVersion;
+                  : attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES
+                      ? attributes.maxDynamicSharedSizeBytes
+                      : attributes.binaryVersion;
             break;
         }
         case CU_FUNC_ATTRIBUTE_CONST_SIZE_BYTES:
@@ -3583,18 +3577,10 @@ CUresult cuFuncSetAttribute(CUfunction hfunc, CUfunc_attribute attrib, int value
     cumetal::metal_backend::KernelProperties kernel{};
     const CUresult query = query_function_properties(hfunc, &kernel);
     if (query != CUDA_SUCCESS) return query;
-    cudaDeviceProp device{};
-    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
-        return CUDA_ERROR_INVALID_VALUE;
-    const size_t max_dynamic = kernel.static_threadgroup_memory_bytes >=
-                                       static_cast<size_t>(device.sharedMemPerBlock)
-                                   ? 0
-                                   : static_cast<size_t>(device.sharedMemPerBlock) -
-                                         kernel.static_threadgroup_memory_bytes;
-    if ((attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES &&
-         (value < 0 || static_cast<size_t>(value) > max_dynamic)) ||
-        (attrib == CU_FUNC_ATTRIBUTE_PREFERRED_SHARED_MEMORY_CARVEOUT &&
-         (value < -1 || value > 100))) {
+    if (attrib == CU_FUNC_ATTRIBUTE_MAX_DYNAMIC_SHARED_SIZE_BYTES) {
+        return map_cuda_error(cumetalSetMaxDynamicSharedBytes(kernel, value));
+    }
+    if (value < -1 || value > 100) {
         return CUDA_ERROR_INVALID_VALUE;
     }
     return CUDA_SUCCESS;

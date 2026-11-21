@@ -52,9 +52,16 @@ cudaError_t check_launch_status(id<MTLCommandBuffer> command_buffer,
                                 std::string* error_message) {
     const auto status = check_command_buffer_status(command_buffer, error_message);
     if (status != cudaSuccess) return status;
-    if (trap_status && *static_cast<const std::uint32_t*>(trap_status->contents()) != 0) {
-        if (error_message) *error_message = "PTX kernel executed trap";
-        return cudaErrorLaunchFailure;
+    if (trap_status) {
+        const std::uint32_t word = *static_cast<const std::uint32_t*>(trap_status->contents());
+        if ((word & cumetal::abi::kTrapStatusAssert) != 0) {
+            if (error_message) *error_message = "device-side assert triggered";
+            return cudaErrorAssert;
+        }
+        if (word != 0) {
+            if (error_message) *error_message = "PTX kernel executed trap";
+            return cudaErrorLaunchFailure;
+        }
     }
     return cudaSuccess;
 }
@@ -558,12 +565,15 @@ public:
         (void)flush_open_batch_locked();
     }
 
+    // `retained` lives until the command buffer is retired, like trap_status.
     std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer, std::shared_ptr<Buffer> trap_status = {},
-                              std::shared_ptr<Buffer> grid_barrier = {}) {
+                              std::shared_ptr<Buffer> grid_barrier = {}, std::shared_ptr<Buffer> retained = {}) {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::uint64_t ticket = next_ticket_++;
-        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer, .trap_status = std::move(trap_status),
-                                                 .grid_barrier = std::move(grid_barrier)});
+        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer,
+                                                 .trap_status = std::move(trap_status),
+                                                 .grid_barrier = std::move(grid_barrier),
+                                                 .retained = std::move(retained)});
         return ticket;
     }
 
@@ -589,7 +599,9 @@ public:
             if (completion != MTLCommandBufferStatusCompleted && completion != MTLCommandBufferStatusError)
                 return cudaSuccess;
             cudaError_t status = check_launch_status(front.command_buffer, front.trap_status, error_message);
-            if (front.trap_status && status == cudaErrorLaunchFailure) trap_error_ = status;
+            if (front.trap_status &&
+                (status == cudaErrorLaunchFailure || status == cudaErrorAssert))
+                trap_error_ = status;
             if (status == cudaSuccess) {
                 status = check_grid_barrier_status(front.grid_barrier, error_message);
                 if (status != cudaSuccess) trap_error_ = status;
@@ -676,6 +688,7 @@ private:
         id<MTLCommandBuffer> command_buffer = nil;
         std::shared_ptr<Buffer> trap_status;
         std::shared_ptr<Buffer> grid_barrier;
+        std::shared_ptr<Buffer> retained;
     };
     cudaError_t trap_error_ = cudaSuccess;
 
@@ -760,6 +773,13 @@ struct BackendState {
     std::unordered_map<std::string, bool> pipeline_uses_device_clock;
     std::unordered_map<std::string, bool> pipeline_uses_grid_barrier;
     std::unordered_map<std::string, bool> pipeline_uses_grid_y_offset;
+    // Shared-memory spill variant per "metallib::kernel" (see
+    // compiler/metal/src/shared_spill.h); nullopt when the library has none.
+    struct SharedSpillVariant {
+        std::string function_name;
+        std::size_t static_bytes = 0;
+    };
+    std::unordered_map<std::string, std::optional<SharedSpillVariant>> shared_spill_variants;
     std::shared_ptr<Buffer> atomic_lock_bank;
     std::shared_ptr<Buffer> device_clock;
     std::vector<HeapArena> buffer_heaps;
@@ -1947,6 +1967,9 @@ bool kernel_pipeline_is_ready(const std::string& metallib_path,
     return backend.ready_pipelines.contains(metallib_path + "::" + kernel_name);
 }
 
+static std::optional<BackendState::SharedSpillVariant> find_shared_spill_variant_locked(
+    BackendState& backend, const std::string& metallib_path, const std::string& kernel_name);
+
 cudaError_t query_kernel_properties(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     KernelProperties* out_properties,
@@ -1962,17 +1985,32 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
     }
     BackendState& backend = state();
     std::lock_guard<std::mutex> lock(backend.mutex);
+    // A kernel whose static shared memory exceeds Metal's limit has no
+    // pipeline of its own; its spill variant describes it instead.
+    std::optional<BackendState::SharedSpillVariant> spill;
+    bool spill_only = false;
     id<MTLComputePipelineState> pipeline =
         load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
     if (pipeline == nil) {
-        return cudaErrorInvalidValue;
+        spill = find_shared_spill_variant_locked(backend, metallib_path, kernel_name);
+        if (!spill.has_value()) {
+            return cudaErrorInvalidValue;
+        }
+        spill_only = true;
+        pipeline = load_pipeline_locked(backend, metallib_path, spill->function_name, error_message);
+        if (pipeline == nil) {
+            return cudaErrorInvalidValue;
+        }
     }
     out_properties->max_threads_per_threadgroup =
         static_cast<int>(std::min<NSUInteger>(pipeline.maxTotalThreadsPerThreadgroup, 1024));
     out_properties->thread_execution_width =
         static_cast<int>(pipeline.threadExecutionWidth);
     out_properties->static_threadgroup_memory_bytes =
-        static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+        spill_only ? spill->static_bytes
+                   : static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+    out_properties->metallib_path = metallib_path;
+    out_properties->kernel_name = kernel_name;
     return cudaSuccess;
 }
 
@@ -3346,6 +3384,170 @@ static bool launch_arg_binds_index(const std::vector<KernelArg>& args,
     return false;
 }
 
+// The kernel's shared-memory spill variant, `<kernel>__cm_spill_s<static>`,
+// if its library has one. Only a library that is already loaded is searched,
+// so a failed load is never retried here; the answer is cached once known.
+static std::optional<BackendState::SharedSpillVariant> find_shared_spill_variant_locked(
+    BackendState& backend, const std::string& metallib_path, const std::string& kernel_name) {
+    const std::string key = metallib_path + "::" + kernel_name;
+    const auto cached = backend.shared_spill_variants.find(key);
+    if (cached != backend.shared_spill_variants.end()) return cached->second;
+    const auto loaded = backend.library_cache.find(metallib_path);
+    if (loaded == backend.library_cache.end()) return std::nullopt;
+    std::optional<BackendState::SharedSpillVariant> variant;
+    id<MTLLibrary> library = loaded->second;
+    if (library != nil) {
+        @autoreleasepool {
+            const std::string prefix = kernel_name + cumetal::abi::kSharedSpillKernelInfix;
+            for (NSString* candidate in [library functionNames]) {
+                const char* utf8 = [candidate UTF8String];
+                if (utf8 == nullptr) continue;
+                const std::string name(utf8);
+                if (name.size() <= prefix.size() || name.compare(0, prefix.size(), prefix) != 0)
+                    continue;
+                const std::string number = name.substr(prefix.size());
+                if (number.find_first_not_of("0123456789") != std::string::npos) continue;
+                variant = BackendState::SharedSpillVariant{
+                    .function_name = name,
+                    .static_bytes = static_cast<std::size_t>(std::stoull(number)),
+                };
+                break;
+            }
+        }
+    }
+    return backend.shared_spill_variants.emplace(key, std::move(variant)).first->second;
+}
+
+// CUDA refuses a launch whose static plus dynamic shared memory exceeds what
+// the block may use (cudaErrorInvalidValue, nothing runs). Metal's limit is
+// the device's maxThreadgroupMemoryLength, which the runtime also reports as
+// sharedMemPerBlock and sharedMemPerBlockOptin. Passing a larger length to
+// setThreadgroupMemoryLength is a Metal API violation: the validation layer
+// aborts and the release driver may run the kernel with less memory than
+// asked for, so the request is checked here, before anything is encoded.
+static cudaError_t check_threadgroup_memory_locked(BackendState& backend,
+                                                   id<MTLComputePipelineState> pipeline,
+                                                   std::size_t dynamic_bytes,
+                                                   std::string* error_message) {
+    const std::size_t static_bytes =
+        static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+    const std::size_t limit =
+        static_cast<std::size_t>([backend.device maxThreadgroupMemoryLength]);
+    if (dynamic_bytes > limit || static_bytes > limit - dynamic_bytes) {
+        if (error_message != nullptr) {
+            *error_message = "launch requests " + std::to_string(dynamic_bytes) +
+                             " bytes of dynamic and " + std::to_string(static_bytes) +
+                             " bytes of static threadgroup memory; the device limit is " +
+                             std::to_string(limit);
+        }
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
+}
+
+static cudaError_t select_launch_pipeline_locked(BackendState& backend,
+                                                 const std::string& metallib_path,
+                                                 const std::string& kernel_name,
+                                                 std::size_t dynamic_bytes,
+                                                 id<MTLComputePipelineState>* out_pipeline,
+                                                 std::string* out_function_name,
+                                                 std::optional<std::size_t>* spill_static_bytes,
+                                                 std::string* error_message);
+
+cudaError_t validate_threadgroup_memory(const std::string& metallib_path,
+                                        const std::string& kernel_name,
+                                        std::size_t dynamic_bytes,
+                                        bool* exceeds_limit,
+                                        std::size_t* static_bytes,
+                                        std::string* error_message) {
+    if (static_bytes != nullptr) *static_bytes = 0;
+    if (exceeds_limit == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "validate_threadgroup_memory invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    *exceeds_limit = false;
+    if (metallib_path.empty() || kernel_name.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "validate_threadgroup_memory invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    id<MTLComputePipelineState> pipeline = nil;
+    std::string function_name;
+    std::optional<std::size_t> spill_static;
+    const cudaError_t status = select_launch_pipeline_locked(
+        backend, metallib_path, kernel_name, dynamic_bytes, &pipeline, &function_name,
+        &spill_static, error_message);
+    if (pipeline == nil) {
+        return status == cudaSuccess ? cudaErrorInvalidValue : status;
+    }
+    *exceeds_limit = status != cudaSuccess;
+    if (static_bytes != nullptr) {
+        *static_bytes = spill_static.has_value()
+                            ? *spill_static
+                            : static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+    }
+    return cudaSuccess;
+}
+
+// Chooses the pipeline for a launch with `dynamic_bytes` of dynamic shared
+// memory. The kernel's own pipeline is used whenever its static plus dynamic
+// shared memory fits Metal's threadgroup limit, so such launches are
+// unaffected by spilling. Otherwise its spill variant runs with __shared__
+// storage in a device buffer; *spill_static_bytes is then set to the
+// variant's static layout size. Without a variant the launch is refused.
+static cudaError_t select_launch_pipeline_locked(BackendState& backend,
+                                                 const std::string& metallib_path,
+                                                 const std::string& kernel_name,
+                                                 std::size_t dynamic_bytes,
+                                                 id<MTLComputePipelineState>* out_pipeline,
+                                                 std::string* out_function_name,
+                                                 std::optional<std::size_t>* spill_static_bytes,
+                                                 std::string* error_message) {
+    *spill_static_bytes = std::nullopt;
+    *out_function_name = kernel_name;
+    const std::size_t limit =
+        static_cast<std::size_t>([backend.device maxThreadgroupMemoryLength]);
+    // A known variant whose static layout alone exceeds the limit means the
+    // kernel's own pipeline cannot be created; do not retry it every launch.
+    const auto known = backend.shared_spill_variants.find(metallib_path + "::" + kernel_name);
+    const bool spill_only = known != backend.shared_spill_variants.end() &&
+                            known->second.has_value() && known->second->static_bytes > limit;
+    cudaError_t status = cudaErrorInvalidValue;
+    id<MTLComputePipelineState> own = nil;
+    if (!spill_only) {
+        own = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
+        if (own != nil) {
+            status = check_threadgroup_memory_locked(backend, own, dynamic_bytes, error_message);
+            if (status == cudaSuccess) {
+                *out_pipeline = own;
+                return cudaSuccess;
+            }
+        }
+    }
+    const auto spill = find_shared_spill_variant_locked(backend, metallib_path, kernel_name);
+    if (!spill.has_value()) {
+        *out_pipeline = own;
+        return status;
+    }
+    id<MTLComputePipelineState> pipeline =
+        load_pipeline_locked(backend, metallib_path, spill->function_name, error_message);
+    if (pipeline == nil) {
+        return cudaErrorInvalidValue;
+    }
+    *out_pipeline = pipeline;
+    *out_function_name = spill->function_name;
+    *spill_static_bytes = spill->static_bytes;
+    return cudaSuccess;
+}
+
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,
@@ -3404,15 +3606,20 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     std::shared_ptr<Buffer> lock_bank;
     std::shared_ptr<Buffer> device_clock;
     std::shared_ptr<Buffer> grid_barrier;
+    std::optional<std::size_t> spill_static_bytes;
     {
         std::lock_guard<std::mutex> lock(backend.mutex);
-        const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
         compile_cache_hit =
-            backend.pipeline_cache.find(pipeline_cache_key) != backend.pipeline_cache.end();
-        pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
-        if (pipeline == nil) {
-            return cudaErrorInvalidValue;
+            backend.pipeline_cache.find(metallib_path + "::" + kernel_name) !=
+            backend.pipeline_cache.end();
+        std::string function_name;
+        const cudaError_t shared_status = select_launch_pipeline_locked(
+            backend, metallib_path, kernel_name, config.shared_memory_bytes, &pipeline,
+            &function_name, &spill_static_bytes, error_message);
+        if (shared_status != cudaSuccess) {
+            return shared_status;
         }
+        const std::string pipeline_cache_key = metallib_path + "::" + function_name;
         needs_trap_status = backend.pipeline_uses_trap_status[pipeline_cache_key];
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
         needs_device_clock = backend.pipeline_uses_device_clock[pipeline_cache_key];
@@ -3464,6 +3671,36 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const auto status = allocate_buffer(sizeof(std::uint32_t), &trap_status, error_message);
         if (status != cudaSuccess) return status;
         std::memset(trap_status->contents(), 0, sizeof(std::uint32_t));
+    }
+    // A spill variant's __shared__ storage: one slice per threadgroup of this
+    // dispatch, sized for the whole grid and released when the command
+    // buffer completes. Word 0 tells the kernel the slice stride.
+    std::shared_ptr<Buffer> shared_spill;
+    if (spill_static_bytes.has_value()) {
+        if (launch_arg_binds_index(args, cumetal::abi::kSharedSpillBindingIndex)) {
+            if (error_message) *error_message = "kernel argument conflicts with shared spill binding";
+            return cudaErrorInvalidValue;
+        }
+        const std::uint64_t groups = static_cast<std::uint64_t>(config.grid.x) *
+                                     config.grid.y * config.grid.z;
+        const std::uint64_t stride =
+            *spill_static_bytes + ((config.shared_memory_bytes + 15u) & ~std::uint64_t{15u});
+        const std::uint64_t max_length = [state().device maxBufferLength];
+        if (stride > std::numeric_limits<std::uint32_t>::max() ||
+            groups > (max_length - cumetal::abi::kSharedSpillHeaderBytes) / std::max<std::uint64_t>(stride, 1)) {
+            if (error_message) {
+                *error_message = "shared memory for " + std::to_string(groups) +
+                                 " threadgroups of " + std::to_string(stride) +
+                                 " bytes exceeds the largest Metal buffer";
+            }
+            return cudaErrorMemoryAllocation;
+        }
+        const cudaError_t status = allocate_buffer(
+            cumetal::abi::kSharedSpillHeaderBytes + groups * stride, &shared_spill, error_message);
+        if (status != cudaSuccess) return cudaErrorMemoryAllocation;
+        auto* header = static_cast<std::uint32_t*>(shared_spill->contents());
+        std::memset(header, 0, cumetal::abi::kSharedSpillHeaderBytes);
+        header[0] = static_cast<std::uint32_t>(stride);
     }
     if (needs_lock_bank) {
         lock_bank = ensure_atomic_lock_bank(error_message);
@@ -3559,9 +3796,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const bool trace_async =
             stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
         const bool batching_allowed =
-            stream_impl != nullptr && !trap_status && !grid_barrier && !trace_async &&
-            !config.disable_batching &&
-            max_batch_dispatches() > 0;
+            stream_impl != nullptr && !trap_status && !grid_barrier && !shared_spill && !trace_async &&
+            !config.disable_batching && max_batch_dispatches() > 0;
 
         id<MTLComputeCommandEncoder> encoder = nil;
         bool batched = false;
@@ -3617,6 +3853,12 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (trap_status) {
             auto* buffer = dynamic_cast<BufferImpl*>(trap_status.get());
             [encoder setBuffer:buffer->handle() offset:0 atIndex:cumetal::abi::kTrapStatusBindingIndex];
+        }
+        if (shared_spill) {
+            auto* buffer = dynamic_cast<BufferImpl*>(shared_spill.get());
+            [encoder setBuffer:buffer->handle()
+                        offset:0
+                       atIndex:cumetal::abi::kSharedSpillBindingIndex];
         }
         mark_allocations_resident(encoder, backend);
 
@@ -3714,7 +3956,9 @@ cudaError_t launch_kernel(const std::string& metallib_path,
                       atIndex:cumetal::ptx::kGridYOffsetBindingIndex];
         }
 
-        if (config.shared_memory_bytes > 0) {
+        // A spill variant has no threadgroup(0) argument: its dynamic shared
+        // memory is part of the spill buffer.
+        if (config.shared_memory_bytes > 0 && !shared_spill) {
             [encoder setThreadgroupMemoryLength:config.shared_memory_bytes atIndex:0];
         }
 
@@ -3793,7 +4037,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         [command_buffer commit];
 
         if (stream_impl != nullptr) {
-            stream_impl->add_pending(command_buffer, trap_status, grid_barrier);
+            // The spill buffer, if any, is released when this buffer retires.
+            stream_impl->add_pending(command_buffer, trap_status, grid_barrier, shared_spill);
             return cudaSuccess;
         }
 
@@ -4057,6 +4302,11 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
+        }
+        const cudaError_t shared_status =
+            check_threadgroup_memory_locked(backend, pipeline, config.shared_memory_bytes, error_message);
+        if (shared_status != cudaSuccess) {
+            return shared_status;
         }
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
         if (backend.pipeline_uses_trap_status[pipeline_cache_key]) {

@@ -8597,6 +8597,7 @@ struct Importer {
                 };
             } else if (last != nullptr && root_opcode(last->opcode) == "trap") {
                 terminator.opcode = OpCode::kTrap;
+                if (last->opcode == "trap.assert") terminator.attributes["trap_kind"] = "assert";
                 terminator.location = {
                     .file = result.module.source_name,
                     .line = static_cast<std::uint32_t>(std::max(0, last->line)),
@@ -9075,7 +9076,9 @@ PtxImportResult import_ptx_once(std::string_view ptx, const PtxImportOptions& op
             if (direct_call_target(instruction) != "__assertfail" ||
                 instruction.operands.size() != 2 || !instruction.predicate.empty() ||
                 grouped_names(instruction.operands.back()).size() != 5) continue;
-            instruction.opcode = "trap";
+            // The ".assert" modifier only tags the trap so the host can
+            // report cudaErrorAssert rather than cudaErrorLaunchFailure.
+            instruction.opcode = "trap.assert";
             instruction.operands.clear();
             instruction.supported = true;
         }

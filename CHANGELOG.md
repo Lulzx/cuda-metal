@@ -108,6 +108,42 @@ All notable changes to CuMetal are documented here. Format follows
   diagnostic. Grid-sync kernels are also no longer split into grid-Y slices
   (each slice would have counted only its own groups at the barrier and could
   never be co-resident with the rest) or batched with other launches.
+- **CUDA's shared-memory limits past Metal's 32 KB** (#205). A launch whose
+  static plus dynamic shared memory exceeded the Metal device's
+  `maxThreadgroupMemoryLength` was passed unchecked to
+  `setThreadgroupMemoryLength`, which the Metal validation layer aborts on and
+  the release driver ran with less memory than asked for. Such a launch now
+  runs the kernel's shared-memory spill variant, which the typed backend emits
+  for kernels with dynamic shared memory or over 32 KB of static shared
+  memory: `__shared__` data lives in a per-block slice of a device buffer,
+  barriers and block fences also order device memory, and shared atomics are
+  device atomics. Launches within 32 KB still use threadgroup memory. The
+  limits are CUDA's: 48 KB by default, and up to 99 KB with
+  `cudaFuncAttributeMaxDynamicSharedMemorySize`, now reported as
+  `sharedMemPerBlockOptin`; a launch past its limit returns
+  `cudaErrorInvalidValue` and runs nothing. A kernel without a variant (legacy
+  PTX lowering, hand-written Metal) is refused past 32 KB.
+- **Zero launch extents return `cudaErrorInvalidConfiguration`** (#207)
+  instead of `cudaErrorInvalidValue`, from `cudaLaunchKernel`,
+  `cudaConfigureCall` and `cudaLaunchCooperativeKernel` (which returned
+  `cudaErrorCooperativeLaunchTooLarge` for a zero grid). As in CUDA, this and
+  the shared-memory refusal are not reported again by the next synchronize.
+- **`cudaEventElapsedTime` error code** (#209). An unrecorded or
+  timing-disabled event returns `cudaErrorInvalidResourceHandle`
+  (`CUDA_ERROR_INVALID_HANDLE` from `cuEventElapsedTime`), not
+  `cudaErrorInvalidValue`.
+- **Device `assert` reports `cudaErrorAssert`.** A failed assertion in CUDA
+  source compiled by `cumetalc` used to be dropped, so the next synchronize
+  returned success. It now sets the launch's trap status and the next
+  synchronize returns 710 (driver: `CUDA_ERROR_ASSERT`), sticky on its stream.
+  The failing thread continues rather than aborting the kernel, so kernels with
+  `__syncthreads` and warp collectives keep compiling and cannot hang. A kernel
+  whose asserting path cannot carry the trap status (device `printf`, grid
+  sync, indirect calls) keeps its old behaviour, with a semantic caveat in
+  the generated source. PTX `__assertfail` and the block-dimension assertion
+  report 710 instead of `cudaErrorLaunchFailure`.
+- **`cudaDevAttrMaxSharedMemoryPerBlockOptin`**, CUDA's name for attribute 97,
+  is declared; the old `cudaDevAttrSharedMemPerBlockOptin` spelling remains.
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
   returns the border colour (zero) outside the texture instead of clamping,
   for unnormalized coordinates too, and `tex2DLayered` honours

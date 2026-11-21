@@ -70,7 +70,9 @@ call.uni __assertfail, (assert_message, assert_file, assert_line, assert_functio
                 function, 1,1,1,1 if mode == 4 else 64,1,1,0,stream,args,None)
             api('cuEventRecord', [ptr, ptr], event, stream)
         for (mode, host, stream, device, words), event in zip(cases, events):
-            error = 719 if mode else 0  # CUDA_ERROR_LAUNCH_FAILED
+            # __assertfail reports CUDA_ERROR_ASSERT (710); a bare trap reports
+            # CUDA_ERROR_LAUNCH_FAILED (719).
+            error = (710 if '--assert' in sys.argv else 719) if mode else 0
             api('cuEventSynchronize', [ptr], event, expected=error)
             api('cuStreamSynchronize', [ptr], stream, expected=error)
             api('cuStreamQuery', [ptr], stream, expected=error)

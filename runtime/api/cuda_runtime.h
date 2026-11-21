@@ -583,7 +583,9 @@ typedef enum cudaDeviceAttr {
     cudaDevAttrPageableMemoryAccessUsesHostPageTables = 93,
     cudaDevAttrPciDomainId = 50,
     cudaDevAttrCooperativeLaunch = 95,
-    cudaDevAttrSharedMemPerBlockOptin = 97,
+    // CUDA's name for attribute 97; the shorter spelling is kept for existing callers.
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97,
+    cudaDevAttrSharedMemPerBlockOptin = cudaDevAttrMaxSharedMemoryPerBlockOptin,
     cudaDevAttrMemoryPoolsSupported = 115,
 } cudaDeviceAttr;
 
@@ -2329,10 +2331,12 @@ static __device__ __forceinline__ unsigned int __isLocal(const void* pointer) {
 // Apple's assert() expands to __assert_rtn, which is __host__, so any assert
 // inside a __global__/__device__ function is rejected -- in both compilation
 // passes, since clang parses device bodies during the host pass too. CUDA solves
-// this by shipping a __device__ assert that traps; Metal has no trap-and-report
-// path, so the device overload is a no-op and device-side assertions are
-// dropped. Declaring a __device__ overload rather than neutering the assert
-// macro keeps host-side assertions in .cu files working normally.
+// this by shipping a __device__ assert that traps. The device overload here is
+// empty on purpose: cumetalc's NVVM importer recognizes a call to it (which
+// assert() only makes when the condition fails) and replaces it with a
+// report-only trap, so the launch reports cudaErrorAssert. Declaring a
+// __device__ overload rather than neutering the assert macro keeps host-side
+// assertions in .cu files working normally.
 #include <cassert>
 #if defined(__APPLE__)
 __device__ inline void __assert_rtn(const char*, const char*, int, const char*) {}

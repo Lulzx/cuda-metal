@@ -44,6 +44,10 @@ struct KernelProperties {
     int max_threads_per_threadgroup = 0;
     int thread_execution_width = 0;
     std::size_t static_threadgroup_memory_bytes = 0;
+    // The library and function queried, identifying the kernel for
+    // per-function attributes shared by runtime and driver handles.
+    std::string metallib_path;
+    std::string kernel_name;
 };
 
 struct KernelArg {
@@ -94,6 +98,20 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     KernelProperties* out_properties,
                                     std::string* error_message);
+// Sets *exceeds_limit when a launch with dynamic_bytes of dynamic shared
+// memory cannot run: the kernel's static threadgroup memory plus dynamic_bytes
+// exceeds the device's maxThreadgroupMemoryLength and the library has no
+// shared-memory spill variant for it (compiler/metal/src/shared_spill.h).
+// *static_bytes receives the static shared memory of the pipeline the launch
+// would use. Lets the runtime refuse an oversized launch the way CUDA does,
+// as a synchronous launch error, before anything is encoded; launch_kernel
+// repeats the check. A non-success status means no pipeline could be loaded.
+cudaError_t validate_threadgroup_memory(const std::string& metallib_path,
+                                        const std::string& kernel_name,
+                                        std::size_t dynamic_bytes,
+                                        bool* exceeds_limit,
+                                        std::size_t* static_bytes,
+                                        std::string* error_message);
 // Compiles/loads the library, resolves the entry and creates its pipeline
 // without dispatching anything. Idempotent: a prepared kernel returns
 // immediately, whichever path prepared it.

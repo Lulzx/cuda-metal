@@ -185,6 +185,32 @@ int main(int argc, char** argv) {
         }
     }
 
+    // cuEventElapsedTime answers CUDA_ERROR_INVALID_HANDLE for an event that
+    // was never recorded or that was created with CU_EVENT_DISABLE_TIMING.
+    {
+        CUevent never = nullptr;
+        CUevent untimed = nullptr;
+        float ms = 0.0f;
+        if (cuEventCreate(&never, 0) != CUDA_SUCCESS ||
+            cuEventCreate(&untimed, CU_EVENT_DISABLE_TIMING) != CUDA_SUCCESS ||
+            cuEventRecord(untimed, stream1) != CUDA_SUCCESS ||
+            cuEventSynchronize(untimed) != CUDA_SUCCESS) {
+            std::fprintf(stderr, "FAIL: elapsed-time event setup failed\n");
+            return 1;
+        }
+        if (cuEventElapsedTime(&ms, stage1_done, never) != CUDA_ERROR_INVALID_HANDLE ||
+            cuEventElapsedTime(&ms, stage1_done, untimed) != CUDA_ERROR_INVALID_HANDLE) {
+            std::fprintf(stderr,
+                         "FAIL: cuEventElapsedTime should reject unrecorded and untimed "
+                         "events with CUDA_ERROR_INVALID_HANDLE\n");
+            return 1;
+        }
+        if (cuEventDestroy(never) != CUDA_SUCCESS || cuEventDestroy(untimed) != CUDA_SUCCESS) {
+            std::fprintf(stderr, "FAIL: elapsed-time event teardown failed\n");
+            return 1;
+        }
+    }
+
     if (cuEventDestroy(stage1_done) != CUDA_SUCCESS) {
         std::fprintf(stderr, "FAIL: cuEventDestroy failed\n");
         return 1;

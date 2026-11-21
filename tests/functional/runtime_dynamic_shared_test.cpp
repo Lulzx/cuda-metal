@@ -82,6 +82,69 @@ int main(int argc, char** argv) {
     // Pass dynamic shared memory: kBlockSize floats per threadgroup.
     const std::size_t shared_mem = kBlockSize * sizeof(float);
 
+    // Shared-memory limits. CUDA refuses a launch whose shared memory exceeds
+    // what the block may use with cudaErrorInvalidValue and runs nothing; the
+    // error is not sticky. sharedMemPerBlock is Metal's threadgroup limit;
+    // past it only a kernel with a compiler-generated shared-memory spill
+    // variant can run. This hand-written Metal kernel has none and no static
+    // threadgroup memory, so its limit is exactly sharedMemPerBlock.
+    int optin = 0;
+    int per_block = 0;
+    if (cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0) !=
+            cudaSuccess ||
+        cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, 0) !=
+            cudaSuccess ||
+        per_block <= 0 || optin != 101376 || per_block > optin) {
+        std::fprintf(stderr, "FAIL: shared memory limits optin=%d per_block=%d\n", optin,
+                     per_block);
+        return 1;
+    }
+    const std::size_t max_dynamic = static_cast<std::size_t>(per_block);
+
+    const float sentinel = -12345.0f;
+    const std::vector<float> sentinels(kNumBlocks, sentinel);
+    const std::size_t oversized[] = {
+        max_dynamic + 4,  // one word over the device limit
+        64 * 1024,        // over CUDA's 48 KB default as well
+    };
+    for (const std::size_t bytes : oversized) {
+        if (cudaMemcpy(dev_out, sentinels.data(), kNumBlocks * sizeof(float),
+                       cudaMemcpyHostToDevice) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: sentinel copy failed\n");
+            return 1;
+        }
+        if (cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, bytes, nullptr) !=
+            cudaErrorInvalidValue) {
+            std::fprintf(stderr, "FAIL: launch with %zu shared bytes was not refused\n", bytes);
+            return 1;
+        }
+        if (cudaGetLastError() != cudaErrorInvalidValue || cudaGetLastError() != cudaSuccess ||
+            cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: oversized shared launch error was sticky or lost\n");
+            return 1;
+        }
+        std::vector<float> after(kNumBlocks, 0.0f);
+        if (cudaMemcpy(after.data(), dev_out, kNumBlocks * sizeof(float),
+                       cudaMemcpyDeviceToHost) != cudaSuccess) {
+            std::fprintf(stderr, "FAIL: sentinel readback failed\n");
+            return 1;
+        }
+        for (const float value : after) {
+            if (value != sentinel) {
+                std::fprintf(stderr, "FAIL: refused launch (%zu bytes) wrote output\n", bytes);
+                return 1;
+            }
+        }
+    }
+
+    // Exactly the advertised maximum is accepted.
+    if (cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, max_dynamic, nullptr) !=
+            cudaSuccess ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr, "FAIL: launch at the dynamic shared limit failed\n");
+        return 1;
+    }
+
     if (cudaLaunchKernel(&kernel, grid_dim, block_dim, launch_args, shared_mem, nullptr) !=
         cudaSuccess) {
         std::fprintf(stderr, "FAIL: cudaLaunchKernel failed\n");

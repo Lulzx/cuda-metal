@@ -4367,6 +4367,52 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_cumetalc_native_aot_multi_kernel
         PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Device assert reports sticky cudaErrorAssert, including from a kernel
+    # with __syncthreads and warp shuffles; a printf kernel keeps compiling.
+    add_test(
+        NAME functional_cumetalc_native_aot_device_assert
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_assert.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_device_assert
+                "--expect-output=PASS: device assert reports sticky cudaErrorAssert"
+    )
+    set_tests_properties(functional_cumetalc_native_aot_device_assert
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # Shared memory past Metal's 32 KB threadgroup limit runs from the
+    # kernel's spill variant: CUDA's 48 KB default, the 99 KB opt-in, static
+    # shared above 32 KB, shared atomics and barriers in spilled memory, and
+    # the refusals. The Metal validation layer aborts on an oversized
+    # threadgroup length, so it proves the spill path really ran. The second
+    # test covers the same kernels through the registration path's typed PTX
+    # JIT.
+    add_test(
+        NAME functional_cumetalc_native_aot_shared_spill
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shared_spill.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_shared_spill
+                "--expect-output=PASS: shared memory beyond the Metal threadgroup limit"
+    )
+    set_tests_properties(functional_cumetalc_native_aot_shared_spill
+        PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "MTL_DEBUG_LAYER=1")
+    add_test(
+        NAME functional_cumetalc_registration_shared_spill
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shared_spill.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_registration_shared_spill
+                --backend=legacy
+                "--expect-output=PASS: shared memory beyond the Metal threadgroup limit"
+    )
+    set_tests_properties(functional_cumetalc_registration_shared_spill
+        PROPERTIES SKIP_RETURN_CODE 77
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;CUMETAL_PTX_BACKEND=cumetal-ir")
+
     add_test(
         NAME functional_cumetalc_native_aot_null_pointer
         COMMAND bash

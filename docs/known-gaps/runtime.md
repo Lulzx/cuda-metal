@@ -4,6 +4,38 @@
 
 ## Synchronization and launch
 
+- Shared memory follows CUDA's limits, not Metal's 32 KB
+  `maxThreadgroupMemoryLength`: 48 KB per block by default
+  (`cudaFuncAttributes.maxDynamicSharedSizeBytes` starts at 48 KB less the
+  kernel's static shared memory), and up to an opt-in ceiling of 99 KB
+  (101,376 bytes, an sm_86/sm_89 part's) through
+  `cudaFuncAttributeMaxDynamicSharedMemorySize`, reported as
+  `sharedMemPerBlockOptin`. A launch past its limit fails with
+  `cudaErrorInvalidValue` (driver: `CUDA_ERROR_INVALID_VALUE`) and runs
+  nothing. `sharedMemPerBlock` reports Metal's 32 KB, the amount that stays in
+  fast threadgroup memory.
+- A launch whose static plus dynamic shared memory fits Metal's limit uses
+  threadgroup memory exactly as before. Past it, the runtime runs the
+  kernel's shared-memory spill variant, which the typed backend emits for
+  every kernel with dynamic shared memory or more than 32 KB of static shared
+  memory: `__shared__` data then lives in a device buffer, one slice per
+  block, sized for the whole grid and freed when the launch retires.
+  Barriers and block-scope fences also order device memory and shared
+  atomics are device atomics, so results are exact but shared-memory traffic
+  runs at device-memory speed. A grid whose slices exceed the largest Metal
+  buffer, or whose buffer cannot be allocated, fails with
+  `cudaErrorMemoryAllocation`. Kernels without a variant are refused with
+  `cudaErrorInvalidValue` past 32 KB: the legacy PTX lowering, hand-written
+  Metal kernels, kernels with an argument at Metal buffer index 24 (where the
+  spill buffer binds), and kernels whose shared pointers meet address-space
+  queries, integer conversions, mixed generic pointers or simdgroup matrix
+  tiles.
+- Launch configuration errors that CUDA itself defines -- a zero grid or block
+  extent (`cudaErrorInvalidConfiguration`) and too much shared memory -- are
+  reported by the launch and `cudaGetLastError` only, as in CUDA; a later
+  synchronize succeeds. CuMetal's own launch failures (lowering, registration,
+  Metal submission) are additionally reported by the next synchronize, because
+  generated `<<<...>>>` stubs discard the launch's return value.
 - Cooperative-grid synchronization is limited to a conservatively resident
   grid capped at one block per reported GPU core. Oversubscription is rejected.
   Metal itself makes no co-residency or forward-progress promise for the
@@ -46,7 +78,10 @@
   between the two records, including any idle gap between command buffers,
   and use Metal's command-buffer timestamps rather than per-kernel counters.
   A record whose command buffer reports no GPU timestamp makes the query
-  return `cudaErrorNotSupported`.
+  return `cudaErrorNotSupported`. An event that was never recorded, or was
+  created with `cudaEventDisableTiming`, returns
+  `cudaErrorInvalidResourceHandle` (driver: `CUDA_ERROR_INVALID_HANDLE`), as
+  in CUDA.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
   but values are not GPU cycles and cannot be used for cycle-accurate timing.
@@ -286,17 +321,36 @@ so a refused kernel does not turn into an unrelated `CUBLAS_STATUS_EXECUTION_FAI
 NVRTC's CUBIN size includes a trailing NUL, matching real NVRTC; CuPy drops
 the last byte of every image it receives and the module image still loads.
 
-### Device assertions in synchronized kernels
+### Device assertions
 
-The typed PTX path recognizes a narrow, proven terminal assertion of
+A failed device `assert` reports `cudaErrorAssert` (710, driver
+`CUDA_ERROR_ASSERT`) from the synchronization that observes its launch. Like
+other trap errors it is sticky on the stream that ran the launch, so every
+later synchronization of that stream, and of the device, keeps returning 710.
+Other streams and API calls that do not synchronize with it keep working,
+whereas CUDA makes the whole context unusable. Assertion messages are not
+printed.
+
+The semantics differ from CUDA's in one respect. CUDA aborts the kernel when
+an assertion fails. On the CUDA source path (`cumetalc file.cu`, the typed
+NVVM importer) the failing thread records the failure and continues past the
+assertion instead, so a kernel with `__syncthreads` or warp collectives cannot
+hang on a thread that left early. That thread may then do the work the
+assertion guarded; its writes are never observable through the CUDA API,
+because the stream reports 710 from then on. A kernel whose asserting path
+cannot carry the trap status (device `printf`, grid sync, indirect or
+undefined device calls, or a launch argument at Metal buffer index 25) still
+compiles with its asserts dropped, as before; the generated MSL records this
+as a `cumetal-semantic-caveat`.
+
+On the typed PTX path, five-argument void `__assertfail` calls in kernels
+without barriers, collectives, or device printf cancel the launch and report
+`cudaErrorAssert`; divergent and spinning peers are cancelled. General
+`__assertfail` assertions in synchronized PTX kernels still refuse. The path
+also recognizes a narrow, proven terminal assertion of
 `blockDim.axis & (blockDim.axis - 1)`. It restricts accepted launches to a
-power-of-two dimension and checks the constraint at kernel entry before any
-barrier or divergent work. This includes straight-line assertion forwarding
-helpers. The launch reports `cudaErrorLaunchFailure` on an invalid shape.
-Five-argument void `__assertfail` calls in kernels without barriers,
-collectives, or device printf use the per-launch trap status and report
-`cudaErrorLaunchFailure`; divergent and spinning peers are cancelled.
-General assertions in synchronized kernels still refuse. Assertion messages
-and exact `cudaErrorAssert` status are not implemented.
-The constraint also applies when the assertion's original path would have been
-untaken, so this is a deliberately narrower supported launch domain.
+power-of-two dimension, checks the constraint at kernel entry before any
+barrier or divergent work (including straight-line assertion forwarding
+helpers), and reports `cudaErrorAssert` on an invalid shape. The constraint
+also applies when the assertion's original path would have been untaken, so
+this is a deliberately narrower supported launch domain.

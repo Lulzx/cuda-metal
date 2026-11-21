@@ -198,6 +198,7 @@ target_compile_options(cumetal_ir
 add_library(cumetal_metal_codegen STATIC
     compiler/metal/src/msl_ast.cpp
     compiler/metal/src/trap_reporting.cpp
+    compiler/metal/src/shared_spill.cpp
     compiler/metal/src/lower_to_msl.cpp
     compiler/metal/src/record_contexts.cpp
     compiler/metal/src/private_array_scalarize.cpp

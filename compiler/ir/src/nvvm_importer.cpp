@@ -54,6 +54,9 @@
 namespace cumetal::ir {
 namespace {
 
+// Must match cumetal::metal::kDeviceAssertTrapHelper (trap_reporting.h).
+constexpr std::string_view kDeviceAssertHelperName = "__cumetal_device_assert";
+
 // LLVM's own libm intrinsics (clang emits llvm.maxnum.f32 for fmaxf, and
 // llvm.floor/ceil/... for the rounding functions) mapped onto the same Metal
 // builtins the libdevice calls use. maxnum/minnum return the non-NaN operand,
@@ -695,6 +698,9 @@ struct Importer {
     // only once a function references them, so a Warp module does not embed
     // every assertion string it never indexes.
     std::unordered_set<const llvm::GlobalVariable*> embedded_constants;
+    // Set when a failed device assert was imported as a call to the
+    // report-only assert helper, which is then defined once in the module.
+    bool uses_device_assert = false;
     std::unordered_set<std::string> referenced_embedded_constants;
     std::vector<GlobalConstant> pending_embedded_constants;
 
@@ -2850,10 +2856,18 @@ struct Importer {
         }
         if (const auto* call = llvm::dyn_cast<llvm::CallBase>(&instruction)) {
             if (is_empty_device_assert(call->getCalledFunction())) {
-                // runtime/api/cuda_runtime.h deliberately supplies an empty
-                // device assert overload because Metal has no trap-and-report
-                // ABI. Erase that proven no-op before its diagnostic string
-                // globals can leak into the generated MSL call expression.
+                // runtime/api/cuda_runtime.h supplies an empty device overload
+                // of the platform's assert hook, and assert() only calls it when
+                // the condition fails. Replace the call with the report-only
+                // assert helper (no arguments, so the diagnostic string globals
+                // never reach the generated MSL): the failing thread records
+                // cudaErrorAssert in the launch's trap status and continues.
+                Operation report;
+                report.opcode = OpCode::kCall;
+                report.attributes["callee"] = std::string(kDeviceAssertHelperName);
+                report.location = import_location(instruction, fallback_source);
+                output_block->operations.push_back(std::move(report));
+                uses_device_assert = true;
                 return true;
             }
             if (const llvm::FPTruncInst* truncation = float_frexp_truncation(*call)) {
@@ -3848,6 +3862,21 @@ struct Importer {
 
         for (const llvm::Function* function : functions_to_import) {
             if (!import_function(*function)) return std::move(result);
+        }
+        if (uses_device_assert) {
+            // Defined ahead of its callers: a single block that traps, tagged
+            // as an assertion. MSL lowering treats it as report-only.
+            Function helper;
+            helper.name = std::string(kDeviceAssertHelperName);
+            BasicBlock block;
+            block.id = builder.next_block();
+            block.name = "entry";
+            Operation trap;
+            trap.opcode = OpCode::kTrap;
+            trap.attributes["trap_kind"] = "assert";
+            block.operations.push_back(std::move(trap));
+            helper.blocks.push_back(std::move(block));
+            result.module.functions.insert(result.module.functions.begin(), std::move(helper));
         }
         for (GlobalConstant& constant : pending_embedded_constants) {
             if (referenced_embedded_constants.contains(constant.name)) {

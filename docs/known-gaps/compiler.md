@@ -82,10 +82,15 @@ static threadgroup size grows accordingly. Escapes, atomics, undescribed
 threadgroup accesses, or mixed element sizes keep the original layout.
 
 Static shared memory above Metal's 32 KB threadgroup limit (CUDA allows 48 KB)
-is declared as written on the typed path, so pipeline creation fails at launch
-with `cudaErrorInvalidValue`. PhysX's radix-rank kernels declare 39,104 bytes
-and use the legacy lowering, which fits them, through PhysX patch 0032 along
-with three kernels the typed path refuses.
+is declared as written in a typed-path kernel, whose own pipeline therefore
+cannot be created; such a kernel always runs its shared-memory spill variant
+(`compiler/metal/src/shared_spill.h`), with `__shared__` data in device
+memory. The typed backend emits that variant, `<kernel>__cm_spill_s<bytes>`,
+for every kernel with dynamic shared memory or over 32 KB of static shared
+memory, which adds one function per such kernel to its metallib. PhysX's
+radix-rank kernels declare 39,104 bytes and use the legacy lowering, which
+fits them, through PhysX patch 0032 along with three kernels the typed path
+refuses.
 ## Compilation diagnostics
 
 [Stage tracing](../compiler-performance.md#compilation-stage-tracing) covers

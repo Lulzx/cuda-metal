@@ -2741,7 +2741,56 @@ cudaError_t try_emulate_llmc_registered_kernel(
     return cudaSuccess;
 }
 
+// CUDA's shared-memory limits, which CuMetal honours even past Metal's
+// threadgroup limit by running a kernel's spill variant (see
+// compiler/metal/src/shared_spill.h): 48 KB per block without opt-in, and
+// with cudaFuncAttributeMaxDynamicSharedMemorySize up to the opt-in ceiling
+// of an sm_86/sm_89 part (99 KB), which this device reports.
+constexpr std::size_t kCudaDefaultSharedMemPerBlock = 48 * 1024;
+constexpr std::size_t kCudaSharedMemPerBlockOptin = 101376;
+constexpr std::size_t kCudaSharedMemPerMultiprocessor = 102400;
+
+// cudaFuncAttributeMaxDynamicSharedMemorySize per kernel, keyed by
+// "metallib::kernel" so runtime and driver handles to one kernel agree.
+std::mutex g_max_dynamic_shared_mutex;
+std::unordered_map<std::string, std::size_t> g_max_dynamic_shared;
+
+std::string kernel_identity(const cumetal::metal_backend::KernelProperties& kernel) {
+    return kernel.metallib_path + "::" + kernel.kernel_name;
+}
+
+// The kernel's current dynamic shared-memory limit: what the attribute was
+// set to, or CUDA's default of 48 KB less its static shared memory.
+std::size_t max_dynamic_shared_bytes(const std::string& identity, std::size_t static_bytes) {
+    {
+        std::lock_guard<std::mutex> lock(g_max_dynamic_shared_mutex);
+        const auto found = g_max_dynamic_shared.find(identity);
+        if (found != g_max_dynamic_shared.end()) return found->second;
+    }
+    return static_bytes >= kCudaDefaultSharedMemPerBlock
+               ? 0
+               : kCudaDefaultSharedMemPerBlock - static_bytes;
+}
+
+std::size_t max_dynamic_shared_bytes(const cumetal::metal_backend::KernelProperties& kernel) {
+    return max_dynamic_shared_bytes(kernel_identity(kernel), kernel.static_threadgroup_memory_bytes);
+}
+
 }  // namespace
+
+// Sets cudaFuncAttributeMaxDynamicSharedMemorySize for a resolved kernel.
+// Shared with cuFuncSetAttribute.
+extern "C" cudaError_t cumetalSetMaxDynamicSharedBytes(
+    const cumetal::metal_backend::KernelProperties& kernel, int value) {
+    if (value < 0 || kernel.static_threadgroup_memory_bytes > kCudaSharedMemPerBlockOptin ||
+        static_cast<std::size_t>(value) >
+            kCudaSharedMemPerBlockOptin - kernel.static_threadgroup_memory_bytes) {
+        return cudaErrorInvalidValue;
+    }
+    std::lock_guard<std::mutex> lock(g_max_dynamic_shared_mutex);
+    g_max_dynamic_shared[kernel_identity(kernel)] = static_cast<std::size_t>(value);
+    return cudaSuccess;
+}
 
 namespace cumetal::rt {
 
@@ -3031,7 +3080,11 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->maxGridSize[2] = 65535;
     prop->sharedMemPerBlock =
         backend_props.shared_mem_per_block > 0 ? backend_props.shared_mem_per_block : (32 * 1024);
-    prop->sharedMemPerBlockOptin = static_cast<size_t>(prop->sharedMemPerBlock);
+    // sharedMemPerBlock is what fits Metal threadgroup memory; launches may
+    // use CUDA's limits beyond it (48 KB by default, up to the opt-in ceiling
+    // with cudaFuncAttributeMaxDynamicSharedMemorySize), served from device
+    // memory by the kernel's shared-memory spill variant.
+    prop->sharedMemPerBlockOptin = kCudaSharedMemPerBlockOptin;
     prop->regsPerBlock = 65536;
     prop->major = 8;   // Synthetic Ampere-equivalent per spec §6.8
     prop->minor = 0;
@@ -3057,7 +3110,7 @@ cudaError_t cudaGetDeviceProperties(cudaDeviceProp* prop, int device) {
     prop->memoryClockRate = 1296000;    // Same as GPU clock on UMA (shared memory controller)
     prop->memoryBusWidth = 128;         // 128-bit memory bus (conservative; M-series varies)
     prop->totalConstMem = 64 * 1024;    // 64 KB constant memory per module (spec §5.4.1)
-    prop->sharedMemPerMultiprocessor = prop->sharedMemPerBlock; // Same as per-block on Metal
+    prop->sharedMemPerMultiprocessor = kCudaSharedMemPerMultiprocessor;
     prop->maxThreadsPerMultiProcessor = 2048; // Conservative estimate for M-series
     prop->l2CacheSize = 4 * 1024 * 1024; // 4 MB L2 (varies by chip; conservative)
     prop->canMapHostMemory = 1;          // UMA: all host memory is device-accessible
@@ -6064,19 +6117,22 @@ cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end) 
         return fail(end_status);
     }
 
+    // CUDA answers cudaErrorInvalidResourceHandle, not cudaErrorInvalidValue,
+    // when either event was never recorded or was created with
+    // cudaEventDisableTiming: the handle cannot serve as a timestamp.
     std::shared_ptr<cumetal::metal_backend::EventMarker> start_marker;
     std::shared_ptr<cumetal::metal_backend::EventMarker> end_marker;
     {
         std::lock_guard<std::mutex> lock(start->mutex);
         if (start->disable_timing || !start->recorded_once || !start->timing_valid) {
-            return fail(cudaErrorInvalidValue);
+            return fail(cudaErrorInvalidResourceHandle);
         }
         start_marker = start->marker;
     }
     {
         std::lock_guard<std::mutex> lock(end->mutex);
         if (end->disable_timing || !end->recorded_once || !end->timing_valid) {
-            return fail(cudaErrorInvalidValue);
+            return fail(cudaErrorInvalidResourceHandle);
         }
         end_marker = end->marker;
     }
@@ -6127,10 +6183,21 @@ cudaError_t cudaLaunchKernel(const void* func,
         record_pending_launch_error(err);
         return fail(err);
     };
+    // A configuration CUDA itself rejects at launch (zero extents, too much
+    // shared memory) fails only the launch call: CUDA reports it through the
+    // return value and cudaGetLastError, never through a later synchronize,
+    // and the context stays usable. Only CuMetal's own failures (lowering,
+    // registration, Metal submission) go through launch_fail's pending slot.
+    auto launch_refuse = [&](cudaError_t err) -> cudaError_t { return fail(err); };
 
-    if (func == nullptr || grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
+    if (func == nullptr) {
+        return launch_fail(cudaErrorInvalidValue, "null launch func");
+    }
+    // CUDA reports a zero grid or block extent as an invalid execution
+    // configuration, not an invalid argument.
+    if (grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
         block_dim.y == 0 || block_dim.z == 0) {
-        return launch_fail(cudaErrorInvalidValue, "invalid launch dims/func");
+        return launch_refuse(cudaErrorInvalidConfiguration);
     }
 
     const cudaError_t init_status = ensure_initialized();
@@ -6809,6 +6876,39 @@ cudaError_t cudaLaunchKernel(const void* func,
         use_registered_kernel ? registered_kernel.kernel_name.c_str() : kernel->kernel_name;
 
     std::string error;
+    // More shared memory than the block may use is a launch configuration
+    // error in CUDA (cudaErrorInvalidValue, nothing runs). Check it before the
+    // backend so it is refused with CUDA's synchronous semantics; the backend
+    // repeats the check so no caller can hand Metal an oversized length.
+    if (effective_shared_mem > 0) {
+        bool exceeds_limit = false;
+        std::size_t static_bytes = 0;
+        const cudaError_t shared_status = cumetal::metal_backend::validate_threadgroup_memory(
+            metallib_path, kernel_name, effective_shared_mem, &exceeds_limit, &static_bytes,
+            &error);
+        if (shared_status != cudaSuccess) {
+            return launch_fail(shared_status, "pipeline load for shared memory check");
+        }
+        // CUDA's own limits: dynamic shared memory up to the kernel's
+        // cudaFuncAttributeMaxDynamicSharedMemorySize (48 KB less its static
+        // shared memory unless raised), and never past the opt-in ceiling.
+        // shared_mem == 0 launches a PTX kernel whose static shared memory is
+        // carried as the dynamic length; only Metal's limit applies to it.
+        if (shared_mem > 0 &&
+            (shared_mem > max_dynamic_shared_bytes(std::string(metallib_path) + "::" + kernel_name,
+                                                   static_bytes) ||
+             static_bytes + shared_mem > kCudaSharedMemPerBlockOptin)) {
+            exceeds_limit = true;
+            error = "launch requests " + std::to_string(shared_mem) +
+                    " bytes of dynamic shared memory, above the kernel's limit";
+        }
+        if (exceeds_limit) {
+            if (cumetal::diag_env_truthy("CUMETAL_DEBUG_LAUNCH")) {
+                std::fprintf(stderr, "CUMETAL_DEBUG_LAUNCH: %s\n", error.c_str());
+            }
+            return launch_refuse(cudaErrorInvalidValue);
+        }
+    }
     const cudaError_t status =
         cumetal::metal_backend::launch_kernel(metallib_path, kernel_name, config, launch_args,
                                               backend_stream, &error);
@@ -7266,7 +7366,7 @@ cudaError_t cudaConfigureCall(dim3 grid_dim,
                               cudaStream_t stream) {
     if (grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
         block_dim.y == 0 || block_dim.z == 0) {
-        return fail(cudaErrorInvalidValue);
+        return fail(cudaErrorInvalidConfiguration);
     }
 
     const cudaError_t init_status = ensure_initialized();
@@ -7757,14 +7857,14 @@ cudaError_t cudaOccupancyMaxActiveBlocksPerMultiprocessor(int* numBlocks,
         return fail(cudaErrorInvalidValue);
     const size_t total_shared =
         kernel.static_threadgroup_memory_bytes + dynamicSMemSize;
-    if (total_shared > static_cast<size_t>(device.sharedMemPerBlock))
+    if (total_shared > device.sharedMemPerBlockOptin)
         return fail(cudaErrorInvalidValue);
     const int thread_bound =
         std::max(1, kernel.max_threads_per_threadgroup / blockSize);
     const int memory_bound =
         total_shared == 0
             ? thread_bound
-            : std::max(1, static_cast<int>(device.sharedMemPerBlock / total_shared));
+            : std::max(1, static_cast<int>(device.sharedMemPerMultiprocessor / total_shared));
     // A conservative one-block residency guarantee makes the grid-wide
     // software barrier safe: every block selected by CUDA's standard
     // multiprocessorCount * occupancy launch formula can make progress.
@@ -7839,13 +7939,7 @@ cudaError_t cumetalFuncAttributesFromKernelProperties(
     attr->numRegs = std::max(1, (device.regsPerBlock + thread_limit - 1) /
                                   thread_limit);
     attr->sharedSizeBytes = kernel.static_threadgroup_memory_bytes;
-    attr->maxDynamicSharedSizeBytes =
-        kernel.static_threadgroup_memory_bytes >=
-                static_cast<size_t>(device.sharedMemPerBlock)
-            ? 0
-            : static_cast<int>(
-                  static_cast<size_t>(device.sharedMemPerBlock) -
-                  kernel.static_threadgroup_memory_bytes);
+    attr->maxDynamicSharedSizeBytes = static_cast<int>(max_dynamic_shared_bytes(kernel));
     // Every kernel is compiled for the architecture the device advertises
     // (sm_80 PTX, lowered to Metal), so that is its PTX and binary version.
     // CUB and Thrust pick their tuning policies from ptxVersion; reporting 0
@@ -7886,18 +7980,10 @@ cudaError_t cudaFuncSetAttribute(const void* func, cudaFuncAttribute attr, int v
     cumetal::metal_backend::KernelProperties kernel{};
     const cudaError_t query = query_runtime_kernel_properties(func, &kernel);
     if (query != cudaSuccess) return fail(query);
-    cudaDeviceProp device{};
-    if (cudaGetDeviceProperties(&device, 0) != cudaSuccess)
-        return fail(cudaErrorInvalidValue);
-    const size_t max_dynamic = kernel.static_threadgroup_memory_bytes >=
-                                       static_cast<size_t>(device.sharedMemPerBlock)
-                                   ? 0
-                                   : static_cast<size_t>(device.sharedMemPerBlock) -
-                                         kernel.static_threadgroup_memory_bytes;
-    if ((attr == cudaFuncAttributeMaxDynamicSharedMemorySize &&
-         (value < 0 || static_cast<size_t>(value) > max_dynamic)) ||
-        (attr == cudaFuncAttributePreferredSharedMemoryCarveout &&
-         (value < -1 || value > 100))) {
+    if (attr == cudaFuncAttributeMaxDynamicSharedMemorySize) {
+        return fail(cumetalSetMaxDynamicSharedBytes(kernel, value));
+    }
+    if (value < -1 || value > 100) {
         return fail(cudaErrorInvalidValue);
     }
     return fail(cudaSuccess);
@@ -8512,7 +8598,8 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          cudaStream_t stream) {
     const std::uint64_t block_count =
         static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z;
-    if (block_count == 0 || block_count > kMaxResidentCooperativeBlocks) {
+    // A zero extent is an invalid configuration, which cudaLaunchKernel reports.
+    if (block_count > kMaxResidentCooperativeBlocks) {
         return fail(cudaErrorCooperativeLaunchTooLarge);
     }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);
