@@ -1776,17 +1776,22 @@ id<MTLBuffer> allocate_buffer_from_heap_locked(BackendState& backend,
                                                std::size_t size,
                                                std::string* error_message) {
     constexpr MTLResourceOptions kBufferOptions = MTLResourceStorageModeShared;
+    const MTLSizeAndAlign size_and_align =
+        [backend.device heapBufferSizeAndAlignWithLength:size options:kBufferOptions];
+    const std::size_t aligned_size = align_up(
+        static_cast<std::size_t>(size_and_align.size), static_cast<std::size_t>(size_and_align.align));
     for (BackendState::HeapArena& arena : backend.buffer_heaps) {
+        // Asking a heap for more than it has left is a Metal validation
+        // failure, not just a nil result; only try arenas that can fit it.
+        if (aligned_size > [arena.heap maxAvailableSizeWithAlignment:size_and_align.align]) {
+            continue;
+        }
         id<MTLBuffer> buffer = [arena.heap newBufferWithLength:size options:kBufferOptions];
         if (buffer != nil) {
             return buffer;
         }
     }
 
-    const MTLSizeAndAlign size_and_align =
-        [backend.device heapBufferSizeAndAlignWithLength:size options:kBufferOptions];
-    const std::size_t aligned_size = align_up(
-        static_cast<std::size_t>(size_and_align.size), static_cast<std::size_t>(size_and_align.align));
     const std::size_t arena_size = std::max(backend.heap_chunk_bytes, aligned_size);
     if (arena_size == 0) {
         if (error_message != nullptr) {
@@ -2014,9 +2019,30 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
     return cudaSuccess;
 }
 
+static cudaError_t allocate_buffer_impl(std::size_t size, bool allow_heap,
+                                        std::shared_ptr<Buffer>* out_buffer,
+                                        std::string* error_message);
+
 cudaError_t allocate_buffer(std::size_t size,
                             std::shared_ptr<Buffer>* out_buffer,
                             std::string* error_message) {
+    return allocate_buffer_impl(size, true, out_buffer, error_message);
+}
+
+// Per-launch scratch (shared-memory spill buffers) is a standalone buffer:
+// sub-allocating thousands of short-lived, differently sized buffers from the
+// long-lived heap arenas did not give their space back in reusable form, and
+// PhysX's PBD drape ran Metal out of memory after about a thousand spilled
+// launches.
+static cudaError_t allocate_transient_buffer(std::size_t size,
+                                             std::shared_ptr<Buffer>* out_buffer,
+                                             std::string* error_message) {
+    return allocate_buffer_impl(size, false, out_buffer, error_message);
+}
+
+static cudaError_t allocate_buffer_impl(std::size_t size, bool allow_heap,
+                                        std::shared_ptr<Buffer>* out_buffer,
+                                        std::string* error_message) {
     if (out_buffer == nullptr || size == 0) {
         if (error_message != nullptr) {
             *error_message = "allocate_buffer invalid argument";
@@ -2032,13 +2058,16 @@ cudaError_t allocate_buffer(std::size_t size,
     std::lock_guard<std::mutex> lock(backend.mutex);
 
     id<MTLBuffer> buffer = nil;
-    const bool use_heap = (backend.heap_mode == HeapMode::kAlways) ||
-                          (backend.heap_mode == HeapMode::kAuto &&
-                           size >= backend.heap_auto_threshold);
+    bool use_heap = allow_heap &&
+                    ((backend.heap_mode == HeapMode::kAlways) ||
+                     (backend.heap_mode == HeapMode::kAuto &&
+                      size >= backend.heap_auto_threshold));
     if (use_heap) {
         buffer = allocate_buffer_from_heap_locked(backend, size, error_message);
     }
     if (buffer == nil) {
+        // A standalone buffer is tracked like any other non-heap allocation.
+        use_heap = false;
         buffer = [backend.device newBufferWithLength:size options:MTLResourceStorageModeShared];
     }
     if (buffer == nil) {
@@ -3695,7 +3724,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             }
             return cudaErrorMemoryAllocation;
         }
-        const cudaError_t status = allocate_buffer(
+        const cudaError_t status = allocate_transient_buffer(
             cumetal::abi::kSharedSpillHeaderBytes + groups * stride, &shared_spill, error_message);
         if (status != cudaSuccess) return cudaErrorMemoryAllocation;
         auto* header = static_cast<std::uint32_t*>(shared_spill->contents());

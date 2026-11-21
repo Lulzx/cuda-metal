@@ -4399,6 +4399,20 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_native_aot_shared_spill
         PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "MTL_DEBUG_LAYER=1")
+    # Per-launch spill buffers must not exhaust Metal memory over thousands of
+    # launches in device-address mode (PhysX's PBD radix sort pattern).
+    add_test(
+        NAME functional_cumetalc_native_aot_shared_spill_churn
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/shared_spill_churn.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_native_aot_shared_spill_churn
+                "--expect-output=PASS: 6000 spilled launches without exhausting Metal memory"
+    )
+    set_tests_properties(functional_cumetalc_native_aot_shared_spill_churn
+        PROPERTIES SKIP_RETURN_CODE 77 RUN_SERIAL TRUE TIMEOUT 300
+        ENVIRONMENT "CUMETAL_USE_METAL_DEVICE_ADDRESSES=1")
     add_test(
         NAME functional_cumetalc_registration_shared_spill
         COMMAND bash

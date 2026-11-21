@@ -335,6 +335,18 @@ int main() {
         cudaFree(d_c);
     }
 
+    // A device allocation larger than the existing heap arenas: offering it to
+    // a 64 MB arena first was a Metal validation failure (this test runs under
+    // MTL_DEBUG_LAYER=1), not just a nil result.
+    {
+        void* small = nullptr;
+        void* large = nullptr;
+        check(cudaMalloc(&small, 8u << 20) == cudaSuccess && cudaMalloc(&large, 100u << 20) == cudaSuccess,
+              "a 100 MB allocation after a heap arena exists");
+        cudaFree(large);
+        cudaFree(small);
+    }
+
     // No spill variant: within Metal's limit it runs, past it it is refused.
     many_args<<<1, kThreads, 8 * 1024>>>(CM_ARGS(CM_ONE) d_out);
     unsigned answer = 0;
