@@ -39,6 +39,18 @@ if [[ "$(grep -Fxc 'DYNAMIC int=   -42 float=    3.12 left=7    ' "${OUTPUT_FILE
     echo "FAIL: missing native-AOT dynamic-width printf record"
     exit 1
 fi
+for last in 1 2; do
+    if [[ "$(grep -Fxc "MIXED i=-7 d=2.50 ll=-9000000000 u=5 ll=${last}" "${OUTPUT_FILE}")" -ne 1 ]]; then
+        echo "FAIL: native-AOT padded mixed-width printf record (${last}) is wrong"
+        exit 1
+    fi
+done
+# CUDA prints device printf on the host's stdout, interleaved with host output.
+STDOUT_ONLY="$("${WORK_DIR}/vectorAdd_linked" 2>/dev/null)"
+if [[ "$(grep -Fxc 'MIXED i=-7 d=2.50 ll=-9000000000 u=5 ll=1' <<<"${STDOUT_ONLY}")" -ne 1 ]]; then
+    echo "FAIL: native-AOT device printf did not reach stdout"
+    exit 1
+fi
 if [[ "$(grep -Fxc 'STRING value=CuMetal-device-string' "${OUTPUT_FILE}")" -ne 1 ]] ||
    [[ "$(grep -Fxc 'STRING value=[unterminated-string]' "${OUTPUT_FILE}")" -ne 1 ]]; then
     echo "FAIL: native-AOT tracked-string printf records are incomplete"

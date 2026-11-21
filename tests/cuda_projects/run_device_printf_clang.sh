@@ -63,6 +63,13 @@ if [[ "$(grep -Ec '^WIDE signed=-1234567890123 unsigned=1234605616436508552 hex=
     exit 1
 fi
 
+for last in 1 2; do
+    if [[ "$(grep -Fxc "MIXED i=-7 d=2.50 ll=-9000000000 u=5 ll=${last}" "${OUTPUT_FILE}")" -ne 1 ]]; then
+        echo "FAIL: padded mixed-width printf record (${last}) is wrong"
+        exit 1
+    fi
+done
+
 if [[ "$(grep -Fxc 'DYNAMIC int=   -42 float=    3.12 left=7    ' "${OUTPUT_FILE}")" -ne 1 ]]; then
     echo "FAIL: missing or malformed dynamic-width/precision device printf record"
     exit 1

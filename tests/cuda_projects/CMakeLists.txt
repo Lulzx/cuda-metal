@@ -853,6 +853,21 @@ if(CUMETAL_CUDA_PROJECTS_PYTHON3)
                 RUN_SERIAL TRUE
                 TIMEOUT 120
         )
+
+        add_test(
+            NAME functional_cumetalc_native_aot_printf_literals
+            COMMAND bash
+                ${CMAKE_SOURCE_DIR}/tests/functional/run_cumetalc_native_printf_literals.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/device_printf_clang/device_printf_literals.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/native-aot-printf-literals
+        )
+        set_tests_properties(
+            functional_cumetalc_native_aot_printf_literals
+            PROPERTIES
+                RUN_SERIAL TRUE
+                TIMEOUT 120
+        )
     endif()
 endif()
 

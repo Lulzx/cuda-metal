@@ -671,13 +671,13 @@ void emit_printf_value(const std::string& spec,
                        int precision,
                        T value) {
     if (dynamic_width && dynamic_precision) {
-        std::fprintf(stderr, spec.c_str(), width, precision, value);
+        std::fprintf(stdout, spec.c_str(), width, precision, value);
     } else if (dynamic_width) {
-        std::fprintf(stderr, spec.c_str(), width, value);
+        std::fprintf(stdout, spec.c_str(), width, value);
     } else if (dynamic_precision) {
-        std::fprintf(stderr, spec.c_str(), precision, value);
+        std::fprintf(stdout, spec.c_str(), precision, value);
     } else {
-        std::fprintf(stderr, spec.c_str(), value);
+        std::fprintf(stdout, spec.c_str(), value);
     }
 }
 
@@ -727,22 +727,30 @@ bool resolve_printf_string_pointer(
     return false;
 }
 
+// Mirrors kPrintfStringTag in compiler/ir/src/nvvm_importer.cpp: a `%s`
+// argument naming an embedded string literal (Metal constant memory the host
+// cannot read) arrives as this tag in the high 16 bits and an index into the
+// kernel's printf string table in the low 32 bits.
+constexpr std::uint64_t kPrintfStringTag = 0x7c5dULL << 48;
+constexpr std::uint64_t kPrintfStringTagMask = 0xffffULL << 48;
+
 void drain_one_printf_record(const std::string& fmt,
                              const std::uint32_t* args,
                              std::uint32_t n_args,
+                             const std::vector<std::string>& strings,
                              const std::vector<std::shared_ptr<
                                  cumetal::metal_backend::Buffer>>&
                                  registered_string_buffers) {
     std::uint32_t arg_idx = 0;
     for (std::size_t i = 0; i < fmt.size(); ++i) {
         if (fmt[i] != '%') {
-            std::fputc(fmt[i], stderr);
+            std::fputc(fmt[i], stdout);
             continue;
         }
         ++i;
         if (i >= fmt.size()) { break; }
         if (fmt[i] == '%') {
-            std::fputc('%', stderr);
+            std::fputc('%', stdout);
             continue;
         }
         // Reconstruct specifier string
@@ -802,13 +810,13 @@ void drain_one_printf_record(const std::string& fmt,
 
         if (arg_idx >= n_args) {
             spec += conv;
-            std::fputs(spec.c_str(), stderr);
+            std::fputs(spec.c_str(), stdout);
             continue;
         }
         if (conv == 's') {
             if (arg_idx + 1u >= n_args) {
                 arg_idx = n_args;
-                std::fputs("[string]", stderr);
+                std::fputs("[string]", stdout);
                 continue;
             }
             const std::uint64_t raw = static_cast<std::uint64_t>(args[arg_idx]) |
@@ -819,6 +827,15 @@ void drain_one_printf_record(const std::string& fmt,
             // Only tracked allocations and the registered module buffers bound
             // for this launch are safe to materialize on the host.
             constexpr std::size_t kMaxDeviceStringBytes = 256u;
+            if ((raw & kPrintfStringTagMask) == kPrintfStringTag) {
+                const std::uint64_t index = raw & ~kPrintfStringTagMask;
+                emit_printf_value(spec, dynamic_width, width,
+                                  dynamic_precision, precision,
+                                  index < strings.size()
+                                      ? strings[static_cast<std::size_t>(index)].c_str()
+                                      : "[string]");
+                continue;
+            }
             const char* begin = nullptr;
             std::size_t remaining = 0;
             if (!resolve_printf_string_pointer(
@@ -869,7 +886,7 @@ void drain_one_printf_record(const std::string& fmt,
                                   dynamic_precision, precision,
                                   static_cast<unsigned long long>(raw));
             } else {
-                std::fputs(spec.c_str(), stderr);
+                std::fputs(spec.c_str(), stdout);
             }
             continue;
         }
@@ -914,7 +931,7 @@ void drain_one_printf_record(const std::string& fmt,
                               static_cast<int>(raw));
         } else {
             spec += conv;
-            std::fputs(spec.c_str(), stderr);
+            std::fputs(spec.c_str(), stdout);
         }
     }
 }
@@ -948,10 +965,13 @@ void drain_printf_buffer(const void* buf_bytes,
         }
         if (fmt_id < static_cast<std::uint32_t>(formats.size())) {
             drain_one_printf_record(formats[fmt_id], buf + i + 2u, n_args,
-                                    registered_string_buffers);
+                                    formats, registered_string_buffers);
         }
         i += 2u + n_args;
     }
+    // CUDA delivers device printf on the host's stdout at synchronization
+    // points; flush so it interleaves with the host's own prints in order.
+    std::fflush(stdout);
 }
 
 cudaError_t ensure_initialized() {

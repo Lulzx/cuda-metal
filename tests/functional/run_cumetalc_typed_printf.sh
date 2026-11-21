@@ -23,7 +23,13 @@ fi
 # Bash 3.2 treats an empty array as unset under nounset; preserve zero arguments.
 "$1" "$3" ${frontend_args[@]+"${frontend_args[@]}"} --backend=cumetal-ir --emit=metallib \
     --no-link --overwrite --fp64=fast48 -o "$4"
-if [[ $(grep -c '^arg bytes 4$' "$4.cumetal-abi") -ne 1 ]]; then
+# Each kernel taking an int contributes exactly one caller `arg bytes 4`; the
+# hidden ring buffer and capacity must not appear as extra caller args. The
+# direct frontend emits every kernel (print_coordinates and
+# print_mixed_values); the --cuda-device PTX run emits only the first.
+expected_int_args=2
+if [[ "$5" == ptx ]]; then expected_int_args=1; fi
+if [[ $(grep -c '^arg bytes 4$' "$4.cumetal-abi") -ne ${expected_int_args} ]]; then
     echo "FAIL: typed printf hidden ring ABI leaked into caller arguments" >&2
     exit 1
 fi

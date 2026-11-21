@@ -446,10 +446,15 @@ std::optional<PrintfLowerResult> lower_clang_vprintf_abi(
                 return lhs.offset < rhs.offset;
             });
             if (call_args.empty()) return std::nullopt;
+            // Each argument sits at its natural alignment within the tuple, so
+            // a 64-bit value after an odd number of 32-bit values follows four
+            // bytes of padding. Any other gap is not a vprintf tuple.
             std::size_t expected_offset = tuple_base;
             for (const auto& arg : call_args) {
+                const std::size_t alignment = static_cast<std::size_t>(arg.bits / 8);
+                expected_offset = (expected_offset + alignment - 1) / alignment * alignment;
                 if (arg.offset != expected_offset) return std::nullopt;
-                expected_offset += static_cast<std::size_t>(arg.bits / 8);
+                expected_offset += alignment;
             }
         }
 

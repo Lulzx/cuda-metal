@@ -170,8 +170,18 @@ floating values, characters, fixed precision, and escaped percent signs
 on both PTX backends. Dynamic `*` width/precision and bounded `%s` reads from
 tracked allocations are also tested on both paths. Registration-backed writable
 module strings are materialized on legacy PTX, typed PTX, and native AOT;
-arbitrary untracked addresses are rejected safely as `[string]`. Embedded
-read-only module-constant strings remain a gap. `cudaLimitPrintfFifoSize`
+arbitrary untracked addresses are rejected safely as `[string]`. Arguments
+sit at their natural alignment in CUDA's tuple, so mixed 32/64-bit calls
+(`"%d %f %lld"`) decode on every path. On the typed NVVM path (native AOT and
+direct `.cu`), a `%s` string literal, passed directly or chosen by a `select`
+of literals, prints its text: it travels as a tagged index into the kernel's
+printf string table, because Metal constant memory is not host-readable. A
+literal reached through a `phi`, or through memory, still prints `[string]`.
+On the PTX paths, legacy prints Clang's `$str` literals as `[string]`. The
+typed PTX backend fails to compile a kernel that passes one directly: the
+generated Metal names the literal's symbol without declaring it, and the
+launch then fails with `cudaErrorInvalidValue`. Output goes to stdout, as
+in CUDA. `cudaLimitPrintfFifoSize`
 configures the bounded ring; format-only and multi-argument calls return their
 CUDA parsed-argument counts even when capacity rejects a record, and a complete
 retained prefix is drained. A statically null format returns CUDA's specified

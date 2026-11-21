@@ -37,6 +37,13 @@ __global__ void print_dynamic_values() {
            6, -42, 8, 2, 3.125, 5, 7u);
 }
 
+// Mixed 32/64-bit arguments: CUDA's tuple pads `d` and the final `ll` to
+// eight-byte offsets after an odd number of 32-bit values.
+__global__ void print_mixed_values(int odd) {
+    printf("MIXED i=%d d=%.2f ll=%lld u=%u ll=%lld\n", -7, 2.5,
+           -9000000000LL, 5u, odd ? 1LL : 2LL);
+}
+
 __global__ void print_device_string(const char* value) {
     printf("STRING value=%s\n", value);
 }
@@ -77,6 +84,14 @@ int main() {
     print_dynamic_values<<<1, 1>>>();
     if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
         std::printf("FAIL: dynamic cudaDeviceSynchronize: %s\n",
+                    cudaGetErrorString(error));
+        cudaFree(pointer);
+        return 1;
+    }
+    print_mixed_values<<<1, 1>>>(1);
+    print_mixed_values<<<1, 1>>>(0);
+    if (const cudaError_t error = cudaDeviceSynchronize(); error != cudaSuccess) {
+        std::printf("FAIL: mixed cudaDeviceSynchronize: %s\n",
                     cudaGetErrorString(error));
         cudaFree(pointer);
         return 1;

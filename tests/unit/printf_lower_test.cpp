@@ -298,6 +298,50 @@ int main() {
                     wide_lowered.calls[0].argument_bits[0] == 64,
                 "registered module-string pointers survive Clang tuple decoding")) return 1;
 
+    // `printf("%d %f", i, d)`: the double sits at offset 8, after four bytes
+    // of alignment padding. A gap that alignment does not explain is still
+    // rejected (the tuple decoder declines and the call is not decoded).
+    const std::string padded_template = R"PTX(
+.version 7.0
+.target sm_80
+.global .align 1 .b8 _$_str[8] = {120, 61, 37, 100, 10, 0, 0, 0};
+.visible .entry clang_printf(.param .u32 value) {
+    .local .align 8 .b8 __local_depot0[24];
+    mov.b64 %SPL, __local_depot0;
+    cvta.local.u64 %SP, %SPL;
+    add.u64 %rd1, %SP, 0;
+    add.u64 %rd2, %SPL, 0;
+    ld.param.b32 %r1, [value];
+    st.local.b32 [%rd2], %r1;
+    st.local.b64 [%rd2+OFFSET], %rd9;
+    st.param.b64 [param1], %rd1;
+    mov.b64 %rd3, _$_str;
+    cvta.global.u64 %rd4, %rd3;
+    st.param.b64 [param0], %rd4;
+    call.uni (retval0), vprintf, (param0, param1);
+    ret;
+}
+)PTX";
+    const auto lower_with_offset = [&](const char* offset) {
+        std::string ptx = padded_template;
+        ptx.replace(ptx.find("OFFSET"), 6, offset);
+        const auto parsed = cumetal::ptx::parse_ptx(ptx);
+        cumetal::passes::PrintfLowerOptions padded_options;
+        padded_options.ptx_source = ptx;
+        return cumetal::passes::lower_printf_calls(parsed.module.entries[0], padded_options);
+    };
+    const auto padded = lower_with_offset("8");
+    if (!expect(padded.ok && padded.calls.size() == 1 &&
+                    padded.calls[0].arguments.size() == 2 &&
+                    padded.calls[0].arguments[1] == "%rd9" &&
+                    padded.calls[0].argument_bits == std::vector<int>{32, 64},
+                "naturally aligned 64-bit argument after a 32-bit one decodes")) return 1;
+    const auto gapped = lower_with_offset("16");
+    if (!expect(!(gapped.ok && gapped.calls.size() == 1 &&
+                  gapped.calls[0].arguments.size() == 2 &&
+                  gapped.calls[0].argument_bits == std::vector<int>{32, 64}),
+                "a tuple gap larger than alignment padding is not decoded as arguments")) return 1;
+
     std::printf("PASS: printf lower unit tests\n");
     return 0;
 }

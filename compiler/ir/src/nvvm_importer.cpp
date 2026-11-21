@@ -42,6 +42,9 @@
 #include <llvm/Transforms/Utils/LoopUtils.h>
 
 #include <algorithm>
+#include <cctype>
+#include <cstring>
+#include <iterator>
 #include <iomanip>
 #include <map>
 #include <sstream>
@@ -853,8 +856,98 @@ struct Importer {
         return static_cast<std::uint32_t>(result.printf_formats.size() - 1);
     }
 
+    // A `%s` argument that points into an embedded string literal lives in
+    // Metal constant memory, which the host cannot read back. Such pointers
+    // travel through the printf ring as a tagged handle instead: the high 16
+    // bits are kPrintfStringTag (never a valid Apple GPU or host address) and
+    // the low 32 bits index the string in the kernel's printf string table
+    // (shared with its formats). runtime/rt/cuda_runtime.cpp decodes it.
+    static constexpr std::uint64_t kPrintfStringTag = 0x7c5dULL << 48;
+
+    // The conversion character consuming each vprintf argument, in order; a
+    // `*` width or precision consumes an argument of its own, spelled '*'.
+    static std::vector<char> printf_argument_conversions(const std::string& format) {
+        std::vector<char> conversions;
+        for (std::size_t i = 0; i < format.size(); ++i) {
+            if (format[i] != '%') continue;
+            if (++i >= format.size()) break;
+            if (format[i] == '%') continue;
+            while (i < format.size() && std::strchr("-+ #0", format[i]) != nullptr) ++i;
+            if (i < format.size() && format[i] == '*') {
+                conversions.push_back('*');
+                ++i;
+            }
+            while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) ++i;
+            if (i < format.size() && format[i] == '.') {
+                ++i;
+                if (i < format.size() && format[i] == '*') {
+                    conversions.push_back('*');
+                    ++i;
+                }
+                while (i < format.size() && std::isdigit(static_cast<unsigned char>(format[i]))) ++i;
+            }
+            while (i < format.size() && std::strchr("hljztL", format[i]) != nullptr) ++i;
+            if (i >= format.size()) break;
+            conversions.push_back(format[i]);
+        }
+        return conversions;
+    }
+
+    std::optional<Operand> printf_string_handle(const llvm::Value& value,
+                                                FunctionState* state,
+                                                BasicBlock* output_block,
+                                                const SourceLocation& location) {
+        if (const auto* select = llvm::dyn_cast<llvm::SelectInst>(&value)) {
+            const auto if_true = printf_string_handle(*select->getTrueValue(), state,
+                                                      output_block, location);
+            if (!if_true.has_value()) return std::nullopt;
+            const auto if_false = printf_string_handle(*select->getFalseValue(), state,
+                                                       output_block, location);
+            if (!if_false.has_value()) return std::nullopt;
+            const ValueId handle = builder.next_value();
+            state->value_types[handle] = Type::integer(64);
+            Operation choose;
+            choose.opcode = OpCode::kSelect;
+            choose.results = {handle};
+            choose.result_types = {Type::integer(64)};
+            choose.operands = {import_operand(*select->getCondition(), *state),
+                               *if_true, *if_false};
+            choose.location = location;
+            output_block->operations.push_back(std::move(choose));
+            return Operand::value_ref(handle, Type::integer(64));
+        }
+        const llvm::Value* base = nullptr;
+        std::int64_t offset = 0;
+        if (!constant_pointer_base_and_offset(value, &base, &offset) || offset < 0) {
+            return std::nullopt;
+        }
+        const auto* global = llvm::dyn_cast<llvm::GlobalVariable>(base);
+        if (global == nullptr || !embedded_constants.contains(global) ||
+            !global->hasInitializer()) {
+            return std::nullopt;
+        }
+        const auto* data = llvm::dyn_cast<llvm::ConstantDataArray>(global->getInitializer());
+        if (data == nullptr || !data->isString()) return std::nullopt;
+        const llvm::StringRef bytes = data->getAsString();
+        if (static_cast<std::uint64_t>(offset) >= bytes.size()) return std::nullopt;
+        const std::size_t end = bytes.find('\0', static_cast<std::size_t>(offset));
+        if (end == llvm::StringRef::npos) return std::nullopt;  // Unterminated.
+        std::string text =
+            bytes.slice(static_cast<std::size_t>(offset), end).str();
+        auto found = std::find(result.printf_formats.begin(),
+                               result.printf_formats.end(), text);
+        if (found == result.printf_formats.end()) {
+            result.printf_formats.push_back(std::move(text));
+            found = std::prev(result.printf_formats.end());
+        }
+        const std::uint64_t index = static_cast<std::uint64_t>(
+            std::distance(result.printf_formats.begin(), found));
+        return Operand::immediate(std::to_string(kPrintfStringTag | index),
+                                  Type::integer(64));
+    }
+
     bool import_vprintf(const llvm::CallBase& call, FunctionState* state,
-                        Operation* operation) {
+                        Operation* operation, BasicBlock* output_block) {
         if (!state->printf_buffer.has_value() ||
             !state->printf_capacity.has_value() || call.arg_size() != 2) {
             return fail(&call, "typed vprintf is missing its ring-buffer ABI");
@@ -927,18 +1020,43 @@ struct Importer {
         std::ostringstream widths;
         std::int64_t expected_offset = 0;
         bool first = true;
+        const std::vector<char> conversions =
+            null_format ? std::vector<char>{}
+                        : printf_argument_conversions(result.printf_formats[*format_id]);
+        std::size_t next_argument = 0;
         for (const auto& [offset, value] : packed_arguments) {
             llvm::Type* type = value->getType();
             const std::uint64_t bits = input->getDataLayout().getTypeSizeInBits(type);
             if ((!type->isIntegerTy() && !type->isFloatingPointTy() &&
                  !type->isPointerTy()) ||
-                (bits != 32 && bits != 64) || offset != expected_offset) {
+                (bits != 32 && bits != 64)) {
                 return fail(&call,
-                            "typed vprintf supports tightly packed 32/64-bit scalar and pointer arguments");
+                            "typed vprintf supports 32/64-bit scalar and pointer arguments");
+            }
+            // CUDA's vprintf tuple places each argument at its natural
+            // alignment, so a 64-bit value after an odd number of 32-bit
+            // values follows four bytes of padding. Any other gap means the
+            // tuple is not a printf argument list.
+            const std::int64_t alignment = static_cast<std::int64_t>(bits / 8);
+            expected_offset = (expected_offset + alignment - 1) / alignment * alignment;
+            if (offset != expected_offset) {
+                return fail(&call,
+                            "typed vprintf arguments must be naturally aligned with no gaps");
             }
             if (!first) widths << ',';
             widths << bits;
             first = false;
+            const std::size_t argument_index = next_argument++;
+            const bool string_conversion = argument_index < conversions.size() &&
+                                           conversions[argument_index] == 's';
+            if (type->isPointerTy() && string_conversion) {
+                if (auto handle = printf_string_handle(*value, state, output_block,
+                                                       operation->location)) {
+                    operation->operands.push_back(*handle);
+                    expected_offset += static_cast<std::int64_t>(bits / 8);
+                    continue;
+                }
+            }
             if (type->isPointerTy()) {
                 const llvm::GlobalVariable* global = referenced_global(*value);
                 const auto external = global == nullptr
@@ -1805,7 +1923,8 @@ struct Importer {
         return true;
     }
 
-    bool import_call(const llvm::CallBase& call, FunctionState* state, Operation* operation) {
+    bool import_call(const llvm::CallBase& call, FunctionState* state, Operation* operation,
+                     BasicBlock* output_block) {
         if (call.isInlineAsm()) {
             const auto* assembly = llvm::dyn_cast<llvm::InlineAsm>(call.getCalledOperand());
             if (assembly == nullptr) {
@@ -1839,7 +1958,7 @@ struct Importer {
         const std::string name = callee->getName().str();
         operation->attributes["llvm_intrinsic"] = name;
 
-        if (name == "vprintf") return import_vprintf(call, state, operation);
+        if (name == "vprintf") return import_vprintf(call, state, operation, output_block);
         if (is_heap_alloc_callee(name) || is_heap_free_callee(name)) {
             if (!state->heap_buffer.has_value()) {
                 return fail(&call, "device heap call is missing its hidden heap binding");
@@ -3196,7 +3315,7 @@ struct Importer {
             if (callee != nullptr && callee->getName().starts_with("llvm.nvvm.atomic.") &&
                 callee->getName().contains(".sys.")) {
                 if (!import_system_atomic(*call, state, output_block, &operation)) return false;
-            } else if (!import_call(*call, state, &operation)) {
+            } else if (!import_call(*call, state, &operation, output_block)) {
                 return false;
             }
         } else if (const auto* atomic = llvm::dyn_cast<llvm::AtomicRMWInst>(&instruction)) {
