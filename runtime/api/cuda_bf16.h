@@ -70,6 +70,37 @@ static __host__ __device__ __forceinline__ nv_bfloat16 __float2bfloat16(float f)
 static __host__ __device__ __forceinline__ nv_bfloat16 __float2bfloat16_rn(float f) {
     return nv_bfloat16(f);
 }
+static __host__ __device__ __forceinline__ unsigned short __bfloat16_as_ushort(nv_bfloat16 h) {
+    return h.__x;
+}
+static __host__ __device__ __forceinline__ short __bfloat16_as_short(nv_bfloat16 h) {
+    return static_cast<short>(h.__x);
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __ushort_as_bfloat16(unsigned short bits) {
+    nv_bfloat16 out;
+    out.__x = bits;
+    return out;
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __short_as_bfloat16(short bits) {
+    nv_bfloat16 out;
+    out.__x = static_cast<uint16_t>(bits);
+    return out;
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __cumetal_bfloat16_round(
+    float f, cumetal_float16::Round mode) {
+    nv_bfloat16 out;
+    out.__x = cumetal_float16::from_float<8, 7>(f, mode);
+    return out;
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __float2bfloat16_rz(float f) {
+    return __cumetal_bfloat16_round(f, cumetal_float16::Round::kTowardZero);
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __float2bfloat16_ru(float f) {
+    return __cumetal_bfloat16_round(f, cumetal_float16::Round::kUp);
+}
+static __host__ __device__ __forceinline__ nv_bfloat16 __float2bfloat16_rd(float f) {
+    return __cumetal_bfloat16_round(f, cumetal_float16::Round::kDown);
+}
 static __host__ __device__ __forceinline__ float __bfloat162float(nv_bfloat16 h) {
     return static_cast<float>(h);
 }

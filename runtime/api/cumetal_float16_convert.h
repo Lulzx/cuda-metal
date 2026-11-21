@@ -22,38 +22,63 @@ CUMETAL_F16_HD inline uint64_t round_shift(uint64_t value, int shift) {
                         (remainder == halfway && (truncated & 1)));
 }
 
+// IEEE 754 rounding directions used by CUDA's _rn/_rz/_ru/_rd conversions.
+enum class Round { kNearestEven, kTowardZero, kUp, kDown };
+
+// Shift right by `shift` bits, rounding the discarded bits in `mode` for a
+// value of the given sign.
+CUMETAL_F16_HD inline uint64_t round_shift(uint64_t value, int shift, Round mode,
+                                           bool negative) {
+    if (mode == Round::kNearestEven) return round_shift(value, shift);
+    if (shift <= 0) return value << -shift;
+    const uint64_t truncated = shift >= 64 ? 0 : value >> shift;
+    const bool inexact = shift >= 64 ? value != 0
+                                     : (value & ((uint64_t(1) << shift) - 1)) != 0;
+    const bool away = (mode == Round::kUp && !negative) ||
+                      (mode == Round::kDown && negative);
+    return truncated + (inexact && away);
+}
+
 // value = significand * 2^exponent. Round only once to the destination;
 // converting through float first can double-round integer/double inputs.
 template <int ExponentBits, int FractionBits>
-CUMETAL_F16_HD inline uint16_t pack(bool negative, uint64_t significand, int exponent) {
+CUMETAL_F16_HD inline uint16_t pack(bool negative, uint64_t significand, int exponent,
+                                    Round mode = Round::kNearestEven) {
     const uint16_t sign = negative ? 0x8000u : 0;
     if (significand == 0) return sign;
     int top = 0;
     for (uint64_t scan = significand; scan >>= 1;) ++top;
     constexpr int bias = (1 << (ExponentBits - 1)) - 1;
     constexpr int max_exponent = (1 << ExponentBits) - 1;
+    // Overflow goes to infinity unless the rounding direction points back
+    // toward zero, which saturates at the largest finite value.
+    const bool overflow_to_infinity =
+        mode == Round::kNearestEven || (mode == Round::kUp && !negative) ||
+        (mode == Round::kDown && negative);
+    const uint16_t overflow = sign | static_cast<uint16_t>(
+        overflow_to_infinity ? max_exponent << FractionBits
+                             : (max_exponent << FractionBits) - 1);
     int destination_exponent = exponent + top + bias;
     uint64_t rounded;
     if (destination_exponent <= 0) {
-        rounded = round_shift(significand, (1 - bias - FractionBits) - exponent);
+        rounded = round_shift(significand, (1 - bias - FractionBits) - exponent, mode,
+                              negative);
         // Rounding a subnormal can carry into the minimum normal value.
         return sign | static_cast<uint16_t>(rounded);
     }
-    if (destination_exponent >= max_exponent)
-        return sign | static_cast<uint16_t>(max_exponent << FractionBits);
-    rounded = round_shift(significand, top - FractionBits);
+    if (destination_exponent >= max_exponent) return overflow;
+    rounded = round_shift(significand, top - FractionBits, mode, negative);
     if (rounded == (uint64_t(1) << (FractionBits + 1))) {
         rounded >>= 1;
         ++destination_exponent;
     }
-    if (destination_exponent >= max_exponent)
-        return sign | static_cast<uint16_t>(max_exponent << FractionBits);
+    if (destination_exponent >= max_exponent) return overflow;
     return sign | static_cast<uint16_t>((destination_exponent << FractionBits) |
                  (rounded & ((uint64_t(1) << FractionBits) - 1)));
 }
 
 template <int ExponentBits, int FractionBits>
-CUMETAL_F16_HD inline uint16_t from_float(float value) {
+CUMETAL_F16_HD inline uint16_t from_float(float value, Round mode = Round::kNearestEven) {
     uint32_t bits;
     __builtin_memcpy(&bits, &value, sizeof(bits));
     const unsigned exponent = (bits >> 23) & 255;
@@ -65,7 +90,7 @@ CUMETAL_F16_HD inline uint16_t from_float(float value) {
     }
     return pack<ExponentBits, FractionBits>(bits >> 31,
         fraction | (exponent ? 0x800000u : 0),
-        exponent ? static_cast<int>(exponent) - 127 - 23 : -149);
+        exponent ? static_cast<int>(exponent) - 127 - 23 : -149, mode);
 }
 
 template <int ExponentBits, int FractionBits>

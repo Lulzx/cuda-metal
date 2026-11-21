@@ -427,6 +427,20 @@ CUMETAL_F16_HD inline __half __short_as_half(short bits) {
 CUMETAL_F16_HD inline __half __double2half(double value) {
     return __cumetal_half_from_bits(cumetal_float16::from_double<5, 10>(value));
 }
+// Directed-rounding float -> half. Metal has no per-instruction rounding mode,
+// so these round in software (identically on host and device).
+CUMETAL_F16_HD inline __half __float2half_rz(float value) {
+    return __cumetal_half_from_bits(
+        cumetal_float16::from_float<5, 10>(value, cumetal_float16::Round::kTowardZero));
+}
+CUMETAL_F16_HD inline __half __float2half_ru(float value) {
+    return __cumetal_half_from_bits(
+        cumetal_float16::from_float<5, 10>(value, cumetal_float16::Round::kUp));
+}
+CUMETAL_F16_HD inline __half __float2half_rd(float value) {
+    return __cumetal_half_from_bits(
+        cumetal_float16::from_float<5, 10>(value, cumetal_float16::Round::kDown));
+}
 CUMETAL_F16_HD inline __half __short2half_rn(short value) {
     const uint64_t magnitude = value < 0 ? uint64_t(0) - static_cast<uint64_t>(value) : static_cast<uint64_t>(value);
     return __cumetal_half_from_bits(cumetal_float16::pack<5, 10>(value < 0, magnitude, 0));

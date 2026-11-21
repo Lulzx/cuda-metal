@@ -66,9 +66,86 @@ static bool test_conversion_contracts() {
     return true;
 }
 
+// Neighbouring 16-bit floats in value order (sign-magnitude encoding).
+static uint16_t next_up16(uint16_t bits) {
+    if (bits == 0x8000u) return 0x0001u;
+    return (bits & 0x8000u) ? static_cast<uint16_t>(bits - 1) : static_cast<uint16_t>(bits + 1);
+}
+static uint16_t next_down16(uint16_t bits) {
+    if (bits == 0x0000u) return 0x8001u;
+    return (bits & 0x8000u) ? static_cast<uint16_t>(bits + 1) : static_cast<uint16_t>(bits - 1);
+}
+
+// Directed conversions must equal the round-to-nearest result moved to the
+// representable neighbour on the required side of x. Zero results keep the
+// sign of x, overflow saturates toward zero for rz and the inward direction.
+template <typename ToFloat>
+static bool directed_matches(float x, uint16_t rn, uint16_t rz, uint16_t ru, uint16_t rd,
+                             ToFloat to_float) {
+    uint16_t up = rn;
+    if (to_float(up) < x) up = next_up16(up);
+    uint16_t down = rn;
+    if (to_float(down) > x) down = next_down16(down);
+    const uint16_t toward_zero = std::signbit(x) ? up : down;
+    return ru == up && rd == down && rz == toward_zero;
+}
+
+static bool test_directed_rounding() {
+    const auto half_value = [](uint16_t bits) { return __half2float(__cumetal_half_from_bits(bits)); };
+    const auto bfloat_value = [](uint16_t bits) {
+        return __bfloat162float(__cumetal_bfloat_from_bits(bits));
+    };
+    // Every float exponent, sign and many significands, plus fixed edges:
+    // the half overflow boundary and its tie, subnormal edges, float extremes.
+    static const uint32_t edges[] = {
+        0x00000000u, 0x80000000u, 0x7f800000u, 0xff800000u, 0x477fe000u, 0x477ff000u,
+        0x477fefffu, 0xc77ff000u, 0xc77ff001u, 0x33800000u, 0x33000000u, 0x33000001u,
+        0xb3000001u, 0x387fc000u, 0x38800000u, 0x7f7fffffu, 0xff7fffffu, 0x7f7f8000u,
+        0x00000001u, 0x80000001u, 0x3f808000u, 0x3f818000u,
+    };
+    const auto check = [&](uint32_t bits) {
+        float x;
+        std::memcpy(&x, &bits, sizeof(x));
+        if (std::isnan(x)) return true;
+        const bool half_ok = directed_matches(
+            x, __half_as_ushort(__float2half_rn(x)), __half_as_ushort(__float2half_rz(x)),
+            __half_as_ushort(__float2half_ru(x)), __half_as_ushort(__float2half_rd(x)),
+            half_value);
+        const bool bfloat_ok = directed_matches(
+            x, __bfloat16_as_ushort(__float2bfloat16_rn(x)),
+            __bfloat16_as_ushort(__float2bfloat16_rz(x)),
+            __bfloat16_as_ushort(__float2bfloat16_ru(x)),
+            __bfloat16_as_ushort(__float2bfloat16_rd(x)), bfloat_value);
+        if (!half_ok || !bfloat_ok) {
+            std::fprintf(stderr, "directed rounding mismatch for 0x%08x (half %d, bfloat16 %d)\n",
+                         bits, half_ok, bfloat_ok);
+            return false;
+        }
+        return true;
+    };
+    for (const uint32_t bits : edges) {
+        if (!check(bits)) return false;
+    }
+    for (uint64_t bits = 0; bits <= 0xffffffffull; bits += 4099) {
+        if (!check(static_cast<uint32_t>(bits))) return false;
+    }
+    // Infinity inputs stay infinite in every direction.
+    if (__half_as_ushort(__float2half_rz(INFINITY)) != 0x7c00u ||
+        __bfloat16_as_ushort(__float2bfloat16_rd(-INFINITY)) != 0xff80u) {
+        return false;
+    }
+    // A bit-identity check of the reinterpretation helpers.
+    return __bfloat16_as_ushort(__ushort_as_bfloat16(0x3f81u)) == 0x3f81u &&
+           __bfloat16_as_short(__short_as_bfloat16(-2)) == -2;
+}
+
 int main() {
     if (!test_conversion_contracts()) {
         std::fprintf(stderr, "FAIL: half/bfloat rounding, saturation, or special-value contract\n");
+        return 1;
+    }
+    if (!test_directed_rounding()) {
+        std::fprintf(stderr, "FAIL: half/bfloat16 directed-rounding conversions\n");
         return 1;
     }
     // float → half → float roundtrip for simple values
