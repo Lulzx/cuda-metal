@@ -387,6 +387,41 @@ private:
     id<MTLCommandBuffer> command_buffer_;
 };
 
+// Profiling names (#227, from MaansAndersson/cuda-metal dac98c14). Metal
+// System Trace and Xcode GPU captures otherwise show every launch as
+// "Compute Command 0". An encoder is named after the first kernel it runs
+// (the mangled name CUMETAL_TRACE_GPU records use); Instruments keeps every
+// label an encoder is given, so batched dispatches do not relabel it.
+void label_compute_encoder_once(id<MTLComputeCommandEncoder> encoder,
+                                const std::string& kernel_name) {
+    if (encoder == nil || encoder.label != nil) return;
+    NSString* name = [NSString stringWithUTF8String:kernel_name.c_str()];
+    if (name != nil) encoder.label = name;
+}
+
+// Per-dispatch debug groups tell apart the dispatches sharing a batched
+// encoder in a GPU capture. They cost a little CPU per launch, so they are
+// opt-in: CUMETAL_GPU_DEBUG_GROUPS=1.
+bool gpu_debug_groups_enabled() {
+    static const bool enabled = [] {
+        const char* value = std::getenv("CUMETAL_GPU_DEBUG_GROUPS");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+void dispatch_threadgroups_named(id<MTLComputeCommandEncoder> encoder,
+                                 const std::string& kernel_name,
+                                 MTLSize threadgroups,
+                                 MTLSize threads_per_threadgroup) {
+    NSString* name = gpu_debug_groups_enabled()
+                         ? [NSString stringWithUTF8String:kernel_name.c_str()]
+                         : nil;
+    if (name != nil) [encoder pushDebugGroup:name];
+    [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+    if (name != nil) [encoder popDebugGroup];
+}
+
 class StreamImpl final : public Stream {
 public:
     StreamImpl(id<MTLCommandQueue> queue,
@@ -551,6 +586,13 @@ public:
         open_batch_dispatches_ = 0;
         [command_buffer commit];
         return add_pending(command_buffer);
+    }
+
+    std::string open_compute_encoder_label() {
+        std::lock_guard<std::mutex> lock(submission_mutex_);
+        if (open_encoder_ == nil || open_kind_ != EncoderKind::kCompute) return {};
+        NSString* label = [open_encoder_ label];
+        return label != nil ? std::string([label UTF8String]) : std::string{};
     }
 
     void flush_open_batch() {
@@ -1171,6 +1213,24 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
                 }
                 return nil;
             }
+            // Report size/largest functions under CUMETAL_COMPILE_TIMING and
+            // refuse sources over CUMETAL_MSL_SIZE_LIMIT before Apple's
+            // compiler spends minutes on them. Only materialise UTF-8 when a
+            // report or limit needs it (a UTF-16 unit is at most 3 bytes).
+            if (common::compile_timing_enabled() ||
+                std::getenv("CUMETAL_MSL_SIZE_LIMIT") != nullptr ||
+                static_cast<std::size_t>(src.length) * 3u >= 16u * 1024u * 1024u) {
+                const char* utf8 = [src UTF8String];
+                std::string size_error;
+                if (utf8 != nullptr &&
+                    !common::check_metal_source_size(
+                        std::string_view(utf8, std::strlen(utf8)),
+                        std::filesystem::path(metallib_path).stem().string(), &size_error)) {
+                    std::fprintf(stderr, "cumetal: %s\n", size_error.c_str());
+                    if (error_message != nullptr) *error_message = size_error;
+                    return nil;
+                }
+            }
             MTLCompileOptions* compileOpts = [[MTLCompileOptions alloc] init];
             // A source may pin its own math mode. Dekker FP32-pair arithmetic
             // needs exact IEEE rounding per step: under fast math the compiler
@@ -1197,9 +1257,9 @@ id<MTLLibrary> load_library_locked(BackendState& backend,
             NSError* libErr = nil;
             id<MTLLibrary> srcLib = [&] {
                 // Avoid traversing a large NSString when tracing is disabled.
-                const std::size_t input_bytes = common::CompileTrace::enabled()
+                const std::size_t input_bytes = (common::CompileTrace::enabled() || common::compile_timing_enabled())
                     ? [src lengthOfBytesUsingEncoding:NSUTF8StringEncoding] : 0;
-                common::CompileTrace trace("metal_new_library_with_source", input_bytes);
+                common::CompilePhase trace("metal_new_library_with_source", input_bytes);
                 return [backend.device newLibraryWithSource:src options:compileOpts error:&libErr];
             }();
             if (srcLib == nil) {
@@ -1378,7 +1438,7 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
     @autoreleasepool {
         NSString* function_name = [NSString stringWithUTF8String:kernel_name.c_str()];
         id<MTLFunction> function = [&] {
-            common::CompileTrace trace("metal_new_function");
+            common::CompilePhase trace("metal_new_function");
             return [library newFunctionWithName:function_name];
         }();
         if (function == nil) {
@@ -1403,7 +1463,7 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
             pipeline_descriptor.computeFunction = function;
             pipeline_descriptor.binaryArchives = @[ binary_archive ];
             pipeline = [&] {
-                common::CompileTrace trace("metal_new_compute_pipeline");
+                common::CompilePhase trace("metal_new_compute_pipeline");
                 return [backend.device
                     newComputePipelineStateWithDescriptor:pipeline_descriptor
                                                   options:MTLPipelineOptionBindingInfo
@@ -1417,7 +1477,7 @@ id<MTLComputePipelineState> load_pipeline_locked(BackendState& backend,
         }
         if (pipeline == nil) {
             pipeline = [&] {
-                common::CompileTrace trace("metal_new_compute_pipeline");
+                common::CompilePhase trace("metal_new_compute_pipeline");
                 return [backend.device newComputePipelineStateWithFunction:function
                                                                   options:MTLPipelineOptionBindingInfo
                                                                reflection:&reflection
@@ -2133,6 +2193,14 @@ cudaError_t destroy_stream(const std::shared_ptr<Stream>& stream, std::string* e
     }
 
     return stream_synchronize(stream, error_message);
+}
+
+std::string stream_open_compute_encoder_label(const std::shared_ptr<Stream>& stream) {
+    auto stream_impl = std::dynamic_pointer_cast<StreamImpl>(stream);
+    if (stream_impl == nullptr) return {};
+    @autoreleasepool {
+        return stream_impl->open_compute_encoder_label();
+    }
 }
 
 cudaError_t stream_synchronize(const std::shared_ptr<Stream>& stream, std::string* error_message) {
@@ -3613,6 +3681,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             }
         }
 
+        label_compute_encoder_once(encoder, kernel_name);
         [encoder setComputePipelineState:pipeline];
         if (trap_status) {
             auto* buffer = dynamic_cast<BufferImpl*>(trap_status.get());
@@ -3721,7 +3790,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const MTLSize threadgroups = MTLSizeMake(config.grid.x, config.grid.y, config.grid.z);
         const MTLSize threads_per_threadgroup =
             MTLSizeMake(config.block.x, config.block.y, config.block.z);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        dispatch_threadgroups_named(encoder, kernel_name, threadgroups, threads_per_threadgroup);
 
         // The batch keeps the encoder open; flush ends it, signals and commits.
         if (batching_allowed) {
@@ -3949,6 +4018,7 @@ cudaError_t fft_r2c_3d_f32(const Fft3dR2CConfig& config,
             if (error_message != nullptr) *error_message = "VkFFT failed to create compute encoder";
             return cudaErrorUnknown;
         }
+        encoder.label = config.inverse ? @"VkFFT c2r_3d_f32" : @"VkFFT r2c_3d_f32";
 
         MTL::Buffer* real_handle =
             reinterpret_cast<MTL::Buffer*>((__bridge void*)real_impl->handle());
@@ -4162,6 +4232,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
             return cudaErrorUnknown;
         }
 
+        label_compute_encoder_once(encoder, kernel_name);
         [encoder setComputePipelineState:pipeline];
         mark_allocations_resident(encoder, backend);
 
@@ -4256,7 +4327,7 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         const MTLSize threadgroups = MTLSizeMake(config.grid.x, config.grid.y, config.grid.z);
         const MTLSize threads_per_threadgroup =
             MTLSizeMake(config.block.x, config.block.y, config.block.z);
-        [encoder dispatchThreadgroups:threadgroups threadsPerThreadgroup:threads_per_threadgroup];
+        dispatch_threadgroups_named(encoder, kernel_name, threadgroups, threads_per_threadgroup);
         [encoder endEncoding];
         encode_resource_signals(command_buffer, fences);
         [command_buffer commit];

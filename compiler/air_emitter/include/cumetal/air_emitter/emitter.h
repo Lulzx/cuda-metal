@@ -20,6 +20,10 @@ struct EmitOptions {
     bool validate_output = true;
     bool run_xcrun_validate = false;
     std::string kernel_name = "vector_add";
+    // What compile timing and size diagnostics call this input (a source
+    // file or kernel name). Empty: the kernel name if one was set, else the
+    // input's file name.
+    std::string source_label;
     // Additional AIR modules or Metal sources to compile and statically link
     // into the result. Used by software ISA backends such as VF64.
     std::vector<std::filesystem::path> additional_link_inputs;
@@ -54,6 +58,10 @@ struct EmitResult {
     std::filesystem::path output;
     std::vector<std::string> logs;
     std::string error;
+    // The Metal source was over CUMETAL_MSL_SIZE_LIMIT (or the variable was
+    // malformed), so Apple's compiler never ran. No experimental fallback is
+    // attempted; JIT callers report `error` on stderr.
+    bool refused_by_size_limit = false;
 };
 
 EmitResult emit_metallib(const EmitOptions& options);

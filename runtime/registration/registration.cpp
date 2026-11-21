@@ -1,4 +1,5 @@
 #include "registration.h"
+#include "module_cache.h"
 
 #include "cumetal/air_emitter/emitter.h"
 #include "cumetal/common/metal_support_path.h"
@@ -281,13 +282,7 @@ void maybe_dump_ptx_for_llvm_debug(const std::string& kernel_name, const std::st
 }
 
 std::filesystem::path jit_cache_root() {
-    if (const char* d = std::getenv("CUMETAL_CACHE_DIR"); d != nullptr && d[0] != '\0') {
-        return std::filesystem::path(d) / "registration-jit";
-    }
-    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-        return std::filesystem::path(home) / "Library" / "Caches" / "io.cumetal" / "registration-jit";
-    }
-    return std::filesystem::temp_directory_path() / "io.cumetal" / "registration-jit";
+    return cumetal::cache::cache_base_dir() / "registration-jit";
 }
 
 // Returns the persistent cache path for a (ptx_source, kernel_name) pair.
@@ -1522,6 +1517,9 @@ bool emit_ptx_entry_to_temp_metallib(const std::string& module_ptx_source,
         }
     }
     if (!emitted.ok || emitted.output.empty()) {
+        if (emitted.refused_by_size_limit) {
+            std::fprintf(stderr, "cumetal: %s\n", emitted.error.c_str());
+        }
         REG_DEBUG("emit_metallib error for '%s': %s",
                   kernel_name.c_str(),
                   emitted.error.empty() ? "<none>" : emitted.error.c_str());

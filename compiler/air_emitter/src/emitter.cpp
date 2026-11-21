@@ -1,6 +1,7 @@
 #include "cumetal/air_emitter/emitter.h"
 
 #include "cumetal/air_validate/validator.h"
+#include "cumetal/common/compile_trace.h"
 #include "cumetal/common/metallib.h"
 
 #include <algorithm>
@@ -548,6 +549,35 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         const std::string xcrun_for_metal = find_tool("xcrun");
         const std::string xcrun_metal_bin = xcrun_for_metal.empty() ? "xcrun" : xcrun_for_metal;
         std::filesystem::path metal_input = options.input;
+        const std::string source_label =
+            !options.source_label.empty() ? options.source_label
+            : (options.kernel_name.empty() || options.kernel_name == "vector_add")
+                ? options.input.filename().string()
+                : options.kernel_name;
+        std::size_t source_bytes = 0;
+        {
+            std::error_code size_ec;
+            source_bytes = static_cast<std::size_t>(std::filesystem::file_size(options.input, size_ec));
+            // Read the generated source only when a size report or limit
+            // needs it; the common case stays a stat.
+            if (!size_ec && (cumetal::common::compile_timing_enabled() ||
+                             std::getenv("CUMETAL_MSL_SIZE_LIMIT") != nullptr ||
+                             source_bytes >= 16u * 1024u * 1024u)) {
+                std::string read_error;
+                const std::vector<std::uint8_t> bytes =
+                    cumetal::common::read_file_bytes(options.input, &read_error);
+                std::string size_error;
+                if (read_error.empty() &&
+                    !cumetal::common::check_metal_source_size(
+                        std::string_view(reinterpret_cast<const char*>(bytes.data()), bytes.size()),
+                        source_label, &size_error)) {
+                    result.error = size_error;
+                    result.refused_by_size_limit = true;
+                    std::filesystem::remove_all(temp_dir);
+                    return result;
+                }
+            }
+        }
         const bool precise_support = !options.precise_textual_include_inputs.empty();
         if (precise_support || !options.textual_include_inputs.empty()) {
             std::string combined;
@@ -610,7 +640,10 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                                                      : math_flags(options)) +
                                     " -c " + quote_shell(metal_input.string()) +
                                     " -o " + quote_shell(temp_air.string()) + " 2>&1";
-        const CommandResult cmd = run_command_capture(command);
+        const CommandResult cmd = [&] {
+            cumetal::common::CompilePhase phase("metal_compile", source_bytes, source_label);
+            return run_command_capture(command);
+        }();
         result.logs.push_back("$ " + command);
         result.logs.push_back(cmd.output);
         if (!cmd.started || cmd.exit_code != 0) {
@@ -656,7 +689,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
                     xcrun_bin + " air-opt -S -passes='default<O2>' " +
                     quote_shell(options.input.string()) + " -o " +
                     quote_shell(optimized_ll.string()) + " 2>&1";
-                const CommandResult air_opt = run_command_capture(air_opt_command);
+                const CommandResult air_opt = [&] { cumetal::common::CompilePhase phase("air_opt"); return run_command_capture(air_opt_command); }();
                 result.logs.push_back("$ " + air_opt_command);
                 result.logs.push_back(air_opt.output);
                 if (air_opt.started && air_opt.exit_code == 0 &&
@@ -674,7 +707,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             // Full AOT compilation: metal input.ll -o output.metallib (no -c flag)
             const std::string command = xcrun_bin + " metal -fno-strict-aliasing " + quote_shell(llvm_input.string()) + " -o " +
                                         quote_shell(options.output.string()) + " 2>&1";
-            const CommandResult cmd = run_command_capture(command);
+            const CommandResult cmd = [&] { cumetal::common::CompilePhase phase("metal_compile"); return run_command_capture(command); }();
             result.logs.push_back("$ " + command);
             result.logs.push_back(cmd.output);
             if (options.additional_link_inputs.empty() &&
@@ -690,7 +723,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             result.logs.push_back("xcrun metal AOT failed, falling back to Air bitcode path");
             const std::string fallback_cmd = xcrun_bin + " metal -fno-strict-aliasing -c " + quote_shell(llvm_input.string()) + " -o " +
                                              quote_shell(temp_air.string()) + " 2>&1";
-            const CommandResult fallback = run_command_capture(fallback_cmd);
+            const CommandResult fallback = [&] { cumetal::common::CompilePhase phase("metal_compile"); return run_command_capture(fallback_cmd); }();
             result.logs.push_back("$ " + fallback_cmd);
             result.logs.push_back(fallback.output);
             if (fallback.started && fallback.exit_code == 0) {
@@ -769,7 +802,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
             const std::string command = xcrun_bin + " metal -std=metal3.2 -fno-strict-aliasing " +
                 (precise ? precise_math_flags() : math_flags(options)) + " -c " +
                 quote_shell(input.string()) + " -o " + quote_shell(compiled.string()) + " 2>&1";
-            const CommandResult cmd = run_command_capture(command);
+            const CommandResult cmd = [&] { cumetal::common::CompilePhase phase("metal_compile_support"); return run_command_capture(command); }();
             result.logs.push_back("$ " + command);
             if (!cmd.output.empty()) result.logs.push_back(cmd.output);
             if (!cmd.started || cmd.exit_code != 0) {
@@ -784,7 +817,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
         std::string command = xcrun_bin + " air-link";
         for (const auto& input : link_inputs) command += " " + quote_shell(input.string());
         command += " -o " + quote_shell(packaged_air.string()) + " 2>&1";
-        const CommandResult linked = run_command_capture(command);
+        const CommandResult linked = [&] { cumetal::common::CompilePhase phase("air_link"); return run_command_capture(command); }();
         result.logs.push_back("$ " + command);
         if (!linked.output.empty()) result.logs.push_back(linked.output);
         if (!linked.started || linked.exit_code != 0) {
@@ -798,7 +831,7 @@ EmitResult emit_with_xcrun(const EmitOptions& options) {
     const std::string xcrun_metallib_bin = xcrun_for_metallib.empty() ? "xcrun" : xcrun_for_metallib;
     const std::string metallib_command = xcrun_metallib_bin + " metallib " + quote_shell(packaged_air.string()) +
                                          " -o " + quote_shell(options.output.string()) + " 2>&1";
-    const CommandResult pack_cmd = run_command_capture(metallib_command);
+    const CommandResult pack_cmd = [&] { cumetal::common::CompilePhase phase("metallib_package"); return run_command_capture(metallib_command); }();
     result.logs.push_back("$ " + metallib_command);
     result.logs.push_back(pack_cmd.output);
 
@@ -858,7 +891,8 @@ EmitResult emit_metallib(const EmitOptions& options) {
 
     if (options.mode == EmitMode::kXcrun) {
         EmitResult xcrun_result = emit_with_xcrun(options);
-        if (!xcrun_result.ok && options.fallback_to_experimental) {
+        if (!xcrun_result.ok && options.fallback_to_experimental &&
+            !xcrun_result.refused_by_size_limit) {
             EmitResult fallback_result = emit_experimental(options);
             fallback_result.logs.insert(fallback_result.logs.begin(),
                                         "xcrun mode failed: " + xcrun_result.error);

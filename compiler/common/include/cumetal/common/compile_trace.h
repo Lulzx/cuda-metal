@@ -10,6 +10,7 @@
 #include <string>
 #include <string_view>
 #include <unistd.h>
+#include <vector>
 
 namespace cumetal::common {
 
@@ -74,5 +75,81 @@ private:
     std::chrono::steady_clock::time_point start_;
     std::string context_;
 };
+
+// Human-readable per-phase timing (CUMETAL_COMPILE_TIMING=1, or cumetalc
+// --compile-timing). Independent of CUMETAL_TRACE_COMPILE, which keeps its
+// machine-readable records; a CompilePhase emits both when both are enabled.
+// Lines go to stderr as "cumetal timing: ...", and the process prints a
+// per-phase total at exit. Implemented in compile_timing.cpp.
+bool compile_timing_enabled();
+// `function` names the kernel or input when known; `input_bytes` is the
+// phase's input size (0 when not recorded).
+void compile_phase_begin(const char* stage, std::string_view function, std::size_t input_bytes);
+void compile_phase_end(const char* stage, double elapsed_ms, std::string_view function);
+
+// One top-level compilation phase (frontend, import, MSL generation, Metal
+// compile, pipeline creation). Nested sub-stages keep using CompileTrace.
+class CompilePhase {
+public:
+    explicit CompilePhase(const char* stage, std::size_t input_bytes = 0,
+                          std::string_view function = {})
+        // The machine-readable record keeps its no-names contract; only the
+        // opt-in human timing line names the kernel.
+        : trace_(stage, input_bytes), stage_(stage),
+          timing_(compile_timing_enabled()) {
+        if (!timing_) return;
+        function_ = std::string(function);
+        compile_phase_begin(stage_, function_, input_bytes);
+        start_ = std::chrono::steady_clock::now();
+    }
+
+    ~CompilePhase() {
+        if (!timing_) return;
+        const double ms = std::chrono::duration<double, std::milli>(
+            std::chrono::steady_clock::now() - start_).count();
+        compile_phase_end(stage_, ms, function_);
+    }
+
+    CompilePhase(const CompilePhase&) = delete;
+    CompilePhase& operator=(const CompilePhase&) = delete;
+
+private:
+    CompileTrace trace_;
+    const char* stage_;
+    bool timing_;
+    std::string function_;
+    std::chrono::steady_clock::time_point start_;
+};
+
+// Size of one function definition in generated Metal source.
+struct MslFunctionSize {
+    std::string name;
+    std::size_t bytes = 0;
+};
+
+// The `limit` largest top-level function definitions in MSL text, largest
+// first. A brace-depth scan that skips comments and string/char literals; it
+// is a diagnostic, not a parser.
+std::vector<MslFunctionSize> largest_msl_functions(std::string_view source,
+                                                   std::size_t limit);
+
+// "1.5 MiB", "12.0 KiB", "512 B".
+std::string format_byte_size(std::size_t bytes);
+
+// Parses CUMETAL_MSL_SIZE_LIMIT-style sizes: a decimal byte count with an
+// optional K/M/G suffix (binary units, case-insensitive, optional trailing
+// "B" or "iB"). Returns false for anything else, including zero.
+bool parse_byte_size(std::string_view text, std::size_t* bytes);
+
+// Called with generated Metal source just before it is handed to Apple's
+// compiler (offline `xcrun metal` or runtime newLibraryWithSource).
+// - With compile timing on, reports the source size and largest functions.
+// - With CUMETAL_MSL_SIZE_LIMIT set, returns false with a diagnostic naming
+//   the largest functions when the source is over the limit (or when the
+//   variable is malformed), so a huge kernel fails fast instead of spending
+//   minutes in Metal compilation.
+// - Otherwise warns once per process for very large sources (16 MiB+).
+bool check_metal_source_size(std::string_view source, std::string_view label,
+                             std::string* error);
 
 }  // namespace cumetal::common

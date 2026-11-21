@@ -8,6 +8,40 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **`cumetal doctor` tells JIT-only from not ready (#217).** It now compiles
+  and packages a `-std=metal3.2` probe kernel, reports the toolchain's AIR
+  version, says "toolchain too old for AIR 2.7" for an old toolchain, flags a
+  toolchain whose deployment target is newer than the running macOS, and
+  recognises Xcode 26/27's `metal` launcher stub, printing the
+  `xcodebuild -runFirstLaunch` / `-downloadComponent MetalToolchain` sequence.
+  It exits 3 when only runtime JIT works (the offline toolchain is missing),
+  0 when ready, 1 when not usable. The README documents the sequence.
+- **Per-phase compile timing (#220).** `cumetalc --compile-timing` or
+  `CUMETAL_COMPILE_TIMING=1` (also for JIT in applications) prints each phase
+  as it starts and ends (CUDA frontend, NVVM/PTX import, Metal legalization,
+  MSL generation, `xcrun metal`, metallib packaging, host link, runtime
+  library/pipeline creation), the generated Metal source size and its largest
+  functions, and a per-phase total at exit. `CUMETAL_MSL_SIZE_LIMIT` refuses
+  generated MSL above a size before Apple's compiler spends minutes on it,
+  naming the largest functions; CuMetal warns once at 16 MiB without it. NVVM
+  import and Apple's compiler steps also gain `CUMETAL_TRACE_COMPILE` spans.
+- **Compute encoders carry kernel names (#227).** Metal System Trace and Xcode
+  GPU captures show the first kernel of each encoder instead of
+  `Compute Command 0`; `CUMETAL_GPU_DEBUG_GROUPS=1` adds a debug group per
+  dispatch. Ported from `MaansAndersson/cuda-metal` `dac98c14`, with the
+  per-dispatch debug groups made opt-in.
+- **Capability detection for downstream projects (#229).** `cuda.h` defines
+  `__CUMETAL__` and `__CUMETAL_VERSION__` (0.8.0 is `800`), visible on host
+  and device in anything `cumetalc` compiles; `cumetal version --json` reports
+  the install layout and probed features. `docs/downstream.md` lists
+  downstream projects with their pinned versions and tracking issues.
+- **Bundled kernel cache (#229).** With `CUMETAL_CACHE_DIR` unset, every
+  CuMetal cache now lives under `share/cumetal-cache` next to the loaded
+  `libcumetal.dylib` when that directory exists and is writable, so wheels and
+  tarballs can ship a prewarmed cache. A read-only bundled cache falls back to
+  the per-user cache with a warning. `functional_bundled_cache` tests it with
+  a relocated dylib.
+
 - **PTX module slicing for the registration JIT.** Each kernel is lowered
   from the part of its module it can reach (module-scope declarations, the
   entry, and every definition it names, including child entries it enqueues)

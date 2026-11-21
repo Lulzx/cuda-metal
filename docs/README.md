@@ -14,6 +14,7 @@ describe current implementation and never override it.
 ## Build, compiler, and runtime
 
 - [Build and installation](build.md)
+- [Downstream users, capability detection and bundled caches](downstream.md)
 - [Compiler architecture](compiler-architecture.md)
 - [PTX proof contracts](ptx-proof-contracts.md)
 - [Intrinsic coverage](intrinsic-map.md)

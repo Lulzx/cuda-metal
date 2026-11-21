@@ -38,3 +38,22 @@ all float code, so CuMetal does not do it. In the other direction, NVRTC's `-ftz
 is accepted as a no-op: only `--use_fast_math`'s module-wide fast-math asks
 Metal to flush. `--fp64=fast48` doubles have binary32 range and lose
 double subnormals on every GPU (see [FP64 policy](../fp64-policy.md)).
+
+Apple's offline Metal toolchain (`xcrun metal`/`metallib`) is required for
+ahead-of-time `cumetalc` builds and for runtime kernels that link CuMetal's
+FP64 or libdevice support MSL. Without it, `cumetal doctor` reports JIT-only
+(exit 3): kernels registered with `libcumetal` that need neither support file
+still compile through Metal's in-process compiler. The doctor's probe checks
+that the toolchain compiles and packages a `-std=metal3.2` kernel (AIR 2.7 or
+newer) and that its default deployment target is not newer than the running
+macOS; it does not load the probe metallib on the GPU. A toolchain that passes
+can still reject a particular kernel. Xcode 26/27's launcher stub is detected
+from its "missing Metal Toolchain" message; another wording would show up as a
+failed `xcrun metal --version` rather than as the stub.
+
+Compile timing (`CUMETAL_COMPILE_TIMING`, `cumetalc --compile-timing`) is wall
+clock on the host and cannot see inside Apple's compiler: a slow
+`metal_compile` or `metal_new_library_with_source` is reported as one phase.
+`CUMETAL_MSL_SIZE_LIMIT` refuses large generated MSL before Apple's compiler
+runs; it does not bound compile time directly and does not apply to the legacy
+PTX-to-LLVM path. See [compiler timing](../compiler-performance.md).

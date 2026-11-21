@@ -1,4 +1,5 @@
 #include "library_kernel_source.h"
+#include "module_cache.h"
 
 #include "f64_dekker_msl.h"
 #include "runtime_internal.h"
@@ -16,16 +17,7 @@ namespace {
 std::filesystem::path cache_dir() {
     namespace fs = std::filesystem;
     std::error_code ec;
-    fs::path dir;
-    if (const char* d = std::getenv("CUMETAL_CACHE_DIR"); d != nullptr && d[0] != '\0') {
-        dir = fs::path(d);
-    } else if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-        dir = fs::path(home) / "Library" / "Caches" / "io.cumetal";
-    } else {
-        dir = fs::temp_directory_path(ec);
-        if (ec) return {};
-    }
-    dir /= "library-kernels";
+    fs::path dir = cumetal::cache::cache_base_dir() / "library-kernels";
     fs::create_directories(dir, ec);
     if (ec) return {};
     return dir;

@@ -7,6 +7,24 @@
 
 namespace cumetal::cache {
 
+// The root every on-disk CuMetal cache lives under (registration-jit/,
+// kernels/, native-aot/, library-kernels/), resolved on each call:
+//   1. $CUMETAL_CACHE_DIR, when set and non-empty.
+//   2. <directory of the loaded libcumetal.dylib>/../share/cumetal-cache, when
+//      it exists and is writable. Packagers that ship libcumetal.dylib with a
+//      prewarmed cache (dimSLAM, cuVSLAM wheels and tarballs) rely on this:
+//      registration-JIT entries are keyed to the dylib's LC_UUID, so entries
+//      written by the bundled dylib hit in every copy of the bundle. A
+//      read-only bundled cache is skipped (with a one-time warning), because
+//      cache publication must be able to write.
+//   3. ~/Library/Caches/io.cumetal, then <tmp>/io.cumetal.
+// See docs/downstream.md for the contract; unit_cache_base_dir tests it.
+std::filesystem::path cache_base_dir();
+
+// The bundled cache directory next to the loaded libcumetal.dylib
+// (step 2 above), whether or not it exists. Empty if the image path is unknown.
+std::filesystem::path bundled_cache_dir();
+
 bool stage_metallib_bytes(const void* image,
                           std::size_t size,
                           std::filesystem::path* out_path,

@@ -808,6 +808,21 @@ add_test(
             $<TARGET_FILE_DIR:cumetal_runtime>
 )
 
+# cumetal doctor's ready / JIT-only / not-ready states and version --json,
+# against a fake xcrun simulating missing, stub, old and newer toolchains (#217).
+add_test(
+    NAME unit_cumetal_doctor_toolchain
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetal_doctor_toolchain_test.sh
+            $<TARGET_FILE:cumetal>
+)
+
+# Compile-timing diagnostics: MSL function sizes, CUMETAL_MSL_SIZE_LIMIT (#220).
+add_executable(cumetal_compile_timing_test compile_timing_test.cpp)
+target_link_libraries(cumetal_compile_timing_test PRIVATE cumetal_common)
+target_compile_options(cumetal_compile_timing_test PRIVATE -Wall -Wextra -Wpedantic)
+add_test(NAME unit_compile_timing COMMAND cumetal_compile_timing_test)
+
 add_test(
     NAME unit_ci_report
     COMMAND bash

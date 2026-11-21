@@ -1,5 +1,11 @@
 #include "module_cache.h"
 
+#include <dlfcn.h>
+#include <unistd.h>
+
+#include <cstdio>
+#include <mutex>
+
 #include <chrono>
 #include <cstdint>
 #include <cstdlib>
@@ -26,16 +32,39 @@ std::uint64_t fnv1a64(const std::uint8_t* bytes, std::size_t size) {
 }
 
 std::filesystem::path default_cache_root() {
+    // CUMETAL_CACHE_DIR has always meant the kernels directory itself for
+    // this cache (not <dir>/kernels); keep that.
     if (const char* explicit_root = std::getenv("CUMETAL_CACHE_DIR");
         explicit_root != nullptr && explicit_root[0] != '\0') {
         return std::filesystem::path(explicit_root);
     }
+    return cache_base_dir() / "kernels";
+}
 
-    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
-        return std::filesystem::path(home) / "Library" / "Caches" / "io.cumetal" / "kernels";
+std::filesystem::path resolve_cache_base_dir() {
+    namespace fs = std::filesystem;
+    if (const char* explicit_root = std::getenv("CUMETAL_CACHE_DIR");
+        explicit_root != nullptr && explicit_root[0] != '\0') {
+        return fs::path(explicit_root);
     }
-
-    return std::filesystem::temp_directory_path() / "io.cumetal" / "kernels";
+    const fs::path bundled = bundled_cache_dir();
+    std::error_code ec;
+    if (!bundled.empty() && fs::is_directory(bundled, ec)) {
+        if (::access(bundled.c_str(), W_OK) == 0) {
+            return bundled;
+        }
+        static std::once_flag warned;
+        std::call_once(warned, [&] {
+            std::fprintf(stderr,
+                         "cumetal: warning: bundled cache %s is not writable; using the per-user "
+                         "cache instead (set CUMETAL_CACHE_DIR to choose one explicitly)\n",
+                         bundled.c_str());
+        });
+    }
+    if (const char* home = std::getenv("HOME"); home != nullptr && home[0] != '\0') {
+        return fs::path(home) / "Library" / "Caches" / "io.cumetal";
+    }
+    return fs::temp_directory_path(ec) / "io.cumetal";
 }
 
 std::string hash_to_hex(std::uint64_t hash) {
@@ -100,6 +129,24 @@ bool file_matches(const std::filesystem::path& path, const std::uint8_t* bytes, 
 }
 
 }  // namespace
+
+std::filesystem::path bundled_cache_dir() {
+    Dl_info info{};
+    // Any symbol in this image resolves to the loaded libcumetal.dylib (or to
+    // the executable it is statically linked into).
+    if (dladdr(reinterpret_cast<const void*>(&bundled_cache_dir), &info) == 0 ||
+        info.dli_fname == nullptr || info.dli_fname[0] == '\0') {
+        return {};
+    }
+    std::error_code ec;
+    std::filesystem::path image = std::filesystem::weakly_canonical(info.dli_fname, ec);
+    if (ec) image = info.dli_fname;
+    return image.parent_path().parent_path() / "share" / "cumetal-cache";
+}
+
+std::filesystem::path cache_base_dir() {
+    return resolve_cache_base_dir();
+}
 
 bool stage_metallib_bytes(const void* image,
                           std::size_t size,

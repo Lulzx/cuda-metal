@@ -700,6 +700,11 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         cumetal::air_emitter::emit_metallib(emit_options);
     cleanup_metal();
     if (!emitted.ok || emitted.output.empty()) {
+        if (emitted.refused_by_size_limit) {
+            // The toolchain is fine; the source was refused before it ran.
+            std::fprintf(stderr, "cumetal: %s\n", emitted.error.c_str());
+            return false;
+        }
         if (toolchain_missing != nullptr) *toolchain_missing = true;
         return false;
     }
@@ -839,7 +844,9 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
     std::error_code ec;
     std::filesystem::remove(ll_path, ec);
     if (!emitted.ok || emitted.output.empty()) {
-        if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+        if (emitted.refused_by_size_limit) {
+            std::fprintf(stderr, "cumetal: %s\n", emitted.error.c_str());
+        } else if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
             std::fprintf(stderr,
                          "CUMETAL_DEBUG_ERRORS: PTX metallib emission failed: %s\n",
                          emitted.error.empty() ? "empty output path" : emitted.error.c_str());

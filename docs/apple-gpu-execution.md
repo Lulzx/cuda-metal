@@ -90,6 +90,30 @@ Metal dispatch. Records identify:
 GPU conformance requires `device=apple_gpu` and `launch_success=true`. The gates
 reject CPU fallback and stub provenance.
 
+## Instruments and GPU captures
+
+Each compute encoder CuMetal opens is labelled with the mangled name of the
+first kernel it runs, the same name `CUMETAL_TRACE_GPU` records use. Metal
+System Trace (`xcrun xctrace record --template 'Metal System Trace' --launch --
+./app`) and Xcode GPU captures therefore show kernel names instead of
+`Compute Command 0`. VkFFT encoders are labelled `VkFFT r2c_3d_f32` /
+`VkFFT c2r_3d_f32`.
+
+Consecutive launches on a stream share one encoder (see the runtime policy
+above), and Instruments keeps every label an encoder is given, so a batch is
+not relabelled as dispatches join it: one trace interval covers the whole batch
+and carries the first kernel's name. Set `CUMETAL_GPU_DEBUG_GROUPS=1` to also
+wrap each dispatch in a debug group named after its kernel, which a GPU capture
+shows; it costs a little CPU per launch, so it is off by default. For one trace
+interval per launch, record with `CUMETAL_BATCH_DISPATCHES=0` (or
+`CUMETAL_TRACE_GPU=1`, which also disables batching); both change submission
+overhead, so do not use them to measure throughput. Blit encoders
+(memcpy/memset) are not labelled. `functional_metal_backend_encoder_label`
+covers the labelling. Ported from `MaansAndersson/cuda-metal` `dac98c14` (#227).
+
+For compile-side time (frontend, import, Metal compile, pipeline creation),
+see [compiler timing](compiler-performance.md).
+
 ## Compiler and registration changes
 
 The PTX-to-Metal path gained:
