@@ -122,7 +122,13 @@ All notable changes to CuMetal are documented here. Format follows
   `cudaFuncAttributeMaxDynamicSharedMemorySize`, now reported as
   `sharedMemPerBlockOptin`; a launch past its limit returns
   `cudaErrorInvalidValue` and runs nothing. A kernel without a variant (legacy
-  PTX lowering, hand-written Metal) is refused past 32 KB.
+  PTX lowering, hand-written Metal) is refused past 32 KB. The typed PTX path
+  now also lowers `mma.h`'s 8x8 tensor-core marker, so the cuda-samples
+  bf16/tf32 GEMMs, which ask for up to 72 KB, take the typed path and its
+  spill variant instead of the legacy lowering; a spill buffer is released
+  when the GPU finishes the launch rather than at the next host poll, which
+  had let PhysX's spilled radix sort run Metal out of memory between
+  synchronizations.
 - **Zero launch extents return `cudaErrorInvalidConfiguration`** (#207)
   instead of `cudaErrorInvalidValue`, from `cudaLaunchKernel`,
   `cudaConfigureCall` and `cudaLaunchCooperativeKernel` (which returned

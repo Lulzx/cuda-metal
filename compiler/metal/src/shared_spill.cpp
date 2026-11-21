@@ -63,7 +63,6 @@ std::string spill_obstacle(const ir::Function& function) {
             if (operation.opcode == ir::OpCode::kAddressSpaceTest) {
                 return "address-space query";
             }
-            if (operation.attributes.contains("wmma_8x8")) return "simdgroup matrix tile";
             if (operation.opcode == ir::OpCode::kConvert ||
                 operation.opcode == ir::OpCode::kAddressSpaceCast) {
                 const bool from_shared =

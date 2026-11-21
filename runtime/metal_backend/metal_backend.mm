@@ -4034,11 +4034,22 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             }];
         }
 
+        if (stream_impl != nullptr && shared_spill) {
+            // Release the spill buffer as soon as the GPU is done with it.
+            // Holding it until the host next polls the stream lets a long run
+            // of spilled launches between synchronizations pile up a
+            // grid-sized buffer per launch until Metal runs out of memory.
+            __block std::shared_ptr<Buffer> spill_hold = shared_spill;
+            [command_buffer addCompletedHandler:^(id<MTLCommandBuffer>) {
+              spill_hold.reset();
+            }];
+        }
+
         [command_buffer commit];
 
         if (stream_impl != nullptr) {
-            // The spill buffer, if any, is released when this buffer retires.
-            stream_impl->add_pending(command_buffer, trap_status, grid_barrier, shared_spill);
+            stream_impl->add_pending(command_buffer, trap_status, grid_barrier);
+            shared_spill.reset();
             return cudaSuccess;
         }
 

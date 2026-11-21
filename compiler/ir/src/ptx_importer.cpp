@@ -1544,6 +1544,19 @@ struct Importer {
                 Type::pointer(Type::integer(8), AddressSpace::kDevice)};
             return signature;
         }
+        if (callee == "__cumetal_wmma_f32_mma_8x8" || callee == "__cumetal_wmma_bf16_mma_8x8") {
+            // runtime/api/mma.h's 8x8 tile multiply-accumulate marker
+            // (destination, A, B), as the NVVM importer lowers it: the MSL
+            // emitter turns it into simdgroup_matrix load/MAC/store.
+            BuiltinSignature signature;
+            signature.metal_name = callee;
+            signature.return_type = Type::void_type();
+            signature.argument_types =
+                std::vector<Type>(3, Type::pointer(Type::integer(8), AddressSpace::kNone));
+            signature.attributes.push_back(
+                {"wmma_8x8", callee.find("bf16") != std::string::npos ? "bf16" : "f32"});
+            return signature;
+        }
         if (callee == "cudaGetParameterBuffer") {
             BuiltinSignature signature;
             signature.return_type =

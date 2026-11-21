@@ -5,7 +5,10 @@
 // MTL_DEBUG_LAYER=1 so an oversized threadgroup length would abort.
 #include <cstdio>
 #include <cstring>
+#include <cuda_bf16.h>
+#include <cuda_fp16.h>
 #include <cuda_runtime.h>
+#include <mma.h>
 
 constexpr unsigned kThreads = 256;
 
@@ -77,6 +80,57 @@ __global__ void many_args(CM_ARGS(CM_PARAM) unsigned* out) {
     s[threadIdx.x] = 0 CM_ARGS(CM_SUM);
     __syncthreads();
     if (threadIdx.x == 0) out[0] = s[blockDim.x - 1];
+}
+
+// Tensor-core tiles staged in shared memory past the 32 KB mark (the
+// cuda-samples bf16/tf32 GEMMs): in the spill variant the simdgroup matrix
+// loads and stores address device memory instead of threadgroup memory.
+__global__ void wmma_past_limit(const half* a, const half* b, float* out) {
+    using namespace nvcuda;
+    extern __shared__ unsigned char smem[];
+    half* sa = reinterpret_cast<half*>(smem + 36 * 1024);
+    half* sb = sa + 256;
+    float* sc = reinterpret_cast<float*>(sb + 256);
+    for (unsigned i = threadIdx.x; i < 256; i += blockDim.x) {
+        sa[i] = a[blockIdx.x * 256 + i];
+        sb[i] = b[blockIdx.x * 256 + i];
+    }
+    __syncthreads();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, half, wmma::row_major> af;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, half, wmma::col_major> bf;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+    wmma::load_matrix_sync(af, sa, 16);
+    wmma::load_matrix_sync(bf, sb, 16);
+    wmma::fill_fragment(cf, 1.0f);
+    wmma::mma_sync(cf, af, bf, cf);
+    wmma::store_matrix_sync(sc, cf, 16, wmma::mem_row_major);
+    __syncthreads();
+    for (unsigned i = threadIdx.x; i < 256; i += blockDim.x) out[blockIdx.x * 256 + i] = sc[i];
+}
+
+// The bf16 shape goes through mma.h's 8x8 simdgroup-matrix marker; its
+// spill variant hands simdgroup_load/store device pointers.
+__global__ void wmma_bf16_past_limit(const __nv_bfloat16* a, const __nv_bfloat16* b, float* out) {
+    using namespace nvcuda;
+    extern __shared__ unsigned char smem[];
+    __nv_bfloat16* sa = reinterpret_cast<__nv_bfloat16*>(smem + 36 * 1024);
+    __nv_bfloat16* sb = sa + 256;
+    float* sc = reinterpret_cast<float*>(sb + 256);
+    for (unsigned i = threadIdx.x; i < 256; i += blockDim.x) {
+        sa[i] = a[blockIdx.x * 256 + i];
+        sb[i] = b[blockIdx.x * 256 + i];
+    }
+    __syncthreads();
+    wmma::fragment<wmma::matrix_a, 16, 16, 16, __nv_bfloat16, wmma::row_major> af;
+    wmma::fragment<wmma::matrix_b, 16, 16, 16, __nv_bfloat16, wmma::col_major> bf;
+    wmma::fragment<wmma::accumulator, 16, 16, 16, float> cf;
+    wmma::load_matrix_sync(af, sa, 16);
+    wmma::load_matrix_sync(bf, sb, 16);
+    wmma::fill_fragment(cf, 1.0f);
+    wmma::mma_sync(cf, af, bf, cf);
+    wmma::store_matrix_sync(sc, cf, 16, wmma::mem_row_major);
+    __syncthreads();
+    for (unsigned i = threadIdx.x; i < 256; i += blockDim.x) out[blockIdx.x * 256 + i] = sc[i];
 }
 
 static int fails = 0;
@@ -209,6 +263,76 @@ int main() {
         check(cudaFuncGetAttributes(&attributes, big_static) == cudaSuccess &&
                   attributes.sharedSizeBytes > 32 * 1024,
               "cudaFuncGetAttributes reports static shared memory above 32 KB");
+    }
+
+    // Tensor-core tiles in spilled shared memory: 40 KB of dynamic shared
+    // memory, tiles at 36 KB. Small integer inputs keep every product exact.
+    {
+        constexpr unsigned kBlocks = 4;
+        half h_a[kBlocks * 256], h_b[kBlocks * 256];
+        for (unsigned i = 0; i < kBlocks * 256; ++i) {
+            h_a[i] = __float2half(static_cast<float>(static_cast<int>(i * 7u % 9u) - 4));
+            h_b[i] = __float2half(static_cast<float>(static_cast<int>(i * 5u % 7u) - 3));
+        }
+        half *d_a = nullptr, *d_b = nullptr;
+        float* d_c = nullptr;
+        cudaMalloc(&d_a, sizeof h_a);
+        cudaMalloc(&d_b, sizeof h_b);
+        cudaMalloc(&d_c, kBlocks * 256 * sizeof(float));
+        cudaMemcpy(d_a, h_a, sizeof h_a, cudaMemcpyHostToDevice);
+        cudaMemcpy(d_b, h_b, sizeof h_b, cudaMemcpyHostToDevice);
+        wmma_past_limit<<<kBlocks, 32, 40 * 1024>>>(d_a, d_b, d_c);
+        check(cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess,
+              "wmma tiles past 32 KB launch (spilled)");
+        float host[kBlocks * 256];
+        cudaMemcpy(host, d_c, sizeof host, cudaMemcpyDeviceToHost);
+        bool ok = true;
+        for (unsigned blk = 0; blk < kBlocks; ++blk) {
+            for (unsigned r = 0; r < 16; ++r) {
+                for (unsigned c = 0; c < 16; ++c) {
+                    float want = 1.0f;
+                    for (unsigned k = 0; k < 16; ++k) {
+                        // A row-major [r][k]; B column-major [k][c] at c*16+k.
+                        want += __half2float(h_a[blk * 256 + r * 16 + k]) *
+                                __half2float(h_b[blk * 256 + c * 16 + k]);
+                    }
+                    ok &= host[blk * 256 + r * 16 + c] == want;
+                }
+            }
+        }
+        check(ok, "wmma tiles past 32 KB are exact");
+
+        // Same product through bf16 inputs (exact for these small integers).
+        __nv_bfloat16 g_a[kBlocks * 256], g_b[kBlocks * 256];
+        for (unsigned i = 0; i < kBlocks * 256; ++i) {
+            g_a[i] = __float2bfloat16(__half2float(h_a[i]));
+            g_b[i] = __float2bfloat16(__half2float(h_b[i]));
+        }
+        __nv_bfloat16 *e_a = nullptr, *e_b = nullptr;
+        cudaMalloc(&e_a, sizeof g_a);
+        cudaMalloc(&e_b, sizeof g_b);
+        cudaMemcpy(e_a, g_a, sizeof g_a, cudaMemcpyHostToDevice);
+        cudaMemcpy(e_b, g_b, sizeof g_b, cudaMemcpyHostToDevice);
+        cudaMemset(d_c, 0, kBlocks * 256 * sizeof(float));
+        // mma.h stages bf16 tiles in 16 KB of its own static shared memory,
+        // so 40 KB of dynamic shared memory needs the opt-in, as the
+        // cuda-samples tensor-core GEMMs request it.
+        check(cudaFuncSetAttribute(wmma_bf16_past_limit, cudaFuncAttributeMaxDynamicSharedMemorySize,
+                                   40 * 1024) == cudaSuccess,
+              "bf16 tile kernel opts in to 40 KB of dynamic shared memory");
+        wmma_bf16_past_limit<<<kBlocks, 32, 40 * 1024>>>(e_a, e_b, d_c);
+        check(cudaGetLastError() == cudaSuccess && cudaDeviceSynchronize() == cudaSuccess,
+              "bf16 simdgroup-matrix tiles past 32 KB launch (spilled)");
+        float bf_host[kBlocks * 256];
+        cudaMemcpy(bf_host, d_c, sizeof bf_host, cudaMemcpyDeviceToHost);
+        bool bf_ok = true;
+        for (unsigned i = 0; i < kBlocks * 256; ++i) bf_ok &= bf_host[i] == host[i];
+        check(bf_ok, "bf16 simdgroup-matrix tiles past 32 KB are exact");
+        cudaFree(e_a);
+        cudaFree(e_b);
+        cudaFree(d_a);
+        cudaFree(d_b);
+        cudaFree(d_c);
     }
 
     // No spill variant: within Metal's limit it runs, past it it is refused.

@@ -19,7 +19,9 @@
   kernel's shared-memory spill variant, which the typed backend emits for
   every kernel with dynamic shared memory or more than 32 KB of static shared
   memory: `__shared__` data then lives in a device buffer, one slice per
-  block, sized for the whole grid and freed when the launch retires.
+  block, sized for the whole grid and released as soon as the GPU finishes
+  the launch. Tensor-core tiles (`mma.h`'s 8x8 simdgroup-matrix path) load
+  and store from that device slice as well.
   Barriers and block-scope fences also order device memory and shared
   atomics are device atomics, so results are exact but shared-memory traffic
   runs at device-memory speed. A grid whose slices exceed the largest Metal
@@ -28,8 +30,9 @@
   `cudaErrorInvalidValue` past 32 KB: the legacy PTX lowering, hand-written
   Metal kernels, kernels with an argument at Metal buffer index 24 (where the
   spill buffer binds), and kernels whose shared pointers meet address-space
-  queries, integer conversions, mixed generic pointers or simdgroup matrix
-  tiles.
+  queries, integer conversions or mixed generic pointers. The kernels that
+  still go through the legacy PTX lowering are therefore limited to Metal's
+  32 KB: on the legacy path, shared memory past it is refused, not spilled.
 - Launch configuration errors that CUDA itself defines -- a zero grid or block
   extent (`cudaErrorInvalidConfiguration`) and too much shared memory -- are
   reported by the launch and `cudaGetLastError` only, as in CUDA; a later

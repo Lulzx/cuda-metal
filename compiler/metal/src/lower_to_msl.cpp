@@ -6663,23 +6663,26 @@ struct AstLowerer {
                 statements->push_back(MslStatement::variable(accum_matrix, c_name));
                 statements->push_back(MslStatement::variable(accum_matrix, d_name));
                 // Markers receive the staged tiles as byte pointers in the
-                // typed IR; simdgroup_load needs typed threadgroup pointers.
-                const auto typed_ptr = [&](MslExpr expr, const std::string& element) {
+                // typed IR; simdgroup_load needs typed pointers. Tiles are
+                // threadgroup memory, or device memory in a kernel's shared
+                // spill variant (simdgroup_load/store accept either).
+                const auto typed_ptr = [&](const ir::Operand& operand, const std::string& element) {
                     const MslType element_type =
                         element == "float"
                             ? MslType::floating(32)
                             : MslType{.kind = MslTypeKind::kStruct,
                                       .struct_name = element};
-                    return MslExpression::bitcast(
-                        MslType::pointer(element_type, MslAddressSpace::kThreadgroup),
-                        std::move(expr));
+                    const MslAddressSpace space =
+                        operand.type.is_pointer() &&
+                                operand.type.address_space == ir::AddressSpace::kDevice
+                            ? MslAddressSpace::kDevice
+                            : MslAddressSpace::kThreadgroup;
+                    return MslExpression::bitcast(MslType::pointer(element_type, space),
+                                                  expression_for(operand));
                 };
-                const MslExpr destination =
-                    typed_ptr(expression_for(operation.operands[0]), "float");
-                const MslExpr a_ptr =
-                    typed_ptr(expression_for(operation.operands[1]), input_element);
-                const MslExpr b_ptr =
-                    typed_ptr(expression_for(operation.operands[2]), input_element);
+                const MslExpr destination = typed_ptr(operation.operands[0], "float");
+                const MslExpr a_ptr = typed_ptr(operation.operands[1], input_element);
+                const MslExpr b_ptr = typed_ptr(operation.operands[2], input_element);
                 const auto stride = [&]() {
                     return MslExpression::literal("8", MslType::uint(64));
                 };
