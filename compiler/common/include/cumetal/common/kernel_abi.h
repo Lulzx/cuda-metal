@@ -16,4 +16,13 @@ inline constexpr char kTrapStatusName[] = "cm_trap_status";
 inline constexpr unsigned kTrapStatusLaunchFailure = 1u;
 inline constexpr unsigned kTrapStatusAssert = 2u;
 
+// Shared-memory spill variants (compiler/metal/src/shared_spill.h): a kernel
+// `K` that may need more shared memory than Metal's threadgroup limit also
+// ships as `K__cm_spill_s<static bytes>`, whose __shared__ storage is a
+// per-threadgroup slice of a device buffer bound at kSharedSpillBindingIndex.
+// Word 0 of that buffer is the slice stride; slices start after the header.
+inline constexpr char kSharedSpillKernelInfix[] = "__cm_spill_s";
+inline constexpr std::size_t kSharedSpillBindingIndex = 24;
+inline constexpr std::size_t kSharedSpillHeaderBytes = 16;
+
 }  // namespace cumetal::abi

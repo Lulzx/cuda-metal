@@ -1,3 +1,4 @@
+#include "shared_spill.h"
 #include "trap_reporting.h"
 #include "record_contexts.h"
 #include "private_array_scalarize.h"
@@ -3152,6 +3153,12 @@ BuiltinUsageMap analyze_builtin_usage(const ir::Module& module) {
 
 SharedUsageMap analyze_shared_usage(const ir::Module& module) {
     SharedUsageMap usage;
+    // A shared-memory spill variant names __shared__ globals through device
+    // pointers, so a symbol is shared when it names a threadgroup global.
+    std::unordered_set<std::string> shared_globals;
+    for (const ir::GlobalThreadgroup& global : module.global_threadgroups) {
+        shared_globals.insert(global.name);
+    }
     for (const ir::Function& function : module.functions) {
         std::unordered_set<std::string> direct;
         for (const ir::BasicBlock& block : function.blocks) {
@@ -3159,7 +3166,8 @@ SharedUsageMap analyze_shared_usage(const ir::Module& module) {
                 for (const ir::Operand& operand : operation.operands) {
                     if (operand.kind == ir::OperandKind::kSymbol &&
                         operand.type.is_pointer() &&
-                        operand.type.address_space == ir::AddressSpace::kThreadgroup) {
+                        (operand.type.address_space == ir::AddressSpace::kThreadgroup ||
+                         shared_globals.contains(operand.text))) {
                         direct.insert(operand.text);
                     }
                 }
@@ -3326,6 +3334,13 @@ struct AstLowerer {
     std::size_t edge_temporary_index = 0;
     std::size_t loop_escape_index = 0;
     std::optional<ir::AddressSpace> pointer_specialization;
+    // A shared-memory spill variant (shared_spill.h): its __shared__ storage
+    // is a slice of a device buffer, so shared pointers are device pointers.
+    bool shared_spill = false;
+    // Space of the pointers that carry __shared__ storage in this function.
+    MslAddressSpace shared_space() const {
+        return shared_spill ? MslAddressSpace::kDevice : MslAddressSpace::kThreadgroup;
+    }
 
     AstLowerer(const ir::Module& input_module, const ir::Function& input_function,
                const BuiltinUsageMap& input_builtin_usage,
@@ -3356,6 +3371,7 @@ struct AstLowerer {
         needs_grid_barrier = required.grid_barrier;
         needs_cta_any = required.cta_any;
         needs_wide_atomic_lock_bank = wide_atomic_usage.at(function.name);
+        shared_spill = is_shared_spill_function(function.name);
     }
 
     bool fail(const ir::Operation* operation, std::string message) {
@@ -3426,10 +3442,18 @@ struct AstLowerer {
                 lower_value_type(operand.value, operand.type));
         }
         if (operand.kind == ir::OperandKind::kSymbol) {
+            const bool names_shared_global =
+                shared_spill && operand.type.is_pointer() &&
+                std::any_of(module.global_threadgroups.begin(), module.global_threadgroups.end(),
+                            [&](const ir::GlobalThreadgroup& global) {
+                                return global.name == operand.text;
+                            });
             if (operand.type.is_pointer() &&
-                operand.type.address_space == ir::AddressSpace::kThreadgroup) {
-                return MslExpression::identifier(shared_parameter_name(operand.text),
-                                                 lower_type(operand.type));
+                (operand.type.address_space == ir::AddressSpace::kThreadgroup ||
+                 names_shared_global)) {
+                MslType type = lower_type(operand.type);
+                if (shared_spill) type.address_space = MslAddressSpace::kDevice;
+                return MslExpression::identifier(shared_parameter_name(operand.text), type);
             }
             return MslExpression::identifier(operand.text, lower_type(operand.type));
         }
@@ -5076,8 +5100,7 @@ struct AstLowerer {
                 for (const std::string& global : callee_shared->second) {
                     arguments.push_back(MslExpression::identifier(
                         shared_parameter_name(global),
-                        MslType::pointer(MslType::uint(8),
-                                         MslAddressSpace::kThreadgroup)));
+                        MslType::pointer(MslType::uint(8), shared_space())));
                 }
             }
             const auto callee_wide_atomic = wide_atomic_usage.find(callee->second);
@@ -5773,19 +5796,26 @@ struct AstLowerer {
                 operation.memory_scope == ir::MemoryScope::kSimdgroup
                     ? "simdgroup_barrier"
                     : "threadgroup_barrier";
+            // In a spill variant __shared__ data lives in device memory, so
+            // the barrier must order device memory as well.
+            const bool spilled = operation.attributes.contains("shared_in_device_memory");
             return MslStatement::expression(
                 MslExpression::call(
                     barrier,
-                    {MslExpression::literal("mem_flags::mem_threadgroup", MslType::uint())},
+                    {MslExpression::literal(spilled ? "mem_flags::mem_threadgroup | mem_flags::mem_device"
+                                                    : "mem_flags::mem_threadgroup",
+                                            MslType::uint())},
                     MslType::void_type()));
         }
 
         if (operation.opcode == ir::OpCode::kMetalFence) {
             const bool threadgroup_scope =
                 operation.memory_scope == ir::MemoryScope::kThreadgroup;
-            const std::string flag = threadgroup_scope
-                                         ? "mem_flags::mem_threadgroup"
-                                         : "mem_flags::mem_device";
+            const std::string flag =
+                !threadgroup_scope ? "mem_flags::mem_device"
+                : operation.attributes.contains("shared_in_device_memory")
+                    ? "mem_flags::mem_threadgroup | mem_flags::mem_device"
+                    : "mem_flags::mem_threadgroup";
             const std::string ordering =
                 operation.attributes.contains("cuda_membar")
                     ? "memory_order_seq_cst"
@@ -8202,7 +8232,67 @@ struct AstLowerer {
         analyze_cfg();
 
         const auto required_shared = shared_usage.find(function.name);
-        if (required_shared != shared_usage.end()) {
+        if (shared_spill && function.is_kernel && required_shared != shared_usage.end() &&
+            !required_shared->second.empty()) {
+            // Spill variant: this threadgroup's slice of the device buffer.
+            // Word 0 of the buffer is the runtime's slice stride; slices
+            // follow the header in linear threadgroup order.
+            const MslType byte_pointer = MslType::pointer(MslType::uint(8), MslAddressSpace::kDevice);
+            const MslType ulong = MslType::uint(64);
+            const MslType uint3 = MslType::vector(MslType::uint(), 3);
+            const MslExpr buffer = MslExpression::identifier(kSharedSpillParameterName, byte_pointer);
+            const MslExpr position = MslExpression::identifier("cm_threadgroup_position", uint3);
+            const MslExpr groups = MslExpression::identifier("cm_threadgroups_per_grid", uint3);
+            needs_threadgroup_position = true;
+            needs_threadgroups_per_grid = true;
+            const auto widen = [&](MslExpr value) { return MslExpression::cast(ulong, value); };
+            const auto axis = [&](const MslExpr& vector, const char* name) {
+                return widen(MslExpression::member(vector, name, MslType::uint()));
+            };
+            const MslExpr linear = MslExpression::binary(
+                "+", axis(position, "x"),
+                MslExpression::binary(
+                    "*", axis(groups, "x"),
+                    MslExpression::binary(
+                        "+", axis(position, "y"),
+                        MslExpression::binary("*", axis(groups, "y"), axis(position, "z"), ulong),
+                        ulong),
+                    ulong),
+                ulong);
+            const MslExpr stride = widen(MslExpression::unary(
+                "*",
+                MslExpression::cast(MslType::pointer(MslType::uint(), MslAddressSpace::kDevice),
+                                    buffer, true),
+                MslType::uint()));
+            const MslExpr slice = MslExpression::binary(
+                "+", buffer,
+                MslExpression::binary(
+                    "+", MslExpression::literal(std::to_string(kSharedSpillHeaderBytes) + "ul", ulong),
+                    MslExpression::binary("*", linear, stride, ulong), ulong),
+                byte_pointer);
+            output.statements.push_back(
+                MslStatement::variable(byte_pointer, "cm_shared_spill_slice", slice));
+            const auto layout = shared_spill_layout(module, function.name);
+            for (const std::string& global : required_shared->second) {
+                const auto offset = layout.find(global);
+                if (offset == layout.end()) {
+                    return LowerToMslResult{
+                        .error = "shared spill variant has no layout for '" + global + "'",
+                    };
+                }
+                output.statements.push_back(MslStatement::variable(
+                    byte_pointer, shared_parameter_name(global),
+                    MslExpression::binary(
+                        "+", MslExpression::identifier("cm_shared_spill_slice", byte_pointer),
+                        MslExpression::literal(std::to_string(offset->second) + "ul", ulong),
+                        byte_pointer)));
+            }
+            output.parameters.push_back({
+                .type = byte_pointer,
+                .name = kSharedSpillParameterName,
+                .attributes = {MslAttribute{.name = "buffer", .index = kSharedSpillBindingIndex}},
+            });
+        } else if (required_shared != shared_usage.end()) {
             std::size_t dynamic_shared_count = 0;
             for (const std::string& global : required_shared->second) {
                 const std::string name = shared_parameter_name(global);
@@ -8249,8 +8339,7 @@ struct AstLowerer {
                     }
                 } else {
                     output.parameters.push_back({
-                        .type = MslType::pointer(MslType::uint(8),
-                                                 MslAddressSpace::kThreadgroup),
+                        .type = MslType::pointer(MslType::uint(8), shared_space()),
                         .name = name,
                     });
                 }
@@ -9534,6 +9623,9 @@ LowerToMslResult lower_to_msl(const ir::Module& metal_module) {
     // assert calls are dropped and the generated source says so.
     if (std::optional<ir::Module> without_asserts = drop_unreportable_asserts(metal_module)) {
         return lower_to_msl(*without_asserts);
+    }
+    if (!metal_module.attributes.contains(kSharedSpillDoneAttribute)) {
+        return lower_to_msl(add_shared_spill_variants(metal_module));
     }
     TrapCallGraph trap_graph;
     if (!analyze_trap_call_graph(metal_module, &trap_graph, &result.error)) {

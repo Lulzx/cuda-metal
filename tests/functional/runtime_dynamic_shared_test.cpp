@@ -84,21 +84,22 @@ int main(int argc, char** argv) {
 
     // Shared-memory limits. CUDA refuses a launch whose shared memory exceeds
     // what the block may use with cudaErrorInvalidValue and runs nothing; the
-    // error is not sticky. On Metal the bound is maxThreadgroupMemoryLength,
-    // reported as sharedMemPerBlockOptin. This kernel declares no static
-    // threadgroup memory, so all of it is available as dynamic memory.
+    // error is not sticky. sharedMemPerBlock is Metal's threadgroup limit;
+    // past it only a kernel with a compiler-generated shared-memory spill
+    // variant can run. This hand-written Metal kernel has none and no static
+    // threadgroup memory, so its limit is exactly sharedMemPerBlock.
     int optin = 0;
     int per_block = 0;
     if (cudaDeviceGetAttribute(&optin, cudaDevAttrMaxSharedMemoryPerBlockOptin, 0) !=
             cudaSuccess ||
         cudaDeviceGetAttribute(&per_block, cudaDevAttrMaxSharedMemoryPerBlock, 0) !=
             cudaSuccess ||
-        optin <= 0 || optin != per_block) {
+        per_block <= 0 || optin != 101376 || per_block > optin) {
         std::fprintf(stderr, "FAIL: shared memory limits optin=%d per_block=%d\n", optin,
                      per_block);
         return 1;
     }
-    const std::size_t max_dynamic = static_cast<std::size_t>(optin);
+    const std::size_t max_dynamic = static_cast<std::size_t>(per_block);
 
     const float sentinel = -12345.0f;
     const std::vector<float> sentinels(kNumBlocks, sentinel);

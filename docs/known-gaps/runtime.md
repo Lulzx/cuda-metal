@@ -4,16 +4,32 @@
 
 ## Synchronization and launch
 
-- Shared memory per block is capped at the Metal device's
-  `maxThreadgroupMemoryLength` (32 KB on every current Apple GPU), not CUDA's
-  48 KB default or a larger opt-in. `sharedMemPerBlock`,
-  `sharedMemPerBlockOptin` and `cudaFuncAttributes.maxDynamicSharedSizeBytes`
-  (static plus dynamic) report that cap, and `cudaFuncSetAttribute` refuses a
-  `cudaFuncAttributeMaxDynamicSharedMemorySize` above it. A launch whose
-  static plus dynamic shared memory exceeds it fails with
+- Shared memory follows CUDA's limits, not Metal's 32 KB
+  `maxThreadgroupMemoryLength`: 48 KB per block by default
+  (`cudaFuncAttributes.maxDynamicSharedSizeBytes` starts at 48 KB less the
+  kernel's static shared memory), and up to an opt-in ceiling of 99 KB
+  (101,376 bytes, an sm_86/sm_89 part's) through
+  `cudaFuncAttributeMaxDynamicSharedMemorySize`, reported as
+  `sharedMemPerBlockOptin`. A launch past its limit fails with
   `cudaErrorInvalidValue` (driver: `CUDA_ERROR_INVALID_VALUE`) and runs
-  nothing, so a launch CUDA accepts between 32 KB and 48 KB is refused rather
-  than served from slower memory. There is no device-memory spill fallback.
+  nothing. `sharedMemPerBlock` reports Metal's 32 KB, the amount that stays in
+  fast threadgroup memory.
+- A launch whose static plus dynamic shared memory fits Metal's limit uses
+  threadgroup memory exactly as before. Past it, the runtime runs the
+  kernel's shared-memory spill variant, which the typed backend emits for
+  every kernel with dynamic shared memory or more than 32 KB of static shared
+  memory: `__shared__` data then lives in a device buffer, one slice per
+  block, sized for the whole grid and freed when the launch retires.
+  Barriers and block-scope fences also order device memory and shared
+  atomics are device atomics, so results are exact but shared-memory traffic
+  runs at device-memory speed. A grid whose slices exceed the largest Metal
+  buffer, or whose buffer cannot be allocated, fails with
+  `cudaErrorMemoryAllocation`. Kernels without a variant are refused with
+  `cudaErrorInvalidValue` past 32 KB: the legacy PTX lowering, hand-written
+  Metal kernels, kernels with an argument at Metal buffer index 24 (where the
+  spill buffer binds), and kernels whose shared pointers meet address-space
+  queries, integer conversions, mixed generic pointers or simdgroup matrix
+  tiles.
 - Launch configuration errors that CUDA itself defines -- a zero grid or block
   extent (`cudaErrorInvalidConfiguration`) and too much shared memory -- are
   reported by the launch and `cudaGetLastError` only, as in CUDA; a later

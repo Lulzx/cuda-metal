@@ -41,13 +41,21 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
-- **Oversized shared memory is refused at launch** (#205). A launch whose
-  static plus dynamic shared memory exceeds the Metal device's
-  `maxThreadgroupMemoryLength` (32 KB) returns `cudaErrorInvalidValue` and
-  runs nothing. The length was passed unchecked to
+- **CUDA's shared-memory limits past Metal's 32 KB** (#205). A launch whose
+  static plus dynamic shared memory exceeded the Metal device's
+  `maxThreadgroupMemoryLength` was passed unchecked to
   `setThreadgroupMemoryLength`, which the Metal validation layer aborts on and
-  the release driver ran with less memory than asked for. A 32 KB + 4 B
-  request, valid in CUDA, is now refused too.
+  the release driver ran with less memory than asked for. Such a launch now
+  runs the kernel's shared-memory spill variant, which the typed backend emits
+  for kernels with dynamic shared memory or over 32 KB of static shared
+  memory: `__shared__` data lives in a per-block slice of a device buffer,
+  barriers and block fences also order device memory, and shared atomics are
+  device atomics. Launches within 32 KB still use threadgroup memory. The
+  limits are CUDA's: 48 KB by default, and up to 99 KB with
+  `cudaFuncAttributeMaxDynamicSharedMemorySize`, now reported as
+  `sharedMemPerBlockOptin`; a launch past its limit returns
+  `cudaErrorInvalidValue` and runs nothing. A kernel without a variant (legacy
+  PTX lowering, hand-written Metal) is refused past 32 KB.
 - **Zero launch extents return `cudaErrorInvalidConfiguration`** (#207)
   instead of `cudaErrorInvalidValue`, from `cudaLaunchKernel`,
   `cudaConfigureCall` and `cudaLaunchCooperativeKernel` (which returned

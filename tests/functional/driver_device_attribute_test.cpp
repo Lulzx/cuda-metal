@@ -107,8 +107,8 @@ int main() {
         }
     }
 
-    // Metal has a single threadgroup memory budget with no opt-in tier above
-    // the default, so the two queries must agree.
+    // The default is Metal's threadgroup budget; the opt-in ceiling is CUDA's
+    // sm_86/sm_89 99 KB, reached through shared-memory spill variants.
     int shared_default = 0;
     int shared_optin = 0;
     if (cuDeviceGetAttribute(&shared_default, CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK, 0) !=
@@ -116,9 +116,9 @@ int main() {
         cuDeviceGetAttribute(&shared_optin,
                              CU_DEVICE_ATTRIBUTE_MAX_SHARED_MEMORY_PER_BLOCK_OPTIN, 0) !=
             CUDA_SUCCESS ||
-        shared_optin != shared_default || shared_optin <= 0) {
+        shared_optin != 101376 || shared_default <= 0 || shared_default > shared_optin) {
         std::fprintf(stderr,
-                     "FAIL: opt-in shared memory should match the default budget\n");
+                     "FAIL: opt-in shared memory should be the 99 KB ceiling\n");
         return 1;
     }
 
