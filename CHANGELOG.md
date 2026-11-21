@@ -52,6 +52,24 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Non-finite float constants in direct `.cu` kernels.** The NVVM importer
+  spelled infinities and NaNs as LLVM's `-Inf`/`+Inf`/`NaN`, which reached
+  Metal verbatim, so any kernel seeding a max reduction with `-INFINITY` failed
+  to compile ("use of undeclared identifier 'Inf'"). binary32/binary64 values
+  are now emitted as exact bit casts and binary16 through `INFINITY`/`NAN`.
+- **Loops over by-value pointer aggregates on the typed PTX path** (#221). A
+  kernel that walks a struct-of-pointers parameter with a runtime loop
+  (`mov %rd, param`; `ld.param [%rd]`; `add %rd, 8`) was refused with
+  "conflicting PTX incoming type". stwo-zig's Cairo memory-execution kernel
+  has this shape; it now compiles and runs.
+- **`shf.{l,r}.clamp.b32` on the typed PTX path** (#221). nvcc emits these for
+  `__funnelshift_lc`/`__funnelshift_rc`; they were refused. Counts at or above
+  32 select the low (left) or high (right) word, as PTX specifies.
+- **64-bit scalar kernel arguments on the registration path** (#221). An
+  unqualified `.u64` parameter was always guessed to be a pointer, so a hash or
+  stride above 32 bits failed the launch with `cudaErrorInvalidDevicePointer`.
+  An entry that marks its pointers `.ptr` (Clang's convention) now binds its
+  unqualified 64-bit parameters as scalars.
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the

@@ -19,8 +19,11 @@ std::optional<std::uint64_t> immediate_bits(const Operand& operand) {
 
 void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
                            std::string_view opcode, Operand a, Operand b, Operand count) {
-    const bool left = opcode == "shf.l.wrap.b32";
+    const bool left = opcode.starts_with("shf.l.");
     const bool permute = opcode == "prmt.b32";
+    // shf.*.wrap takes the shift mod 32; shf.*.clamp saturates it at 32, where
+    // the left form yields the low word and the right form the high word.
+    const bool clamp = opcode.find(".clamp.") != std::string_view::npos;
     const Type u32 = Type::integer(32), u64 = Type::integer(64);
     const auto imm = [&](unsigned n) { return Operand::immediate(std::to_string(n), u32); };
     // Bind both inputs as unsigned 32-bit values before shifting, including
@@ -36,7 +39,8 @@ void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
         // A constant funnel shift is two 32-bit shifts and an or; the general
         // path below widens to 64 bits and costs eight values. Hash kernels
         // rotate by constants at every round, so this is the common form.
-        const unsigned n = static_cast<unsigned>(*immediate & 31);
+        const unsigned n = clamp ? static_cast<unsigned>(std::min<std::uint64_t>(*immediate & 0xffffffffu, 32))
+                                 : static_cast<unsigned>(*immediate & 31);
         // A literal's IR type does not type its emitted C++ token (`-1 >> n`
         // would shift arithmetically), so bind literal inputs explicitly.
         const auto bind_shift_input = [&](const Operand& operand) {
@@ -47,9 +51,9 @@ void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
         a = bind_shift_input(a);
         b = bind_shift_input(b);
         operation.result_types = {u32};
-        if (n == 0) {
+        if (n == 0 || n == 32) {
             operation.opcode = OpCode::kConvert;
-            operation.operands = {left ? b : a};
+            operation.operands = {(n == 0) == left ? b : a};
             return;
         }
         const Operand high = values.emit(OpCode::kShiftLeft, u32, {b, imm(left ? n : 32 - n)});
@@ -126,9 +130,17 @@ void lower_bit_permutation(PtxValueBuilder& values, Operation& operation,
             shifted = values.emit(OpCode::kBitOr, u64, {shifted, positioned});
         }
     } else {
-        const Operand masked = values.emit(OpCode::kBitAnd, u32,
-            {count, Operand::immediate("31", u32)});
-        const Operand shift = values.emit(OpCode::kConvert, u64, {masked});
+        Operand bounded;
+        if (clamp) {
+            const Operand thirty_two = Operand::immediate("32", u32);
+            const Operand beyond = values.emit(OpCode::kCompare, Type::predicate(),
+                {count, thirty_two}, {{"predicate", "gt"}});
+            bounded = values.emit(OpCode::kSelect, u32, {beyond, thirty_two, count});
+        } else {
+            bounded = values.emit(OpCode::kBitAnd, u32,
+                {count, Operand::immediate("31", u32)});
+        }
+        const Operand shift = values.emit(OpCode::kConvert, u64, {bounded});
         shifted = values.emit(left ? OpCode::kShiftLeft : OpCode::kShiftRight,
                        u64, {packed, shift});
         if (left) {

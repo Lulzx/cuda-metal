@@ -43,6 +43,7 @@
 
 #include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstring>
 #include <iterator>
 #include <iomanip>
@@ -307,8 +308,32 @@ SourceLocation import_location(const llvm::Instruction& instruction,
 
 std::string constant_spelling(const llvm::Constant& constant) {
     if (const auto* floating = llvm::dyn_cast<llvm::ConstantFP>(&constant)) {
+        const llvm::APFloat& value = floating->getValueAPF();
+        // APFloat spells non-finite values "+Inf", "-Inf" and "NaN", which are
+        // not Metal identifiers. Spell binary32/binary64 as PTX-style raw bit
+        // patterns (0f/0d), which the MSL emitter turns into exact bit casts
+        // and which also keep a NaN's payload; spell binary16 through Metal's
+        // INFINITY/NAN macros.
+        if (!value.isFinite()) {
+            const llvm::APInt bits = value.bitcastToAPInt();
+            char hex[32];
+            if (&value.getSemantics() == &llvm::APFloat::IEEEsingle()) {
+                std::snprintf(hex, sizeof hex, "0f%08llX",
+                              static_cast<unsigned long long>(bits.getZExtValue()));
+                return hex;
+            }
+            if (&value.getSemantics() == &llvm::APFloat::IEEEdouble()) {
+                std::snprintf(hex, sizeof hex, "0d%016llX",
+                              static_cast<unsigned long long>(bits.getZExtValue()));
+                return hex;
+            }
+            if (&value.getSemantics() == &llvm::APFloat::IEEEhalf()) {
+                if (value.isNaN()) return "half(NAN)";
+                return value.isNegative() ? "half(-INFINITY)" : "half(INFINITY)";
+            }
+        }
         llvm::SmallVector<char, 32> text;
-        floating->getValueAPF().toString(text);
+        value.toString(text);
         std::string spelling(text.begin(), text.end());
         if (spelling.find_first_of(".eE") == std::string::npos &&
             spelling != "NaN" && spelling != "+Inf" && spelling != "-Inf") {

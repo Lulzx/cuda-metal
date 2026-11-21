@@ -29,7 +29,8 @@ addressing, aligned whole-pointer loads, a private numeric target, and a proof
 that the table address is neither written nor allowed to escape. Mutable,
 partial, mixed, and escaping relocations remain unsupported.
 
-The typed PTX path supports `shf.{l,r}.wrap.b32`, generic `prmt.b32`,
+The typed PTX path supports `shf.{l,r}.{wrap,clamp}.b32` (nvcc's
+`__funnelshift_{l,r}` and `_lc`/`_rc` forms), generic `prmt.b32`,
 unpredicated `bfi.b32/b64`, `brev.b32/b64`, `lop3.b32` with an immediate truth
 table (not the predicate-output `lop3.{and,or}` forms), and two-halfword
 `mov.b32` packing/unpacking
@@ -40,7 +41,9 @@ Constant funnel-shift counts and constant `bfi` fields fold to a few shifts and
 masks; register counts and fields keep the clamped general form, which costs
 three to four times more emitted source.
 Extended-precision carry chains (`add.cc`, `addc`, `sub.cc`, `subc`, `mad.cc`,
-`madc`) are not supported by any PTX backend and refuse the kernel.
+`madc`) are not supported by any PTX backend and refuse the kernel. The legacy
+PTX->LLVM lowering has no `shf` at all and refuses it with an explicit
+diagnostic; use the typed backend for funnel shifts.
 
 The typed source and PTX paths preserve uniform-vote semantics: `vote.sync.uni`
 is true when every participating live lane has the same predicate, including
@@ -577,6 +580,12 @@ instructions per function. Reaching a limit leaves the original path for SSA
 validation; this is not general predicate optimization.
 
 ## PTX parameter storage and tail calls
+
+A loop that walks a by-value aggregate kernel parameter (`mov.b64 %rd, param`,
+`ld.param [%rd]`, `add %rd, %rd, 8` on the back edge) gives that parameter an
+addressable private copy, as a straight-line dynamic `ld.param` address
+already did. The address reaching the load through a loop join counts as
+dynamic.
 
 Complete integer words can populate byte-array aggregate returns without losing
 their upper halves. Exact aligned `ld.param.v2.b64` / `st.param.v2.b64` transfers

@@ -885,6 +885,20 @@ std::string_view next_ptx_token(std::string_view source, std::size_t* cursor) {
 
 std::vector<cumetalKernelArgInfo_t> scan_ptx_entry_params(std::string_view params) {
     std::vector<cumetalKernelArgInfo_t> result;
+    // Clang qualifies every kernel pointer parameter with `.ptr` and leaves
+    // 64-bit scalars (sizes, strides, hashes) unqualified. Once an entry shows
+    // that convention, an unqualified .u64/.s64/.b64 is a scalar; guessing it
+    // is a pointer fails the launch with cudaErrorInvalidDevicePointer for any
+    // value above 32 bits that is not an allocation.
+    bool entry_has_pointer_qualifiers = false;
+    for (std::size_t cursor = 0; cursor < params.size();) {
+        const std::string_view token = next_ptx_token(params, &cursor);
+        if (token == ".ptr") {
+            entry_has_pointer_qualifiers = true;
+            break;
+        }
+        if (token.empty() && cursor < params.size()) ++cursor;
+    }
     std::size_t segment_begin = 0;
     while (segment_begin < params.size()) {
         std::size_t segment_end = segment_begin;
@@ -910,13 +924,15 @@ std::vector<cumetalKernelArgInfo_t> scan_ptx_entry_params(std::string_view param
             }
         }
         if (is_param && !type.empty()) {
-            // NVCC commonly emits kernel pointers as unqualified .u64/.s64/.b64
+            // NVCC emits kernel pointers as unqualified .u64/.s64/.b64
             // parameters. The full PTX parser refines ambiguous 64-bit values from
             // body data flow, but deliberately defaults them to pointers when it
-            // cannot prove scalar use. Keep that compatibility rule here. At launch,
-            // allocation lookup safely reclassifies an over-inferred small scalar.
+            // cannot prove scalar use. Keep that compatibility rule for entries
+            // with no `.ptr` at all; at launch, allocation lookup reclassifies an
+            // over-inferred scalar that fits in 32 bits.
             const bool is_unannotated_pointer_width =
-                type == ".u64" || type == ".s64" || type == ".b64";
+                !entry_has_pointer_qualifiers &&
+                (type == ".u64" || type == ".s64" || type == ".b64");
             const bool is_pointer = has_pointer_qualifier || is_unannotated_pointer_width;
             cumetalKernelArgInfo_t info{};
             info.kind = is_pointer ? CUMETAL_ARG_BUFFER : CUMETAL_ARG_BYTES;

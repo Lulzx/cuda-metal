@@ -49,6 +49,34 @@ int main() {
 }
 )ptx";
 
+    // Clang marks every pointer `.ptr`; an unqualified 64-bit parameter of
+    // such an entry is a scalar (stwo-zig passes hashes and strides this way,
+    // #221), while an entry with no `.ptr` keeps the NVCC pointer default.
+    const std::string clang_fixture = R"ptx(
+.version 8.0
+.target sm_80
+.address_size 64
+.visible .entry clang_mixed(
+    .param .u64 .ptr .global .align 4 clang_mixed_param_0,
+    .param .u64 clang_mixed_param_1,
+    .param .s64 clang_mixed_param_2,
+    .param .u32 clang_mixed_param_3
+)
+{
+    ret;
+}
+)ptx";
+    const auto clang_index = cumetal::registration::build_arg_info_index_from_ptx(clang_fixture);
+    const auto mixed = clang_index.find("clang_mixed");
+    if (mixed == clang_index.end() || mixed->second.size() != 4 ||
+        !check_arg(mixed->second, 0, CUMETAL_ARG_BUFFER, sizeof(void*)) ||
+        !check_arg(mixed->second, 1, CUMETAL_ARG_BYTES, 8) ||
+        !check_arg(mixed->second, 2, CUMETAL_ARG_BYTES, 8) ||
+        !check_arg(mixed->second, 3, CUMETAL_ARG_BYTES, 4)) {
+        std::fprintf(stderr, "FAIL: .ptr-qualified entry must keep 64-bit scalars as bytes\n");
+        return 1;
+    }
+
     const auto index = cumetal::registration::build_arg_info_index_from_ptx(fixture);
     const auto kernel = index.find("pointer_scalar");
     const auto empty = index.find("no_args");

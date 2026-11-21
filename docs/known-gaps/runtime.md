@@ -286,6 +286,14 @@ so a refused kernel does not turn into an unrelated `CUBLAS_STATUS_EXECUTION_FAI
 NVRTC's CUBIN size includes a trailing NUL, matching real NVRTC; CuPy drops
 the last byte of every image it receives and the module image still loads.
 
+The registration path classifies kernel parameters from the PTX signature.
+An entry that marks any parameter `.ptr` (Clang marks every pointer) has its
+unqualified `.u64/.s64/.b64` parameters bound as 64-bit scalars. An entry with
+no `.ptr` at all (NVCC) keeps the pointer default for those parameters, and a
+value that is not an allocation is rebound as a scalar only when it fits in 32
+bits; a larger non-allocation value fails the launch with
+`cudaErrorInvalidDevicePointer`.
+
 ### Device assertions in synchronized kernels
 
 The typed PTX path recognizes a narrow, proven terminal assertion of

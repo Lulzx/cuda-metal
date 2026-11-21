@@ -1686,14 +1686,30 @@ struct Importer {
         // A dynamic ld.param address cannot be represented by a fixed
         // aggregate field extraction. Materialize that parameter's bytes so
         // the compiler-generated copy loop retains real pointer arithmetic.
+        // A loop that walks a by-value aggregate (`mov %rd, param`, then
+        // `ld.param [%rd]` and `add %rd, %rd, 8` on the back edge) reaches the
+        // load through a join, so follow joins and exact copies back to any
+        // arithmetic before deciding the address is fixed.
+        const auto reaches_address_arithmetic = [&](ValueId start) {
+            std::unordered_set<ValueId> seen{start};
+            std::deque<ValueId> work{start};
+            while (!work.empty()) {
+                const auto value = work.front();
+                work.pop_front();
+                const auto sources = address_sources.find(value);
+                if (sources == address_sources.end() || sources->second.inputs.empty()) continue;
+                if (sources->second.kind == detail::AddressDemandKind::kOther) return true;
+                for (const auto source : sources->second.inputs)
+                    if (seen.insert(source).second) work.push_back(source);
+            }
+            return false;
+        };
         for (const auto& definition : definitions) {
             const auto& instruction = *definition.instruction;
             if (!starts_with(instruction.opcode, "ld.param") || instruction.operands.size() < 2) continue;
             const auto input = definition.sources.find(first_register(instruction.operands[1]));
             if (input == definition.sources.end()) continue;
-            const auto sources = address_sources.find(input->second);
-            if (sources != address_sources.end() && sources->second.kind == detail::AddressDemandKind::kOther &&
-                !sources->second.inputs.empty()) local_address_values.insert(input->second);
+            if (reaches_address_arithmetic(input->second)) local_address_values.insert(input->second);
         }
         std::deque<ValueId> address_pending(local_address_values.begin(), local_address_values.end());
         while (!address_pending.empty()) {
@@ -6916,11 +6932,14 @@ struct Importer {
                 operation.operands = {count};
             }
         } else if (root == "shf" || root == "prmt") {
-            const bool left = instruction.opcode == "shf.l.wrap.b32";
             const bool permute = instruction.opcode == "prmt.b32";
-            if ((!left && !permute && instruction.opcode != "shf.r.wrap.b32") ||
+            const bool funnel = instruction.opcode == "shf.l.wrap.b32" ||
+                                instruction.opcode == "shf.r.wrap.b32" ||
+                                instruction.opcode == "shf.l.clamp.b32" ||
+                                instruction.opcode == "shf.r.clamp.b32";
+            if ((!funnel && !permute) ||
                 instruction.operands.size() != 4 || destinations.size() != 1) {
-                return fail(&instruction, "typed bit permutation requires shf.{l,r}.wrap.b32 or prmt.b32 and four operands");
+                return fail(&instruction, "typed bit permutation requires shf.{l,r}.{wrap,clamp}.b32 or prmt.b32 and four operands");
             }
             const Type u32 = Type::integer(32);
             detail::lower_bit_permutation(expressions, operation, instruction.opcode,
