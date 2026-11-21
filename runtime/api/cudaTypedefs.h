@@ -50,6 +50,7 @@ typedef CUresult (CUDAAPI *PFN_cuFuncLoad_v12000)(CUfunction function);
 typedef CUresult (CUDAAPI *PFN_cuFuncIsLoaded_v12000)(CUfunctionLoadingState* state, CUfunction function);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorName_v6000)(CUresult error, const char** pStr);
 typedef CUresult (CUDAAPI *PFN_cuGetErrorString_v6000)(CUresult error, const char** pStr);
+typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v11030)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags);
 typedef CUresult (CUDAAPI *PFN_cuGetProcAddress_v12000)(const char* symbol, void** pfn, int cudaVersion, uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
 typedef CUresult (CUDAAPI *PFN_cuGraphAddNode_v12030)(CUgraphNode* phGraphNode, CUgraph hGraph, const CUgraphNode* dependencies, const CUgraphEdgeData* dependencyData, size_t numDependencies, CUgraphNodeParams* nodeParams);  // not implemented; cuGetProcAddress reports NOT_FOUND
 typedef CUresult (CUDAAPI *PFN_cuGraphNodeGetDependentNodes_v10000)(CUgraphNode hNode, CUgraphNode* dependentNodes, size_t* numDependentNodes);  // not implemented; cuGetProcAddress reports NOT_FOUND

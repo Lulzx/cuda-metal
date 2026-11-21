@@ -92,6 +92,62 @@ int main(int argc, char** argv) {
         std::fprintf(stderr, "FAIL: unexpected cuInit_v2 export\n");
         ++failures;
     }
+    // cuGetProcAddress is the exception: the unsuffixed export keeps CUDA
+    // 11.3's 4-argument ABI and _v2 is CUDA 12's 5-argument function, so they
+    // must be two functions, and each must work when called with exactly its
+    // own argument count.
+    using GetProc4 = CUresult (*)(const char*, void**, int, std::uint64_t);
+    using GetProc5 = CUresult (*)(const char*, void**, int, std::uint64_t, int*);
+    auto get_proc4 = lookup<GetProc4>(library, "cuGetProcAddress");
+    auto get_proc5 = lookup<GetProc5>(library, "cuGetProcAddress_v2");
+    if (get_proc4 == nullptr || get_proc5 == nullptr ||
+        reinterpret_cast<void*>(get_proc4) == reinterpret_cast<void*>(get_proc5)) {
+        std::fprintf(stderr, "FAIL: cuGetProcAddress and _v2 must be distinct exports\n");
+        return 1;
+    }
+    for (const auto& [plain, versioned] : aliases) {
+        if (plain == "cuGetProcAddress" || versioned == "cuGetProcAddress_v2") {
+            std::fprintf(stderr, "FAIL: the alias list must not alias cuGetProcAddress\n");
+            return 1;
+        }
+    }
+    void* resolved = nullptr;
+    if (get_proc4("cuMemAlloc", &resolved, 12000, 0) != 0 ||
+        resolved != dlsym(library, "cuMemAlloc")) {
+        std::fprintf(stderr, "FAIL: 4-argument cuGetProcAddress(cuMemAlloc)\n");
+        ++failures;
+    }
+    resolved = nullptr;
+    if (get_proc4("cuNoSuchEntryPoint", &resolved, 12000, 0) == 0 || resolved != nullptr) {
+        std::fprintf(stderr, "FAIL: 4-argument cuGetProcAddress must report a missing name\n");
+        ++failures;
+    }
+    int status = -1;
+    resolved = nullptr;
+    if (get_proc5("cuMemAlloc_v2", &resolved, 12000, 0, &status) != 0 || status != 0 ||
+        resolved != dlsym(library, "cuMemAlloc")) {
+        std::fprintf(stderr, "FAIL: 5-argument cuGetProcAddress_v2(cuMemAlloc_v2)\n");
+        ++failures;
+    }
+    status = -1;
+    if (get_proc5("cuNoSuchEntryPoint", &resolved, 12000, 0, &status) == 0 || status != 1) {
+        std::fprintf(stderr, "FAIL: cuGetProcAddress_v2 must set SYMBOL_NOT_FOUND\n");
+        ++failures;
+    }
+    // Looking up "cuGetProcAddress" itself returns the ABI the caller's CUDA
+    // version expects: the 4-argument function before 12.0, _v2 from 12.0.
+    resolved = nullptr;
+    if (get_proc4("cuGetProcAddress", &resolved, 11080, 0) != 0 ||
+        resolved != reinterpret_cast<void*>(get_proc4)) {
+        std::fprintf(stderr, "FAIL: cuGetProcAddress at 11.8 must return the 4-argument form\n");
+        ++failures;
+    }
+    resolved = nullptr;
+    if (get_proc5("cuGetProcAddress", &resolved, 12000, 0, &status) != 0 ||
+        resolved != reinterpret_cast<void*>(get_proc5)) {
+        std::fprintf(stderr, "FAIL: cuGetProcAddress at 12.0 must return cuGetProcAddress_v2\n");
+        ++failures;
+    }
     if (failures != 0) return 1;
 
     // Drive a context, allocation and round-trip copy only through _v2 names.

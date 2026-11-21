@@ -1,3 +1,6 @@
+// This file defines both cuGetProcAddress ABIs under their exported names, so
+// it opts out of cuda.h's source-level cuGetProcAddress -> _v2 mapping.
+#define CUMETAL_DRIVER_DEFINES_UNVERSIONED_GET_PROC_ADDRESS 1
 #include "cuda.h"
 
 #include "cumetal/air_emitter/emitter.h"
@@ -1142,8 +1145,17 @@ CUresult cuInit(unsigned int flags) {
 // the table cannot drift from the real surface. The per-thread-default-stream
 // flag has no distinct entry points here: CuMetal's null stream already
 // follows the per-thread policy set at build time.
-CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
-                          uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
+//
+// Two exported functions, as in NVIDIA's libcuda: `cuGetProcAddress_v2` is
+// the CUDA 12 form with symbolStatus, and the unsuffixed `cuGetProcAddress`
+// keeps the original CUDA 11.3 4-argument ABI, so a caller that dlsyms the
+// plain name and calls it with four arguments never has a garbage fifth
+// argument dereferenced. cuda.h maps source-level calls to `_v2`.
+extern "C" CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
+                                     uint64_t flags);
+
+CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
+                             uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
     if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
     if (symbol == nullptr || pfn == nullptr || cudaVersion < 0) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -1151,7 +1163,7 @@ CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
     *pfn = nullptr;
     static void* const self_handle = [] {
         Dl_info info{};
-        if (dladdr(reinterpret_cast<const void*>(&cuGetProcAddress), &info) == 0 ||
+        if (dladdr(reinterpret_cast<const void*>(&cuGetProcAddress_v2), &info) == 0 ||
             info.dli_fname == nullptr) {
             return static_cast<void*>(nullptr);
         }
@@ -1163,11 +1175,25 @@ CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
     if (std::strncmp(symbol, "cu", 2) != 0 || symbol[2] < 'A' || symbol[2] > 'Z') {
         return CUDA_ERROR_NOT_FOUND;
     }
+    // The one entry point whose versions are different functions here: a
+    // CUDA 12 caller asking for "cuGetProcAddress" expects
+    // PFN_cuGetProcAddress_v12000 (5 arguments), an older one the 4-argument
+    // form. Every other versioned name is an alias of one implementation.
+    if (std::strcmp(symbol, "cuGetProcAddress") == 0) {
+        *pfn = cudaVersion >= 12000 ? reinterpret_cast<void*>(&cuGetProcAddress_v2)
+                                    : reinterpret_cast<void*>(&cuGetProcAddress);
+        if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
+        return CUDA_SUCCESS;
+    }
     void* resolved = dlsym(self_handle, symbol);
     if (resolved == nullptr) return CUDA_ERROR_NOT_FOUND;
     *pfn = resolved;
     if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
     return CUDA_SUCCESS;
+}
+
+CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion, uint64_t flags) {
+    return cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, nullptr);
 }
 
 CUresult cuDriverGetVersion(int* driverVersion) {

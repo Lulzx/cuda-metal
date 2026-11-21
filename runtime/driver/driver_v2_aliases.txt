@@ -10,7 +10,9 @@
 #
 # Only names whose signature matches NVIDIA's _v2 export are listed:
 #   cuGraphInstantiate_v2 is CUDA 11's 5-argument form (error node + log).
-#   cuGetProcAddress_v2 is CUDA 12's 5-argument form (symbolStatus).
+# cuGetProcAddress is not here: its unsuffixed export keeps the original
+# 4-argument ABI and cuGetProcAddress_v2 is a separate 5-argument function
+# (runtime/driver/cuda_driver.cpp).
 # Not aliased: cuCtxCreate_v3/_v4 (extra affinity/params arguments), and
 # entry points CuMetal does not implement (cuMemHostRegister, cuArrayCreate,
 # cuMemcpy2DUnaligned, cuStreamBeginCapture, ...).
@@ -57,4 +59,3 @@ _cuArray3DCreate _cuArray3DCreate_v2
 _cuEventDestroy _cuEventDestroy_v2
 _cuStreamDestroy _cuStreamDestroy_v2
 _cuGraphInstantiate _cuGraphInstantiate_v2
-_cuGetProcAddress _cuGetProcAddress_v2

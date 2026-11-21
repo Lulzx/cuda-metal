@@ -214,8 +214,17 @@ typedef enum CUdriverProcAddressQueryResult_enum {
 } CUdriverProcAddressQueryResult;
 
 CUresult cuDriverGetVersion(int* driverVersion);
-CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
-                          uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
+// The library exports two functions, as NVIDIA's libcuda does: the original
+// 4-argument `cuGetProcAddress` (CUDA 11.3) and the CUDA 12 5-argument
+// `cuGetProcAddress_v2`. Like NVIDIA's CUDA 12 header, this header spells the
+// 5-argument form and maps source-level calls to `_v2`, so code compiled
+// against it passes symbolStatus to the function that takes it, while
+// binaries that dlsym "cuGetProcAddress" get the 4-argument ABI they expect.
+CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
+                             uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
+#ifndef CUMETAL_DRIVER_DEFINES_UNVERSIONED_GET_PROC_ADDRESS
+#define cuGetProcAddress cuGetProcAddress_v2
+#endif
 CUresult cuDeviceGetCount(int* count);
 CUresult cuDeviceGet(CUdevice* device, int ordinal);
 CUresult cuDeviceGetName(char* name, int len, CUdevice dev);

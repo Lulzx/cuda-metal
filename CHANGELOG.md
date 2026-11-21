@@ -53,12 +53,23 @@ All notable changes to CuMetal are documented here. Format follows
 ### Fixed
 
 - **Driver `_v2` entry points are exported (#230).** `cuCtxCreate_v2`,
-  `cuMemAlloc_v2`, `cuMemcpyHtoD_v2` and the rest of NVIDIA's 40 versioned
+  `cuMemAlloc_v2`, `cuMemcpyHtoD_v2` and the rest of NVIDIA's 39 versioned
   names for entry points CuMetal implements are linker aliases of the
   unsuffixed functions, which already have the `_v2` ABI
   (`runtime/driver/driver_v2_aliases.txt`). Programs that resolve the driver
   with `dlsym`, such as xgrid-gpu, now load. `functional_driver_v2_symbols`
   checks every alias against its unsuffixed function.
+- **`cuGetProcAddress` has NVIDIA's two ABIs.** The unsuffixed export took
+  CUDA 12's five arguments, so a caller that resolved it with `dlsym` and
+  passed CUDA 11.3's four left `symbolStatus` as whatever was in the fifth
+  argument register, which the function then wrote through. The unsuffixed
+  export now has the original four arguments and `cuGetProcAddress_v2` is the
+  five-argument function. `cuda.h` maps source-level `cuGetProcAddress` to
+  `_v2` as NVIDIA's CUDA 12 header does. Looking up `"cuGetProcAddress"` through
+  either function, or through `cudaGetDriverEntryPoint{,ByVersion}`, returns
+  the form the requested CUDA version expects: `_v2` from 12.0, the
+  four-argument form before. Warp, which `dlsym`s the plain name and passes a
+  NULL fifth argument, is unaffected.
 - **Run-time FP64 PTX takes the typed path with exact argument metadata
   (#231).** `max.f64`/`min.f64` were accepted by the typed importer but had no
   software-FP64 lowering, so every module with them (xgrid-gpu's

@@ -1,6 +1,11 @@
 #include "cuda.h"
+#include "cuda_runtime.h"
+#include "cudaTypedefs.h"
+
+#include <dlfcn.h>
 
 #include <cstdint>
+#include <type_traits>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -68,6 +73,53 @@ int main() {
         if (cuGetProcAddress(nullptr, &pfn, 12000, CU_GET_PROC_ADDRESS_DEFAULT, nullptr) !=
             CUDA_ERROR_INVALID_VALUE) {
             return fail("cuGetProcAddress(nullptr) must be an invalid value");
+        }
+    }
+
+    // --- cuGetProcAddress ABI split (CUDA 11.3 4-argument vs CUDA 12 _v2) ---
+    // Source compiled against cuda.h calls the 5-argument _v2, as with
+    // NVIDIA's CUDA 12 header; the unsuffixed export keeps 4 arguments.
+    static_assert(std::is_same_v<decltype(&cuGetProcAddress), PFN_cuGetProcAddress_v12000>,
+                  "cuda.h's cuGetProcAddress must be the CUDA 12 5-argument form");
+    static_assert(std::is_same_v<decltype(&cuGetProcAddress), decltype(&cuGetProcAddress_v2)>,
+                  "cuGetProcAddress must map to cuGetProcAddress_v2 at source level");
+    if (reinterpret_cast<const void*>(&cuGetProcAddress) !=
+        reinterpret_cast<const void*>(&cuGetProcAddress_v2)) {
+        return fail("cuGetProcAddress in source must name cuGetProcAddress_v2");
+    }
+    {
+        void* self = dlopen(nullptr, RTLD_NOW);
+        auto* const four = reinterpret_cast<PFN_cuGetProcAddress_v11030>(
+            dlsym(self, "cuGetProcAddress"));
+        if (four == nullptr ||
+            reinterpret_cast<void*>(four) == reinterpret_cast<void*>(&cuGetProcAddress_v2)) {
+            return fail("the unsuffixed cuGetProcAddress export must be the 4-argument function");
+        }
+        void* pfn = nullptr;
+        if (four("cuStreamGetCtx", &pfn, 12000, CU_GET_PROC_ADDRESS_DEFAULT) != CUDA_SUCCESS ||
+            pfn != reinterpret_cast<void*>(&cuStreamGetCtx)) {
+            return fail("4-argument cuGetProcAddress(cuStreamGetCtx)");
+        }
+        // The runtime hands out the ABI each CUDA version expects.
+        cudaDriverEntryPointQueryResult status = cudaDriverEntryPointSymbolNotFound;
+        pfn = nullptr;
+        if (cudaGetDriverEntryPoint("cuGetProcAddress", &pfn, cudaEnableDefault, &status) !=
+                cudaSuccess ||
+            status != cudaDriverEntryPointSuccess ||
+            pfn != reinterpret_cast<void*>(&cuGetProcAddress_v2)) {
+            return fail("cudaGetDriverEntryPoint(cuGetProcAddress) must return the CUDA 12 form");
+        }
+        pfn = nullptr;
+        if (cudaGetDriverEntryPointByVersion("cuGetProcAddress", &pfn, 11080, cudaEnableDefault,
+                                             &status) != cudaSuccess ||
+            status != cudaDriverEntryPointSuccess || pfn != reinterpret_cast<void*>(four)) {
+            return fail("cudaGetDriverEntryPointByVersion(cuGetProcAddress, 11.8) must return "
+                        "the 4-argument form");
+        }
+        pfn = nullptr;
+        if (cudaGetDriverEntryPoint("cuMemAlloc", &pfn, cudaEnableDefault) != cudaSuccess ||
+            pfn != reinterpret_cast<void*>(&cuMemAlloc)) {
+            return fail("cudaGetDriverEntryPoint without driverStatus");
         }
     }
 
