@@ -6,6 +6,17 @@
 
 - Cooperative-grid synchronization is limited to a conservatively resident
   grid capped at one block per reported GPU core. Oversubscription is rejected.
+  Metal itself makes no co-residency or forward-progress promise for the
+  threadgroups of a dispatch, so the cap reduces but cannot remove the chance
+  that a grid sync waits on a group that never runs. Both lowerings bound the
+  wait: a leader gives up after `cumetal::abi::kGridSyncSpinBudget` (3 x 2^24)
+  polls, about 6 s on an M4 Pro (6.3 s typed, 7.8 s legacy including JIT, for
+  four 32-thread groups), and the launch then fails with the sticky
+  `cudaErrorLaunchTimeout` (`CUDA_ERROR_LAUNCH_TIMEOUT`) instead of hanging the
+  host. A legitimate grid sync whose slowest group takes longer than that to
+  arrive is misreported the same way; slower GPUs poll more slowly and get a
+  proportionally longer bound. A grid-sync kernel is never split into
+  grid-Y slices or batched with other launches.
 - Dynamic launch uses a fixed 1 MiB device queue with at most 1,023 child
   records per parent dispatch and a host scheduling drain. Nested parent-child-
   grandchild execution, invalid child configurations, and record overflow have

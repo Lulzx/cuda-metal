@@ -59,6 +59,23 @@ cudaError_t check_launch_status(id<MTLCommandBuffer> command_buffer,
     return cudaSuccess;
 }
 
+// A cooperative grid sync whose waiters gave up (cumetal::abi::
+// kGridSyncSpinBudget) leaves the watchdog word set. The barrier never
+// completed, so the kernel's results are not trustworthy: report it like
+// CUDA's watchdog timeout, which is sticky.
+cudaError_t check_grid_barrier_status(const std::shared_ptr<Buffer>& grid_barrier,
+                                      std::string* error_message) {
+    if (!grid_barrier || grid_barrier->contents() == nullptr) return cudaSuccess;
+    const auto* words = static_cast<const std::uint32_t*>(grid_barrier->contents());
+    if (words[cumetal::abi::kGridBarrierTimeoutWord] == 0) return cudaSuccess;
+    static constexpr char kMessage[] =
+        "cooperative grid sync timed out: not every threadgroup reached the "
+        "barrier (Metal does not guarantee the whole grid is co-resident)";
+    if (error_message) *error_message = kMessage;
+    std::fprintf(stderr, "cumetal: %s\n", kMessage);
+    return cudaErrorLaunchTimeout;
+}
+
 constexpr std::size_t kDefaultHeapChunkBytes = 64ull * 1024ull * 1024ull;
 // Default auto-enable threshold: 4 MiB.  Allocations at or above this size use
 // MTLHeap sub-allocation automatically (unless CUMETAL_MTLHEAP_ALLOC=0 disables it).
@@ -541,10 +558,12 @@ public:
         (void)flush_open_batch_locked();
     }
 
-    std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer, std::shared_ptr<Buffer> trap_status = {}) {
+    std::uint64_t add_pending(id<MTLCommandBuffer> command_buffer, std::shared_ptr<Buffer> trap_status = {},
+                              std::shared_ptr<Buffer> grid_barrier = {}) {
         std::lock_guard<std::mutex> lock(mutex_);
         const std::uint64_t ticket = next_ticket_++;
-        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer, .trap_status = std::move(trap_status)});
+        pending_buffers_.push_back(PendingBuffer{.ticket = ticket, .command_buffer = command_buffer, .trap_status = std::move(trap_status),
+                                                 .grid_barrier = std::move(grid_barrier)});
         return ticket;
     }
 
@@ -569,8 +588,12 @@ public:
             const MTLCommandBufferStatus completion = [front.command_buffer status];
             if (completion != MTLCommandBufferStatusCompleted && completion != MTLCommandBufferStatusError)
                 return cudaSuccess;
-            const cudaError_t status = check_launch_status(front.command_buffer, front.trap_status, error_message);
+            cudaError_t status = check_launch_status(front.command_buffer, front.trap_status, error_message);
             if (front.trap_status && status == cudaErrorLaunchFailure) trap_error_ = status;
+            if (status == cudaSuccess) {
+                status = check_grid_barrier_status(front.grid_barrier, error_message);
+                if (status != cudaSuccess) trap_error_ = status;
+            }
             completed_ticket_ = front.ticket;
             pending_buffers_.erase(pending_buffers_.begin());
             if (status != cudaSuccess) return status;
@@ -652,6 +675,7 @@ private:
         std::uint64_t ticket = 0;
         id<MTLCommandBuffer> command_buffer = nil;
         std::shared_ptr<Buffer> trap_status;
+        std::shared_ptr<Buffer> grid_barrier;
     };
     cudaError_t trap_error_ = cudaSuccess;
 
@@ -1540,14 +1564,15 @@ std::shared_ptr<Buffer> ensure_device_clock(std::string* error_message) {
 std::shared_ptr<Buffer> allocate_grid_barrier(std::string* error_message) {
     std::string alloc_error;
     std::shared_ptr<Buffer> barrier;
-    if (allocate_buffer(2u * sizeof(std::uint32_t), &barrier, &alloc_error) != cudaSuccess ||
+    constexpr std::size_t kBytes = cumetal::abi::kGridBarrierWords * sizeof(std::uint32_t);
+    if (allocate_buffer(kBytes, &barrier, &alloc_error) != cudaSuccess ||
         barrier == nullptr || barrier->contents() == nullptr) {
         if (error_message != nullptr) {
             *error_message = "cooperative grid barrier allocation failed: " + alloc_error;
         }
         return nullptr;
     }
-    std::memset(barrier->contents(), 0, 2u * sizeof(std::uint32_t));
+    std::memset(barrier->contents(), 0, kBytes);
     return barrier;
 }
 
@@ -3463,7 +3488,10 @@ cudaError_t launch_kernel(const std::string& metallib_path,
     // hidden block-Y offset ABI may be divided into independently committed
     // slices while retaining their original CUDA blockIdx.y values.
     constexpr unsigned int kMaxChunkGridY = 16;
-    if (needs_grid_y_offset && config.grid.y > kMaxChunkGridY) {
+    // A grid-sync kernel must stay one dispatch: slices committed one after
+    // another can never all be resident, and each slice would count only its
+    // own threadgroups at the barrier.
+    if (needs_grid_y_offset && !needs_grid_barrier && config.grid.y > kMaxChunkGridY) {
         for (unsigned int y = 0; y < config.grid.y; y += kMaxChunkGridY) {
             LaunchConfig chunk = config;
             chunk.grid.y = std::min(kMaxChunkGridY, config.grid.y - y);
@@ -3531,7 +3559,8 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         const bool trace_async =
             stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
         const bool batching_allowed =
-            stream_impl != nullptr && !trap_status && !trace_async && !config.disable_batching &&
+            stream_impl != nullptr && !trap_status && !grid_barrier && !trace_async &&
+            !config.disable_batching &&
             max_batch_dispatches() > 0;
 
         id<MTLComputeCommandEncoder> encoder = nil;
@@ -3722,8 +3751,11 @@ cudaError_t launch_kernel(const std::string& metallib_path,
             const unsigned int block_z = config.block.z;
             [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {
               @autoreleasepool {
-                const cudaError_t completion_status =
+                cudaError_t completion_status =
                     check_launch_status(completed, trap_status, nullptr);
+                if (completion_status == cudaSuccess) {
+                    completion_status = check_grid_barrier_status(grid_barrier, nullptr);
+                }
                 const double duration_seconds =
                     [completed GPUEndTime] - [completed GPUStartTime];
                 const long long duration_ns =
@@ -3761,13 +3793,16 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         [command_buffer commit];
 
         if (stream_impl != nullptr) {
-            stream_impl->add_pending(command_buffer, trap_status);
+            stream_impl->add_pending(command_buffer, trap_status, grid_barrier);
             return cudaSuccess;
         }
 
         [command_buffer waitUntilCompleted];
-        const cudaError_t completion_status =
+        cudaError_t completion_status =
             check_launch_status(command_buffer, trap_status, error_message);
+        if (completion_status == cudaSuccess) {
+            completion_status = check_grid_barrier_status(grid_barrier, error_message);
+        }
         if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
             const char* device_name = [[[backend.device name] description] UTF8String];
             const char* legacy_source =
@@ -4227,7 +4262,10 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         [command_buffer commit];
         [command_buffer waitUntilCompleted];
 
-        const cudaError_t status = check_command_buffer_status(command_buffer, error_message);
+        cudaError_t status = check_command_buffer_status(command_buffer, error_message);
+        if (status == cudaSuccess) {
+            status = check_grid_barrier_status(grid_barrier, error_message);
+        }
         if (status == cudaSuccess && out_timing != nullptr) {
             out_timing->gpu_start_s = [command_buffer GPUStartTime];
             out_timing->gpu_end_s   = [command_buffer GPUEndTime];

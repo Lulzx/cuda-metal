@@ -41,6 +41,15 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **A lost cooperative grid sync fails instead of hanging (#175).** Metal does
+  not guarantee that every threadgroup of a dispatch is resident, and a grid
+  sync waiting on a group that never arrives used to leave the host in
+  `waitUntilCompleted` forever. The typed and legacy lowerings now bound the
+  wait (about 6 s on an M4 Pro) and raise a watchdog word in the barrier
+  buffer, and the runtime reports the launch as `cudaErrorLaunchTimeout` with a
+  diagnostic. Grid-sync kernels are also no longer split into grid-Y slices
+  (each slice would have counted only its own groups at the barrier and could
+  never be co-resident with the rest) or batched with other launches.
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
   returns the border colour (zero) outside the texture instead of clamping,
   for unnormalized coordinates too, and `tex2DLayered` honours

@@ -307,6 +307,10 @@ target_link_libraries(cumetal_nvvm_ir_msl_test
     PRIVATE
         cumetal_metal_codegen
 )
+target_include_directories(cumetal_nvvm_ir_msl_test
+    PRIVATE
+        ${PROJECT_SOURCE_DIR}/compiler/common/include
+)
 
 target_link_libraries(cumetal_native_registration_test
     PRIVATE

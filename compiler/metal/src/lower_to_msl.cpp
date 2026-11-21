@@ -1096,10 +1096,64 @@ MslFunction make_grid_sync_helper() {
                      MslType::uint()),
             MslExpression::literal("1u", MslType::uint()), MslType::uint()),
         true));
+    // Watchdog: Metal does not promise that every threadgroup of a dispatch
+    // is co-resident, so a waiter may spin on a group that never runs. Every
+    // kGridSyncFlagCheckInterval polls the leader checks whether another group
+    // already gave up, and after kGridSyncSpinBudget polls it gives up itself
+    // and raises the flag; the runtime turns the flag into
+    // cudaErrorLaunchTimeout instead of hanging in waitUntilCompleted (#175).
+    const MslExpr timeout_flag = MslExpression::unary(
+        "&",
+        MslExpression::subscript(
+            barrier,
+            MslExpression::literal(
+                std::to_string(abi::kGridBarrierTimeoutWord) + "u",
+                MslType::uint()),
+            atomic_uint),
+        atomic_pointer);
+    const MslExpr spins = MslExpression::identifier("spins", MslType::uint());
+    const MslExpr check_due = MslExpression::binary(
+        "==",
+        MslExpression::binary(
+            "&", spins,
+            MslExpression::literal(
+                std::to_string(abi::kGridSyncFlagCheckInterval - 1u) + "u",
+                MslType::uint()),
+            MslType::uint()),
+        zero, MslType::boolean());
+    const MslExpr flag_set = MslExpression::binary(
+        "!=",
+        MslExpression::call("atomic_load_explicit",
+                            {timeout_flag, order("memory_order_relaxed")},
+                            MslType::uint()),
+        zero, MslType::boolean());
+    const MslExpr budget_spent = MslExpression::binary(
+        ">=", spins,
+        MslExpression::literal(std::to_string(abi::kGridSyncSpinBudget) + "u",
+                               MslType::uint()),
+        MslType::boolean());
+    std::vector<MslStmt> spin_body;
+    spin_body.push_back(MslStatement::assignment(
+        spins, MslExpression::binary(
+                   "+", spins, MslExpression::literal("1u", MslType::uint()),
+                   MslType::uint())));
+    spin_body.push_back(MslStatement::if_statement(
+        check_due,
+        {MslStatement::if_statement(flag_set, {MslStatement::break_statement()}),
+         MslStatement::if_statement(
+             budget_spent,
+             {MslStatement::expression(MslExpression::call(
+                  "atomic_store_explicit",
+                  {timeout_flag, MslExpression::literal("1u", MslType::uint()),
+                   order("memory_order_relaxed")},
+                  MslType::void_type())),
+              MslStatement::break_statement()})}));
     leader.push_back(MslStatement::if_statement(
         MslExpression::binary("==", arrived, group_count, MslType::boolean()),
         std::move(last_group),
-        {MslStatement::while_statement(wait_condition, {}), device_fence()}));
+        {MslStatement::variable(MslType::uint(), "spins", zero),
+         MslStatement::while_statement(wait_condition, std::move(spin_body)),
+         device_fence()}));
 
     MslFunction helper;
     helper.name = "cm_grid_sync";

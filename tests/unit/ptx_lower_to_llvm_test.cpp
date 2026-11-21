@@ -1,3 +1,4 @@
+#include "cumetal/common/kernel_abi.h"
 #include "cumetal/common/air_target.h"
 #include "cumetal/ptx/lower_to_llvm.h"
 
@@ -2695,6 +2696,21 @@ $L_done:
                     contains(grid_sync_lowered.llvm_ir,
                              "!\"air.location_index\", i32 27"),
                 "grid sync lowers to the reserved resident-grid barrier ABI")) {
+        if (!grid_sync_lowered.ok) {
+            std::fprintf(stderr, "  error: %s\n", grid_sync_lowered.error.c_str());
+        }
+        return 1;
+    }
+    // A waiter whose generation never flips must give up and raise the
+    // watchdog word instead of spinning forever (#175).
+    if (!expect(contains(grid_sync_lowered.llvm_ir,
+                         "%__cumetal_grid_barrier, i64 " +
+                             std::to_string(cumetal::abi::kGridBarrierTimeoutWord)) &&
+                    contains(grid_sync_lowered.llvm_ir,
+                             ", " + std::to_string(cumetal::abi::kGridSyncSpinBudget)) &&
+                    contains(grid_sync_lowered.llvm_ir, "grid_sync_spin_timeout_") &&
+                    contains(grid_sync_lowered.llvm_ir, "store atomic i32 1, i32 addrspace(1)*"),
+                "grid sync bounds its spin and raises the watchdog flag")) {
         if (!grid_sync_lowered.ok) {
             std::fprintf(stderr, "  error: %s\n", grid_sync_lowered.error.c_str());
         }
