@@ -99,6 +99,14 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   execution rejects untracked, host, interior-short, and otherwise undersized
   input/output spans before dispatch; caller-supplied work areas are accepted
   for API compatibility but unused because both backends manage scratch.
+  Forward transforms are bitwise deterministic for a fixed plan, size and
+  device: `functional_cufft_determinism` repeats C2C and R2C transforms (power
+  of two, mixed radix, Bluestein, 2-D, VkFFT 3-D and the CPU path) through
+  reused and fresh plans, and its `--digests` mode compares separate processes
+  with cold and warm kernel caches. The two-pattern result reported against
+  v0.7.1 (#216) did not reproduce on an M4 Pro; the cuFFT code is unchanged
+  since that release, and none of its kernels use atomics or timing-based plan
+  selection.
 - **cuSPARSE/cuSOLVER:** selected operations only; descriptor, format, solver,
   analysis/reuse, and datatype matrices remain incomplete. cuSPARSE host/device
   scalar pointer mode is covered for the implemented SpMV, SpMM, legacy CSR
@@ -148,6 +156,20 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   `cusolverGetProperty` reports CuMetal's own version, not an NVIDIA release.
   Broader dense/sparse routine,
   datatype, batched, analysis/reuse, and GPU execution coverage remains open.
+- **cuDNN v8 RNN API (#226): not adopted.** `cudnnSetRNNDescriptor_v8`,
+  `cudnnRNNForward` and the v8 weight-space and temp-space queries are not
+  declared, so code using them fails to compile instead of running a stub; the
+  legacy `cudnnRNNForwardInference`/`cudnnRNNForwardTraining` remain. Under the
+  scope policy, adopting the v8 API needs a named workload gate in this
+  repository (the `theTechGoose/cuda-metal` fork names NVIDIA Parakeet and
+  PyTorch `nn.LSTM`). A port would take the fork's final form, after its
+  projSize and scratch-space fixes (`f229485d`, `35e0a5ad`), and land with that
+  workload's test.
+- **cuDNN Nd descriptors:** `cudnnSetTensorNdDescriptor` stores ranks up to
+  `CUDNN_DIM_MAX` (8) and `cudnnGetTensorNdDescriptor` returns them, but every
+  operation works on a 4d n/c/h/w view, so a descriptor of rank above 4 is
+  refused by the operations and by `cudnnGetTensor4dDescriptor`. Ranks 1-3 pad
+  trailing dimensions with 1.
 - **cuDNN:** selected descriptors/operations only. The hardened CPU-backed
   surface is primarily contiguous FP32/NCHW; it synchronizes the handle stream
   before reading UMA operands and rejects unsupported types/layouts/shapes for
@@ -179,9 +201,20 @@ datatype, layout, pointer location, stream, capture, and error behavior.
   effect. `ncclCommGetAsyncError` always reports success because collectives
   finish synchronously.
 - **NVML:** compatibility queries cannot expose NVIDIA device management. The
-  single synthetic device reports Apple unified system-memory information, not
-  dedicated VRAM; utilization, temperature, power, and clock telemetry are
-  explicitly unsupported through the public-API-only boundary.
+  single device reports Metal figures only, never host-wide ones:
+  - `total` is `MTLDevice.recommendedMaxWorkingSetSize`, the working-set
+    budget Metal recommends on unified memory (the same figure as
+    `cudaMemGetInfo`), not dedicated VRAM.
+  - `used` is `MTLDevice.currentAllocatedSize`: this process's Metal
+    allocations, not a device-wide figure across processes as on NVIDIA.
+    `free` is `total - used`.
+  - A device reporting no working set returns `NVML_ERROR_NOT_SUPPORTED`;
+    there is no estimate.
+  - The name is `MTLDevice.name` (e.g. `Apple M4 Pro`). The UUID is
+    `GPU-cumetal-` followed by the 16-hex-digit `registryID`: stable while the
+    device stays registered, not a hardware serial number.
+  - Utilization, temperature, power and clock telemetry are explicitly
+    unsupported through the public-API-only boundary.
 - **Thrust/CUB:** several algorithms are sequential/CPU over UMA; device-wide
   performance and full template/API compatibility are not claimed. CUDA-source
   `thrust::sort(cuda::par.on(stream), ...)` uses GPU merge and copy kernels,

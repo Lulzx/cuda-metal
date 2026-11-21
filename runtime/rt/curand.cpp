@@ -1,6 +1,7 @@
 #include "curand.h"
 
 #include "cuda_runtime.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 
 #include <cmath>
@@ -216,6 +217,7 @@ curandStatus_t curandSetGeneratorOffset(curandGenerator_t generator, unsigned lo
 }
 
 curandStatus_t curandGenerateUniform(curandGenerator_t generator, float* output_ptr, size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -237,6 +239,7 @@ curandStatus_t curandGenerateUniform(curandGenerator_t generator, float* output_
 curandStatus_t curandGenerateUniformDouble(curandGenerator_t generator,
                                            double* output_ptr,
                                            size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -260,6 +263,7 @@ curandStatus_t curandGenerateNormal(curandGenerator_t generator,
                                     size_t num,
                                     float mean,
                                     float stddev) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -288,6 +292,7 @@ curandStatus_t curandGenerateNormalDouble(curandGenerator_t generator,
                                           size_t num,
                                           double mean,
                                           double stddev) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -316,6 +321,7 @@ curandStatus_t curandGenerateLogNormal(curandGenerator_t generator,
                                        size_t num,
                                        float mean,
                                        float stddev) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -344,6 +350,7 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator,
                                              size_t num,
                                              double mean,
                                              double stddev) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -368,6 +375,7 @@ curandStatus_t curandGenerateLogNormalDouble(curandGenerator_t generator,
 }
 
 curandStatus_t curandGenerate(curandGenerator_t generator, unsigned int* output_ptr, size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -389,6 +397,7 @@ curandStatus_t curandGenerate(curandGenerator_t generator, unsigned int* output_
 curandStatus_t curandGenerateLongLong(curandGenerator_t generator,
                                       unsigned long long* output_ptr,
                                       size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -411,6 +420,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
                                      unsigned int* output_ptr,
                                      size_t num,
                                      double lambda) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -436,6 +446,7 @@ curandStatus_t curandGeneratePoisson(curandGenerator_t generator,
 curandStatus_t curandGenerateExponential(curandGenerator_t generator,
                                           float* output_ptr,
                                           size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }
@@ -460,6 +471,7 @@ curandStatus_t curandGenerateExponential(curandGenerator_t generator,
 curandStatus_t curandGenerateExponentialDouble(curandGenerator_t generator,
                                                double* output_ptr,
                                                size_t num) {
+    CUMETAL_LIBRARY_CALL("cuRAND");
     if (generator == nullptr) {
         return CURAND_STATUS_NOT_INITIALIZED;
     }

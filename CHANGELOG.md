@@ -8,6 +8,18 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Added
 
+- **Library-call provenance (#215).** Under `CUMETAL_TRACE_GPU`, every
+  cuBLAS, cuBLASLt, cuFFT, cuRAND, cuSPARSE, cuSOLVER and cuDNN entry point
+  that does work prints
+  `CUMETAL_PROVENANCE event=library_call library=<lib> routine=<name>
+  backend=<mps|cumetal_kernel|host_fallback|graph_capture> host_work=<bool>`
+  when it returns. The backend is what actually ran: MPS dispatches and CuMetal
+  library kernels are recorded where they are issued (kernels only once the
+  launch succeeds), and CPU computation is recorded at the host-library stream
+  wait or a host operation enqueued on the stream. A GPU attempt that falls
+  back to the CPU reports both. Refused and zero-sized calls print nothing.
+  Setup and query entry points (create, destroy, set, get, plan) are not
+  instrumented.
 - **PTX module slicing for the registration JIT.** Each kernel is lowered
   from the part of its module it can reach (module-scope declarations, the
   entry, and every definition it names, including child entries it enqueues)
@@ -52,6 +64,26 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **`cudnn.h` defines `CUDNN_MAJOR`/`CUDNN_MINOR`/`CUDNN_PATCHLEVEL`/
+  `CUDNN_VERSION` (#212)** as 8/9/7 and 8907, matching `cudnnGetVersion()`.
+  Code gating on `#if CUDNN_VERSION >= 8000` silently compiled its pre-v8
+  path. `CUDNN_DIM_MAX` (8) is defined too.
+- **`cudnnGetTensorNdDescriptor` reports the real rank (#213)** and fills
+  `dimA`/`strideA` up to `min(nbDimsRequested, rank)`, instead of always
+  `nbDims = 4` from the n/c/h/w view. `cudnnSetTensorNdDescriptor` accepts ranks
+  up to `CUDNN_DIM_MAX`; a rank above 4 round-trips, but the operations (which
+  use a 4d view) and `cudnnGetTensor4dDescriptor` refuse it instead of
+  computing on its first four dimensions. Null `nbDims`, null `dimA`/`strideA`
+  with a positive request, and a negative request return
+  `CUDNN_STATUS_BAD_PARAM`.
+- **NVML memory comes from the Metal device (#214).** `nvmlDeviceGetMemoryInfo`
+  reported the host's `hw.memsize` as `total` and VM page statistics as `free`,
+  falling back to `total / 2`. `total` is now `MTLDevice.recommendedMaxWorkingSetSize`
+  (the same figure `cudaMemGetInfo` reports), `used` is
+  `MTLDevice.currentAllocatedSize`, `free` is the difference, and a device that
+  reports no working set returns `NVML_ERROR_NOT_SUPPORTED`. The device name is
+  the Metal device's (`Apple M4 Pro`), not the CPU brand string, and the UUID is
+  derived from its `registryID`.
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the

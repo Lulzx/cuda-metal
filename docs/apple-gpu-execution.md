@@ -90,6 +90,21 @@ Metal dispatch. Records identify:
 GPU conformance requires `device=apple_gpu` and `launch_success=true`. The gates
 reject CPU fallback and stub provenance.
 
+Library shim calls (cuBLAS, cuBLASLt, cuFFT, cuRAND, cuSPARSE, cuSOLVER, cuDNN)
+add one `event=library_call` record per call that did work:
+
+```text
+CUMETAL_PROVENANCE event=library_call library=cuBLAS routine=cublasSgemm backend=mps host_work=false
+CUMETAL_PROVENANCE event=library_call library=cuRAND routine=curandGenerateUniform backend=host_fallback host_work=true
+```
+
+`backend` lists what actually ran, joined with `+`: `mps` (MPS or MPSGraph),
+`cumetal_kernel` (a CuMetal library kernel, including VkFFT), `host_fallback`
+(computed on the CPU), or `graph_capture` (recorded into a capturing graph). A
+GPU attempt that fell back to the CPU reports both. A refused or zero-sized
+call prints nothing; setup and query entry points are not instrumented. Kernels
+a library launches still print their own `event=kernel_launch` records.
+
 ## Compiler and registration changes
 
 The PTX-to-Metal path gained:

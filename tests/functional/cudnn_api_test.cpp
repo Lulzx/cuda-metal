@@ -539,6 +539,19 @@ static bool test_version_and_error() {
         std::fprintf(stderr, "FAIL: cudnnGetVersion returned 0\n");
         return false;
     }
+#if !defined(CUDNN_MAJOR) || !defined(CUDNN_MINOR) || !defined(CUDNN_PATCHLEVEL) || \
+    !defined(CUDNN_VERSION)
+#error "cudnn.h must define the CUDNN version macros"
+#endif
+#if CUDNN_VERSION < 8000
+#error "CUDNN_VERSION must select the v8 code paths"
+#endif
+    if (ver != static_cast<size_t>(CUDNN_VERSION) ||
+        CUDNN_VERSION != CUDNN_MAJOR * 1000 + CUDNN_MINOR * 100 + CUDNN_PATCHLEVEL) {
+        std::fprintf(stderr, "FAIL: cudnnGetVersion()=%zu but CUDNN_VERSION=%d\n", ver,
+                     CUDNN_VERSION);
+        return false;
+    }
     const char* err = cudnnGetErrorString(CUDNN_STATUS_SUCCESS);
     if (!err || std::strlen(err) == 0) {
         std::fprintf(stderr, "FAIL: cudnnGetErrorString returned null/empty\n");
@@ -734,6 +747,101 @@ static bool test_tensor_nd_descriptor() {
         }
     }
 
+    cudnnDestroyTensorDescriptor(desc);
+    return true;
+}
+
+// The Nd descriptor reports the rank it was set with, and fills dims and
+// strides up to min(nbDimsRequested, rank).
+static bool test_tensor_nd_descriptor_ranks() {
+    const int dims[5] = {2, 3, 4, 5, 6};
+    const int strides[5] = {360, 120, 30, 6, 1};
+    for (int rank = 3; rank <= 5; ++rank) {
+        cudnnTensorDescriptor_t desc = nullptr;
+        cudnnCreateTensorDescriptor(&desc);
+        int rankStrides[5] = {};
+        for (int i = 0; i < rank; ++i) rankStrides[i] = strides[5 - rank + i];
+        if (cudnnSetTensorNdDescriptor(desc, CUDNN_DATA_FLOAT, rank, dims, rankStrides) !=
+            CUDNN_STATUS_SUCCESS) {
+            std::fprintf(stderr, "FAIL: rank %d Nd set rejected\n", rank);
+            return false;
+        }
+        cudnnDataType_t dt = CUDNN_DATA_DOUBLE;
+        int nbDims = -1;
+        int outDims[CUDNN_DIM_MAX], outStrides[CUDNN_DIM_MAX];
+        for (int i = 0; i < CUDNN_DIM_MAX; ++i) outDims[i] = outStrides[i] = -7;
+        if (cudnnGetTensorNdDescriptor(desc, CUDNN_DIM_MAX, &dt, &nbDims, outDims,
+                                       outStrides) != CUDNN_STATUS_SUCCESS ||
+            dt != CUDNN_DATA_FLOAT || nbDims != rank) {
+            std::fprintf(stderr, "FAIL: rank %d Nd get nbDims=%d\n", rank, nbDims);
+            return false;
+        }
+        for (int i = 0; i < CUDNN_DIM_MAX; ++i) {
+            const int wantDim = i < rank ? dims[i] : -7;
+            const int wantStride = i < rank ? rankStrides[i] : -7;
+            if (outDims[i] != wantDim || outStrides[i] != wantStride) {
+                std::fprintf(stderr, "FAIL: rank %d dim[%d]=%d/%d stride=%d/%d\n", rank, i,
+                             outDims[i], wantDim, outStrides[i], wantStride);
+                return false;
+            }
+        }
+        // Fewer slots than the rank: only those are written, nbDims is the real rank.
+        int shortDims[3] = {-7, -7, -7}, shortStrides[3] = {-7, -7, -7};
+        if (cudnnGetTensorNdDescriptor(desc, 2, &dt, &nbDims, shortDims, shortStrides) !=
+                CUDNN_STATUS_SUCCESS ||
+            nbDims != rank || shortDims[0] != dims[0] || shortDims[1] != dims[1] ||
+            shortDims[2] != -7 || shortStrides[1] != rankStrides[1] || shortStrides[2] != -7) {
+            std::fprintf(stderr, "FAIL: rank %d short Nd get\n", rank);
+            return false;
+        }
+        // Negative paths.
+        if (cudnnGetTensorNdDescriptor(desc, 2, &dt, nullptr, shortDims, shortStrides) !=
+                CUDNN_STATUS_BAD_PARAM ||
+            cudnnGetTensorNdDescriptor(desc, 2, &dt, &nbDims, nullptr, shortStrides) !=
+                CUDNN_STATUS_BAD_PARAM ||
+            cudnnGetTensorNdDescriptor(desc, -1, &dt, &nbDims, shortDims, shortStrides) !=
+                CUDNN_STATUS_BAD_PARAM ||
+            cudnnGetTensorNdDescriptor(nullptr, 2, &dt, &nbDims, shortDims, shortStrides) !=
+                CUDNN_STATUS_BAD_PARAM) {
+            std::fprintf(stderr, "FAIL: rank %d Nd get accepted bad arguments\n", rank);
+            return false;
+        }
+        if (rank == 5) {
+            // Operations use a 4d view; a rank-5 descriptor must be refused,
+            // not computed on its first four dims.
+            cudnnHandle_t handle = nullptr;
+            cudnnCreate(&handle);
+            cudnnActivationDescriptor_t act = nullptr;
+            cudnnCreateActivationDescriptor(&act);
+            cudnnSetActivationDescriptor(act, CUDNN_ACTIVATION_RELU, CUDNN_NOT_PROPAGATE_NAN, 0.0);
+            float* buffer = nullptr;
+            cudaMalloc(reinterpret_cast<void**>(&buffer), 720 * sizeof(float));
+            const float alpha = 1.0f, beta = 0.0f;
+            const cudnnStatus_t st =
+                cudnnActivationForward(handle, act, &alpha, desc, buffer, &beta, desc, buffer);
+            int n = 0, c = 0, h = 0, w = 0, ns = 0, cs = 0, hs = 0, ws = 0;
+            const cudnnStatus_t get4d = cudnnGetTensor4dDescriptor(desc, &dt, &n, &c, &h, &w,
+                                                                   &ns, &cs, &hs, &ws);
+            cudaFree(buffer);
+            cudnnDestroyActivationDescriptor(act);
+            cudnnDestroy(handle);
+            if (st == CUDNN_STATUS_SUCCESS || get4d == CUDNN_STATUS_SUCCESS) {
+                std::fprintf(stderr, "FAIL: rank-5 descriptor used as 4d (op=%d get4d=%d)\n",
+                             st, get4d);
+                return false;
+            }
+        }
+        cudnnDestroyTensorDescriptor(desc);
+    }
+    cudnnTensorDescriptor_t desc = nullptr;
+    cudnnCreateTensorDescriptor(&desc);
+    int tooMany[CUDNN_DIM_MAX + 1], ones[CUDNN_DIM_MAX + 1];
+    for (int i = 0; i <= CUDNN_DIM_MAX; ++i) tooMany[i] = ones[i] = 1;
+    if (cudnnSetTensorNdDescriptor(desc, CUDNN_DATA_FLOAT, CUDNN_DIM_MAX + 1, tooMany, ones) !=
+        CUDNN_STATUS_BAD_PARAM) {
+        std::fprintf(stderr, "FAIL: Nd set accepted rank above CUDNN_DIM_MAX\n");
+        return false;
+    }
     cudnnDestroyTensorDescriptor(desc);
     return true;
 }
@@ -1237,6 +1345,7 @@ int main() {
     if (!test_dropout_passthrough()) return 1;
     if (!test_dropout_states_size()) return 1;
     if (!test_tensor_nd_descriptor()) return 1;
+    if (!test_tensor_nd_descriptor_ranks()) return 1;
     if (!test_batch_norm_training()) return 1;
     if (!test_batch_norm_backward()) return 1;
     if (!test_softmax_backward()) return 1;

@@ -306,6 +306,7 @@ add_library(cumetal_runtime SHARED
     runtime/rt/cublaslt.cpp
     runtime/rt/cudnn.cpp
     runtime/rt/nvml.cpp
+    runtime/rt/library_provenance.cpp
     runtime/rt/nccl.cpp
     runtime/rt/nvrtc.cpp
     runtime/rt/nvrtc_options.cpp

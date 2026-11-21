@@ -4,6 +4,7 @@
 #include "allocation_table.h"
 #include "cumetal_diag.h"
 #include "library_conflict.h"
+#include "library_provenance.h"
 #include "metal_backend.h"
 #include "registration.h"
 #include "native_registration.h"
@@ -2754,6 +2755,7 @@ bool resolve_allocation_for_pointer(const void* ptr, AllocationTable::ResolvedAl
 }
 
 cudaError_t enqueue_host_operation(cudaStream_t stream, std::function<void()> operation) {
+    note_library_backend(LibraryBackend::kHost);
     return enqueue_stream_host_op(stream, std::move(operation));
 }
 
@@ -2763,6 +2765,9 @@ cudaError_t resolve_backend_stream(cudaStream_t stream,
 }
 
 cudaError_t synchronize_for_host_library(cudaStream_t stream) {
+    // Library shims call this before computing on the CPU, and before some
+    // synchronous GPU dispatches.
+    note_library_backend(LibraryBackend::kHostWait);
     // Waiting for non-blocking streams as well is more than CUDA orders, but
     // only costs time; missing a blocking stream reads data still in flight.
     // The device wait must not take the pending launch error: that failure
@@ -2789,6 +2794,7 @@ bool capture_library_call(cudaStream_t stream, std::function<cudaError_t(cudaStr
     node->type = cudaGraphNodeTypeKernel;
     node->library_op = std::move(op);
     append_captured_graph_node(graph, node);
+    note_library_backend(LibraryBackend::kGraphCapture);
     return true;
 }
 

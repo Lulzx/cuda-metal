@@ -1,5 +1,6 @@
 #include "cublasLt.h"
 #include "cublas_v2.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
@@ -357,6 +358,7 @@ cublasStatus_t cublasLtDestroy(cublasLtHandle_t lightHandle) {
 cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmulDesc,
                                          cublasComputeType_t computeType,
                                          cudaDataType_t scaleType) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matmulDesc) return CUBLAS_STATUS_INVALID_VALUE;
     if (!((computeType == CUBLAS_COMPUTE_32F && scaleType == CUDA_R_32F) ||
           (computeType == CUBLAS_COMPUTE_64F && scaleType == CUDA_R_64F) ||
@@ -372,6 +374,7 @@ cublasStatus_t cublasLtMatmulDescCreate(cublasLtMatmulDesc_t* matmulDesc,
 }
 
 cublasStatus_t cublasLtMatmulDescDestroy(cublasLtMatmulDesc_t matmulDesc) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matmulDesc) return CUBLAS_STATUS_INVALID_VALUE;
     delete matmulDesc;
     return CUBLAS_STATUS_SUCCESS;
@@ -380,6 +383,7 @@ cublasStatus_t cublasLtMatmulDescDestroy(cublasLtMatmulDesc_t matmulDesc) {
 cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
                                                cublasLtMatmulDescAttributes_t attr,
                                                const void* buf, size_t sizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matmulDesc || !buf) return CUBLAS_STATUS_INVALID_VALUE;
     switch (attr) {
         case CUBLASLT_MATMUL_DESC_TRANSA:
@@ -422,6 +426,7 @@ cublasStatus_t cublasLtMatmulDescSetAttribute(cublasLtMatmulDesc_t matmulDesc,
 cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
                                                cublasLtMatmulDescAttributes_t attr,
                                                void* buf, size_t sizeInBytes, size_t* sizeWritten) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matmulDesc || !buf) return CUBLAS_STATUS_INVALID_VALUE;
     switch (attr) {
         case CUBLASLT_MATMUL_DESC_TRANSA:
@@ -455,6 +460,7 @@ cublasStatus_t cublasLtMatmulDescGetAttribute(cublasLtMatmulDesc_t matmulDesc,
 cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* matLayout,
                                            cudaDataType_t type,
                                            uint64_t rows, uint64_t cols, int64_t ld) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matLayout) return CUBLAS_STATUS_INVALID_VALUE;
     if (type != CUDA_R_32F && type != CUDA_R_64F && type != CUDA_R_16F &&
         type != CUDA_R_16BF && type != CUDA_R_8I && type != CUDA_R_32I)
@@ -474,6 +480,7 @@ cublasStatus_t cublasLtMatrixLayoutCreate(cublasLtMatrixLayout_t* matLayout,
 }
 
 cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t matLayout) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matLayout) return CUBLAS_STATUS_INVALID_VALUE;
     delete matLayout;
     return CUBLAS_STATUS_SUCCESS;
@@ -482,6 +489,7 @@ cublasStatus_t cublasLtMatrixLayoutDestroy(cublasLtMatrixLayout_t matLayout) {
 cublasStatus_t cublasLtMatrixLayoutSetAttribute(cublasLtMatrixLayout_t matLayout,
                                                  cublasLtMatrixLayoutAttribute_t attr,
                                                  const void* buf, size_t sizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matLayout || !buf) return CUBLAS_STATUS_INVALID_VALUE;
     switch (attr) {
         case CUBLASLT_MATRIX_LAYOUT_BATCH_COUNT:
@@ -563,6 +571,7 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout
                                                  cublasLtMatrixLayoutAttribute_t attr,
                                                  void* buf, size_t sizeInBytes,
                                                  size_t* sizeWritten) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!matLayout || !buf) return CUBLAS_STATUS_INVALID_VALUE;
     switch (attr) {
         case CUBLASLT_MATRIX_LAYOUT_TYPE:
@@ -610,6 +619,7 @@ cublasStatus_t cublasLtMatrixLayoutGetAttribute(cublasLtMatrixLayout_t matLayout
 // --- Matmul preference ---
 
 cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t* pref) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!pref) return CUBLAS_STATUS_INVALID_VALUE;
     auto* p = new (std::nothrow) cublasLtMatmulPreferenceOpaque;
     if (!p) return CUBLAS_STATUS_ALLOC_FAILED;
@@ -618,6 +628,7 @@ cublasStatus_t cublasLtMatmulPreferenceCreate(cublasLtMatmulPreference_t* pref) 
 }
 
 cublasStatus_t cublasLtMatmulPreferenceDestroy(cublasLtMatmulPreference_t pref) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!pref) return CUBLAS_STATUS_INVALID_VALUE;
     delete pref;
     return CUBLAS_STATUS_SUCCESS;
@@ -626,6 +637,7 @@ cublasStatus_t cublasLtMatmulPreferenceDestroy(cublasLtMatmulPreference_t pref) 
 cublasStatus_t cublasLtMatmulPreferenceSetAttribute(cublasLtMatmulPreference_t pref,
                                                       cublasLtMatmulPreferenceAttributes_t attr,
                                                       const void* buf, size_t sizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!pref || !buf) return CUBLAS_STATUS_INVALID_VALUE;
     if (attr == CUBLASLT_MATMUL_PREF_MAX_WORKSPACE_BYTES) {
         if (sizeInBytes < sizeof(size_t)) return CUBLAS_STATUS_INVALID_VALUE;
@@ -647,6 +659,7 @@ cublasStatus_t cublasLtMatmulAlgoGetHeuristic(cublasLtHandle_t lightHandle,
                                                int requestedAlgoCount,
                                                cublasLtMatmulHeuristicResult_t heuristicResultsArray[],
                                                int* returnAlgoCount) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!lightHandle || !preference || !returnAlgoCount || requestedAlgoCount < 0)
         return CUBLAS_STATUS_INVALID_VALUE;
     cublasStatus_t validation = validate_matmul(operationDesc, Adesc, Bdesc, Cdesc, Ddesc);
@@ -681,6 +694,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                                const void* algo,
                                void* /*workspace*/, size_t /*workspaceSizeInBytes*/,
                                cudaStream_t stream) {
+    CUMETAL_LIBRARY_CALL("cuBLASLt");
     if (!lightHandle || !computeDesc || !alpha || !A || !Adesc ||
         !B || !Bdesc || !beta || !C || !Cdesc || !D || !Ddesc) {
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -751,6 +765,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                     std::string error;
                     cudaError_t gemm_status;
                     if (Adesc->batch_count == 1) {
+                        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
                         gemm_status = cumetal::metal_backend::gemm_f32(
                             computeDesc->transa != CUBLAS_OP_N,
                             computeDesc->transb != CUBLAS_OP_N, lt_m, lt_n, lt_k,
@@ -761,6 +776,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                             d_res.offset, static_cast<int>(Ddesc->ld),
                             backend_stream, &error);
                     } else {
+                        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
                         gemm_status =
                             cumetal::metal_backend::gemm_strided_batched_f32(
                                 computeDesc->transa != CUBLAS_OP_N,
@@ -831,6 +847,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
             LT_DEBUG("MPSGraph LtMatmul epilogue path epilogue=%d",
                      static_cast<int>(computeDesc->epilogue));
             std::string error;
+            ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
             const cudaError_t gemm_status = cumetal::metal_backend::gemm_f32_epilogue(
                 computeDesc->transa != CUBLAS_OP_N,
                 computeDesc->transb != CUBLAS_OP_N, lt_m, lt_n, lt_k,
@@ -896,6 +913,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                     const float beta_f = *static_cast<const float*>(beta);
                     cudaError_t gemm_status;
                     if (Ddesc->type == CUDA_R_16F) {
+                        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
                         gemm_status = cumetal::metal_backend::gemm_f16(
                             computeDesc->transa != CUBLAS_OP_N,
                             computeDesc->transb != CUBLAS_OP_N, lt_m, lt_n, lt_k,
@@ -905,6 +923,7 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
                             d_res.offset, static_cast<int>(Ddesc->ld),
                             backend_stream, &error);
                     } else {
+                        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
                         gemm_status = cumetal::metal_backend::gemm_f16_f32(
                             computeDesc->transa != CUBLAS_OP_N,
                             computeDesc->transb != CUBLAS_OP_N, lt_m, lt_n, lt_k,
@@ -924,6 +943,9 @@ cublasStatus_t cublasLtMatmul(cublasLtHandle_t lightHandle,
         }
     }
 
+    // The general path below computes on the CPU, possibly after an MPS
+    // attempt above declined or failed in this same call.
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kHost);
     if (cumetal::rt::synchronize_for_host_library(stream) != cudaSuccess) return CUBLAS_STATUS_EXECUTION_FAILED;
 
     int m = static_cast<int>(Ddesc->rows);
