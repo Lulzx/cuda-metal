@@ -3321,6 +3321,66 @@ static bool launch_arg_binds_index(const std::vector<KernelArg>& args,
     return false;
 }
 
+// CUDA refuses a launch whose static plus dynamic shared memory exceeds what
+// the block may use (cudaErrorInvalidValue, nothing runs). Metal's limit is
+// the device's maxThreadgroupMemoryLength, which the runtime also reports as
+// sharedMemPerBlock and sharedMemPerBlockOptin. Passing a larger length to
+// setThreadgroupMemoryLength is a Metal API violation: the validation layer
+// aborts and the release driver may run the kernel with less memory than
+// asked for, so the request is checked here, before anything is encoded.
+static cudaError_t check_threadgroup_memory_locked(BackendState& backend,
+                                                   id<MTLComputePipelineState> pipeline,
+                                                   std::size_t dynamic_bytes,
+                                                   std::string* error_message) {
+    const std::size_t static_bytes =
+        static_cast<std::size_t>(pipeline.staticThreadgroupMemoryLength);
+    const std::size_t limit =
+        static_cast<std::size_t>([backend.device maxThreadgroupMemoryLength]);
+    if (dynamic_bytes > limit || static_bytes > limit - dynamic_bytes) {
+        if (error_message != nullptr) {
+            *error_message = "launch requests " + std::to_string(dynamic_bytes) +
+                             " bytes of dynamic and " + std::to_string(static_bytes) +
+                             " bytes of static threadgroup memory; the device limit is " +
+                             std::to_string(limit);
+        }
+        return cudaErrorInvalidValue;
+    }
+    return cudaSuccess;
+}
+
+cudaError_t validate_threadgroup_memory(const std::string& metallib_path,
+                                        const std::string& kernel_name,
+                                        std::size_t dynamic_bytes,
+                                        bool* exceeds_limit,
+                                        std::string* error_message) {
+    if (exceeds_limit == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "validate_threadgroup_memory invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    *exceeds_limit = false;
+    if (metallib_path.empty() || kernel_name.empty()) {
+        if (error_message != nullptr) {
+            *error_message = "validate_threadgroup_memory invalid argument";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    BackendState& backend = state();
+    std::lock_guard<std::mutex> lock(backend.mutex);
+    id<MTLComputePipelineState> pipeline =
+        load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
+    if (pipeline == nil) {
+        return cudaErrorInvalidValue;
+    }
+    *exceeds_limit = check_threadgroup_memory_locked(backend, pipeline, dynamic_bytes,
+                                                     error_message) != cudaSuccess;
+    return cudaSuccess;
+}
+
 cudaError_t launch_kernel(const std::string& metallib_path,
                           const std::string& kernel_name,
                           const LaunchConfig& config,
@@ -3387,6 +3447,11 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
+        }
+        const cudaError_t shared_status =
+            check_threadgroup_memory_locked(backend, pipeline, config.shared_memory_bytes, error_message);
+        if (shared_status != cudaSuccess) {
+            return shared_status;
         }
         needs_trap_status = backend.pipeline_uses_trap_status[pipeline_cache_key];
         needs_lock_bank = backend.pipeline_uses_lock_bank[pipeline_cache_key];
@@ -4022,6 +4087,11 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         pipeline = load_pipeline_locked(backend, metallib_path, kernel_name, error_message);
         if (pipeline == nil) {
             return cudaErrorInvalidValue;
+        }
+        const cudaError_t shared_status =
+            check_threadgroup_memory_locked(backend, pipeline, config.shared_memory_bytes, error_message);
+        if (shared_status != cudaSuccess) {
+            return shared_status;
         }
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;
         if (backend.pipeline_uses_trap_status[pipeline_cache_key]) {

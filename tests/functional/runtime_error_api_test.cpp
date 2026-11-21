@@ -164,6 +164,37 @@ int main(int argc, char** argv) {
         .arg_count = 0,
         .arg_info = nullptr,
     };
+    // A zero grid or block extent is cudaErrorInvalidConfiguration. CUDA
+    // reports it from the launch and cudaGetLastError only: it is not sticky
+    // and a later synchronize succeeds. The dimension check precedes kernel
+    // lookup, so the missing kernel is never reached.
+    const dim3 zero_shapes[][2] = {
+        {dim3(0, 1, 1), dim3(1, 1, 1)},
+        {dim3(1, 0, 1), dim3(1, 1, 1)},
+        {dim3(1, 1, 1), dim3(1, 1, 0)},
+    };
+    for (const auto& shape : zero_shapes) {
+        if (cudaLaunchKernel(&missing_kernel, shape[0], shape[1], nullptr, 0, nullptr) !=
+                cudaErrorInvalidConfiguration ||
+            cudaPeekAtLastError() != cudaErrorInvalidConfiguration ||
+            cudaGetLastError() != cudaErrorInvalidConfiguration ||
+            cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess) {
+            std::fprintf(stderr,
+                         "FAIL: zero launch extent should be a non-sticky "
+                         "cudaErrorInvalidConfiguration\n");
+            return 1;
+        }
+    }
+    if (cudaLaunchCooperativeKernel(&missing_kernel, dim3(0), dim3(1), nullptr, 0, nullptr) !=
+            cudaErrorInvalidConfiguration ||
+        cudaGetLastError() != cudaErrorInvalidConfiguration ||
+        cudaDeviceSynchronize() != cudaSuccess) {
+        std::fprintf(stderr,
+                     "FAIL: zero-grid cooperative launch should be "
+                     "cudaErrorInvalidConfiguration\n");
+        return 1;
+    }
+
     (void)cudaLaunchKernel(&missing_kernel, dim3(1), dim3(1), nullptr, 0, nullptr);
     if (cudaGetLastError() != cudaErrorInvalidValue ||
         cudaGetLastError() != cudaSuccess) {

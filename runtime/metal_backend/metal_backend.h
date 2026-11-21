@@ -94,6 +94,17 @@ cudaError_t query_kernel_properties(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     KernelProperties* out_properties,
                                     std::string* error_message);
+// Sets *exceeds_limit when the kernel's static threadgroup memory plus
+// dynamic_bytes exceeds the device's maxThreadgroupMemoryLength (the message
+// says by how much). Lets the runtime refuse an oversized launch the way CUDA
+// does, as a synchronous launch error, before anything is encoded;
+// launch_kernel repeats the check. A non-success status means the pipeline
+// itself could not be loaded.
+cudaError_t validate_threadgroup_memory(const std::string& metallib_path,
+                                        const std::string& kernel_name,
+                                        std::size_t dynamic_bytes,
+                                        bool* exceeds_limit,
+                                        std::string* error_message);
 // Compiles/loads the library, resolves the entry and creates its pipeline
 // without dispatching anything. Idempotent: a prepared kernel returns
 // immediately, whichever path prepared it.

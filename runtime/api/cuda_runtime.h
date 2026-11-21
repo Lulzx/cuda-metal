@@ -583,7 +583,9 @@ typedef enum cudaDeviceAttr {
     cudaDevAttrPageableMemoryAccessUsesHostPageTables = 93,
     cudaDevAttrPciDomainId = 50,
     cudaDevAttrCooperativeLaunch = 95,
-    cudaDevAttrSharedMemPerBlockOptin = 97,
+    // CUDA's name for attribute 97; the shorter spelling is kept for existing callers.
+    cudaDevAttrMaxSharedMemoryPerBlockOptin = 97,
+    cudaDevAttrSharedMemPerBlockOptin = cudaDevAttrMaxSharedMemoryPerBlockOptin,
     cudaDevAttrMemoryPoolsSupported = 115,
 } cudaDeviceAttr;
 

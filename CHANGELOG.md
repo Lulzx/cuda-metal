@@ -41,6 +41,24 @@ All notable changes to CuMetal are documented here. Format follows
 
 ### Fixed
 
+- **Oversized shared memory is refused at launch** (#205). A launch whose
+  static plus dynamic shared memory exceeds the Metal device's
+  `maxThreadgroupMemoryLength` (32 KB) returns `cudaErrorInvalidValue` and
+  runs nothing. The length was passed unchecked to
+  `setThreadgroupMemoryLength`, which the Metal validation layer aborts on and
+  the release driver ran with less memory than asked for. A 32 KB + 4 B
+  request, valid in CUDA, is now refused too.
+- **Zero launch extents return `cudaErrorInvalidConfiguration`** (#207)
+  instead of `cudaErrorInvalidValue`, from `cudaLaunchKernel`,
+  `cudaConfigureCall` and `cudaLaunchCooperativeKernel` (which returned
+  `cudaErrorCooperativeLaunchTooLarge` for a zero grid). As in CUDA, this and
+  the shared-memory refusal are not reported again by the next synchronize.
+- **`cudaEventElapsedTime` error code** (#209). An unrecorded or
+  timing-disabled event returns `cudaErrorInvalidResourceHandle`
+  (`CUDA_ERROR_INVALID_HANDLE` from `cuEventElapsedTime`), not
+  `cudaErrorInvalidValue`.
+- **`cudaDevAttrMaxSharedMemoryPerBlockOptin`**, CUDA's name for attribute 97,
+  is declared; the old `cudaDevAttrSharedMemPerBlockOptin` spelling remains.
 - **Texture addressing and layered filtering.** `cudaAddressModeBorder` now
   returns the border colour (zero) outside the texture instead of clamping,
   for unnormalized coordinates too, and `tex2DLayered` honours

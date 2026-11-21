@@ -6044,19 +6044,22 @@ cudaError_t cudaEventElapsedTime(float* ms, cudaEvent_t start, cudaEvent_t end) 
         return fail(end_status);
     }
 
+    // CUDA answers cudaErrorInvalidResourceHandle, not cudaErrorInvalidValue,
+    // when either event was never recorded or was created with
+    // cudaEventDisableTiming: the handle cannot serve as a timestamp.
     std::shared_ptr<cumetal::metal_backend::EventMarker> start_marker;
     std::shared_ptr<cumetal::metal_backend::EventMarker> end_marker;
     {
         std::lock_guard<std::mutex> lock(start->mutex);
         if (start->disable_timing || !start->recorded_once || !start->timing_valid) {
-            return fail(cudaErrorInvalidValue);
+            return fail(cudaErrorInvalidResourceHandle);
         }
         start_marker = start->marker;
     }
     {
         std::lock_guard<std::mutex> lock(end->mutex);
         if (end->disable_timing || !end->recorded_once || !end->timing_valid) {
-            return fail(cudaErrorInvalidValue);
+            return fail(cudaErrorInvalidResourceHandle);
         }
         end_marker = end->marker;
     }
@@ -6107,10 +6110,21 @@ cudaError_t cudaLaunchKernel(const void* func,
         record_pending_launch_error(err);
         return fail(err);
     };
+    // A configuration CUDA itself rejects at launch (zero extents, too much
+    // shared memory) fails only the launch call: CUDA reports it through the
+    // return value and cudaGetLastError, never through a later synchronize,
+    // and the context stays usable. Only CuMetal's own failures (lowering,
+    // registration, Metal submission) go through launch_fail's pending slot.
+    auto launch_refuse = [&](cudaError_t err) -> cudaError_t { return fail(err); };
 
-    if (func == nullptr || grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
+    if (func == nullptr) {
+        return launch_fail(cudaErrorInvalidValue, "null launch func");
+    }
+    // CUDA reports a zero grid or block extent as an invalid execution
+    // configuration, not an invalid argument.
+    if (grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
         block_dim.y == 0 || block_dim.z == 0) {
-        return launch_fail(cudaErrorInvalidValue, "invalid launch dims/func");
+        return launch_refuse(cudaErrorInvalidConfiguration);
     }
 
     const cudaError_t init_status = ensure_initialized();
@@ -6789,6 +6803,24 @@ cudaError_t cudaLaunchKernel(const void* func,
         use_registered_kernel ? registered_kernel.kernel_name.c_str() : kernel->kernel_name;
 
     std::string error;
+    // More shared memory than the block may use is a launch configuration
+    // error in CUDA (cudaErrorInvalidValue, nothing runs). Check it before the
+    // backend so it is refused with CUDA's synchronous semantics; the backend
+    // repeats the check so no caller can hand Metal an oversized length.
+    if (effective_shared_mem > 0) {
+        bool exceeds_limit = false;
+        const cudaError_t shared_status = cumetal::metal_backend::validate_threadgroup_memory(
+            metallib_path, kernel_name, effective_shared_mem, &exceeds_limit, &error);
+        if (shared_status != cudaSuccess) {
+            return launch_fail(shared_status, "pipeline load for shared memory check");
+        }
+        if (exceeds_limit) {
+            if (cumetal::diag_env_truthy("CUMETAL_DEBUG_LAUNCH")) {
+                std::fprintf(stderr, "CUMETAL_DEBUG_LAUNCH: %s\n", error.c_str());
+            }
+            return launch_refuse(cudaErrorInvalidValue);
+        }
+    }
     const cudaError_t status =
         cumetal::metal_backend::launch_kernel(metallib_path, kernel_name, config, launch_args,
                                               backend_stream, &error);
@@ -7246,7 +7278,7 @@ cudaError_t cudaConfigureCall(dim3 grid_dim,
                               cudaStream_t stream) {
     if (grid_dim.x == 0 || grid_dim.y == 0 || grid_dim.z == 0 || block_dim.x == 0 ||
         block_dim.y == 0 || block_dim.z == 0) {
-        return fail(cudaErrorInvalidValue);
+        return fail(cudaErrorInvalidConfiguration);
     }
 
     const cudaError_t init_status = ensure_initialized();
@@ -8492,7 +8524,8 @@ cudaError_t cudaLaunchCooperativeKernel(const void* func,
                                          cudaStream_t stream) {
     const std::uint64_t block_count =
         static_cast<std::uint64_t>(gridDim.x) * gridDim.y * gridDim.z;
-    if (block_count == 0 || block_count > kMaxResidentCooperativeBlocks) {
+    // A zero extent is an invalid configuration, which cudaLaunchKernel reports.
+    if (block_count > kMaxResidentCooperativeBlocks) {
         return fail(cudaErrorCooperativeLaunchTooLarge);
     }
     return cudaLaunchKernel(func, gridDim, blockDim, args, sharedMem, stream);

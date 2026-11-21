@@ -91,7 +91,8 @@ int main(int argc, char** argv) {
     }
 
     float fresh_elapsed_ms = 0.0f;
-    if (cudaEventElapsedTime(&fresh_elapsed_ms, start, end) != cudaErrorInvalidValue) {
+    if (cudaEventElapsedTime(&fresh_elapsed_ms, start, end) !=
+        cudaErrorInvalidResourceHandle) {
         std::fprintf(stderr, "FAIL: elapsed time should reject unrecorded events\n");
         return 1;
     }
@@ -215,7 +216,8 @@ int main(int argc, char** argv) {
         return 1;
     }
 
-    if (cudaEventElapsedTime(&elapsed_ms, start, disable_timing) != cudaErrorInvalidValue) {
+    if (cudaEventElapsedTime(&elapsed_ms, start, disable_timing) !=
+        cudaErrorInvalidResourceHandle) {
         std::fprintf(stderr, "FAIL: cudaEventElapsedTime should reject disable_timing events\n");
         return 1;
     }

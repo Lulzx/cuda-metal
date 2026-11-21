@@ -4,6 +4,22 @@
 
 ## Synchronization and launch
 
+- Shared memory per block is capped at the Metal device's
+  `maxThreadgroupMemoryLength` (32 KB on every current Apple GPU), not CUDA's
+  48 KB default or a larger opt-in. `sharedMemPerBlock`,
+  `sharedMemPerBlockOptin` and `cudaFuncAttributes.maxDynamicSharedSizeBytes`
+  (static plus dynamic) report that cap, and `cudaFuncSetAttribute` refuses a
+  `cudaFuncAttributeMaxDynamicSharedMemorySize` above it. A launch whose
+  static plus dynamic shared memory exceeds it fails with
+  `cudaErrorInvalidValue` (driver: `CUDA_ERROR_INVALID_VALUE`) and runs
+  nothing, so a launch CUDA accepts between 32 KB and 48 KB is refused rather
+  than served from slower memory. There is no device-memory spill fallback.
+- Launch configuration errors that CUDA itself defines -- a zero grid or block
+  extent (`cudaErrorInvalidConfiguration`) and too much shared memory -- are
+  reported by the launch and `cudaGetLastError` only, as in CUDA; a later
+  synchronize succeeds. CuMetal's own launch failures (lowering, registration,
+  Metal submission) are additionally reported by the next synchronize, because
+  generated `<<<...>>>` stubs discard the launch's return value.
 - Cooperative-grid synchronization is limited to a conservatively resident
   grid capped at one block per reported GPU core. Oversubscription is rejected.
 - Dynamic launch uses a fixed 1 MiB device queue with at most 1,023 child
@@ -35,7 +51,10 @@
   between the two records, including any idle gap between command buffers,
   and use Metal's command-buffer timestamps rather than per-kernel counters.
   A record whose command buffer reports no GPU timestamp makes the query
-  return `cudaErrorNotSupported`.
+  return `cudaErrorNotSupported`. An event that was never recorded, or was
+  created with `cudaEventDisableTiming`, returns
+  `cudaErrorInvalidResourceHandle` (driver: `CUDA_ERROR_INVALID_HANDLE`), as
+  in CUDA.
 - CUDA device clocks use a device-wide atomic counter with a fixed monotonic
   quantum. They preserve wait-loop progress and unsigned wraparound behavior,
   but values are not GPU cycles and cannot be used for cycle-accurate timing.
