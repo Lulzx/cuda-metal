@@ -38,7 +38,7 @@ read -r pass_count waive_count total_count < <(
     ' "${MANIFEST}"
 )
 nonpassing_count=$((total_count - pass_count - waive_count))
-headline="all ${pass_count} pass"
+headline="samples; ${pass_count} pass."
 if ! grep -Fq "${headline}" "${KNOWN_GAPS}"; then
     echo "FAIL: docs/known-gaps/verification.md sweep headline does not match the manifest" >&2
     echo "Expected fragment: ${headline}" >&2
