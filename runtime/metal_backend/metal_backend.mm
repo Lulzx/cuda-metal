@@ -836,6 +836,14 @@ struct BackendState {
     // raw device address embedded in a struct, so the encoder must be told
     // about all of them, not just the ones bound as arguments.
     std::vector<id<MTLBuffer>> live_buffers;
+    // Every live allocation (heap arenas, standalone buffers, registered host
+    // memory), attached to every command queue. A kernel that follows a
+    // device address stored in memory touches an allocation it never bound;
+    // without residency the GPU read zeros and dropped the writes silently
+    // (#224). Residency carries no usage declaration, so unlike
+    // CUMETAL_USE_METAL_DEVICE_ADDRESSES' useResources it creates no hazard
+    // dependency between streams. nil before macOS 15 or if creation fails.
+    id residency_set = nil;
     std::vector<std::weak_ptr<StreamImpl>> streams;
 };
 
@@ -1092,6 +1100,18 @@ bool ensure_initialized(std::string* error_message) {
                 *error_message = "failed to create Metal command queue";
             }
             return false;
+        }
+        if (@available(macOS 15.0, *)) {
+            MTLResidencySetDescriptor* descriptor = [[MTLResidencySetDescriptor alloc] init];
+            descriptor.label = @"cumetal.allocations";
+            descriptor.initialCapacity = 64;
+            NSError* residency_error = nil;
+            id<MTLResidencySet> set =
+                [backend.device newResidencySetWithDescriptor:descriptor error:&residency_error];
+            if (set != nil) {
+                [backend.queue addResidencySet:set];
+                backend.residency_set = set;
+            }
         }
         backend.default_access_event = [backend.device newSharedEvent];
         if (backend.default_access_event == nil) {
@@ -1793,12 +1813,28 @@ bool metal_device_addresses_enabled() {
     return enabled;
 }
 
+// Adds or removes one allocation from the residency set; caller holds the
+// backend mutex.
+void track_residency_locked(BackendState& backend, id allocation, bool resident) {
+    if (@available(macOS 15.0, *)) {
+        id<MTLResidencySet> set = backend.residency_set;
+        if (set == nil || allocation == nil) return;
+        if (resident) {
+            [set addAllocation:(id<MTLAllocation>)allocation];
+        } else {
+            [set removeAllocation:(id<MTLAllocation>)allocation];
+        }
+        [set commit];
+    }
+}
+
 void unregister_live_buffer(id<MTLBuffer> buffer) {
     if (buffer == nil) {
         return;
     }
     BackendState& backend = state();
     std::lock_guard<std::mutex> lock(backend.mutex);
+    track_residency_locked(backend, buffer, false);
     auto& live = backend.live_buffers;
     for (auto it = live.begin(); it != live.end(); ++it) {
         if (*it == buffer) {
@@ -1886,6 +1922,7 @@ id<MTLBuffer> allocate_buffer_from_heap_locked(BackendState& backend,
     }
 
     backend.buffer_heaps.push_back(BackendState::HeapArena{.heap = heap, .size = arena_size});
+    track_residency_locked(backend, heap, true);
     id<MTLBuffer> buffer = [heap newBufferWithLength:size options:kBufferOptions];
     if (buffer == nil && error_message != nullptr) {
         *error_message = "newBufferWithLength from heap failed";
@@ -2183,6 +2220,7 @@ static cudaError_t allocate_buffer_impl(std::size_t size, bool allow_heap,
 
     if (!use_heap) {
         backend.live_buffers.push_back(buffer);
+        track_residency_locked(backend, buffer, true);
     }
 
     *out_buffer = std::make_shared<BufferImpl>(buffer, use_heap);
@@ -2231,6 +2269,7 @@ cudaError_t wrap_host_buffer(void* ptr,
         error_message->clear();
     }
     backend.live_buffers.push_back(buffer);
+    track_residency_locked(backend, buffer, true);
     *out_buffer = std::make_shared<BufferImpl>(buffer, false);
     return cudaSuccess;
 }
@@ -2258,6 +2297,11 @@ cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
             *error_message = "failed to create stream command queue";
         }
         return cudaErrorUnknown;
+    }
+    if (@available(macOS 15.0, *)) {
+        if (backend.residency_set != nil) {
+            [queue addResidencySet:(id<MTLResidencySet>)backend.residency_set];
+        }
     }
     id<MTLSharedEvent> access_event = [backend.device newSharedEvent];
     if (access_event == nil) {

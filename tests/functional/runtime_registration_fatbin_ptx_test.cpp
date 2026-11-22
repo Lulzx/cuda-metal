@@ -27,8 +27,9 @@ void __cudaUnregisterFatBinary(void** fat_cubin_handle);
 // failure would otherwise become visible. Every deliberately failed launch below
 // therefore asserts that propagation and consumes it, so that a later
 // synchronization cannot report it and be mistaken for a different failure.
-bool consume_expected_launch_failure(const char* what) {
-    if (cudaDeviceSynchronize() != cudaErrorInvalidValue) {
+bool consume_expected_launch_failure(const char* what,
+                                     cudaError_t expected = cudaErrorInvalidValue) {
+    if (cudaDeviceSynchronize() != expected) {
         std::fprintf(stderr,
                      "FAIL: cudaDeviceSynchronize should report the failed launch (%s)\n",
                      what);
@@ -361,8 +362,9 @@ int main(int argc, char** argv) {
         nullptr, 0, nullptr, nullptr, nullptr, nullptr, nullptr);
     if (cudaLaunchKernel(
             reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
-            block_dim, args, 0, nullptr) != cudaErrorInvalidValue ||
-        !consume_expected_launch_failure("malformed compressed fatbin")) {
+            block_dim, args, 0, nullptr) != cudaErrorNoKernelImageForDevice ||
+        !consume_expected_launch_failure("malformed compressed fatbin",
+                                         cudaErrorNoKernelImageForDevice)) {
         std::fprintf(stderr,
                      "FAIL: malformed compressed registration was launchable\n");
         __cudaUnregisterFatBinary(malformed_compressed_handle);
@@ -399,8 +401,8 @@ int main(int argc, char** argv) {
                 reinterpret_cast<const void*>(&vector_add_host_stub), grid_dim,
                 block_dim, args, 0, nullptr);
             const cudaError_t unsupported_sync = cudaDeviceSynchronize();
-            if (unsupported_launch != cudaErrorInvalidValue ||
-                unsupported_sync != cudaErrorInvalidValue) {
+            if (unsupported_launch != cudaErrorNoKernelImageForDevice ||
+                unsupported_sync != cudaErrorNoKernelImageForDevice) {
                 std::fprintf(stderr,
                              "FAIL: unsupported fatbin entry used the environment metallib fallback "
                              "(launch=%d sync=%d)\n",
@@ -712,12 +714,13 @@ int main(int argc, char** argv) {
                          block_dim,
                          args,
                          0,
-                         nullptr) != cudaErrorInvalidValue) {
+                         nullptr) != cudaErrorNoKernelImageForDevice) {
         std::fprintf(stderr,
                      "FAIL: malformed ELF registration should not produce a launchable kernel\n");
         return 1;
     }
-    if (!consume_expected_launch_failure("malformed ELF registration")) {
+    if (!consume_expected_launch_failure("malformed ELF registration",
+                                         cudaErrorNoKernelImageForDevice)) {
         return 1;
     }
     __cudaUnregisterFatBinary(fatbin_handle);
@@ -753,13 +756,14 @@ int main(int argc, char** argv) {
                          block_dim,
                          args,
                          0,
-                         nullptr) != cudaErrorInvalidValue) {
+                         nullptr) != cudaErrorNoKernelImageForDevice) {
         std::fprintf(
             stderr,
             "FAIL: out-of-range extended section count should not launch\n");
         return 1;
     }
-    if (!consume_expected_launch_failure("out-of-range extended section count")) {
+    if (!consume_expected_launch_failure("out-of-range extended section count",
+                                         cudaErrorNoKernelImageForDevice)) {
         return 1;
     }
     __cudaUnregisterFatBinary(fatbin_handle);

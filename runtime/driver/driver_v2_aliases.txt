@@ -1,0 +1,61 @@
+# Versioned driver API names (#230), passed to ld64 as -alias_list.
+#
+# NVIDIA's libcuda exports these entry points under their _v2 names (cuda.h
+# #defines the plain spelling to the _v2 one), so programs that resolve the
+# driver with dlopen/dlsym, or link against an alias libcuda, look the _v2
+# names up. CuMetal's unsuffixed implementations already have the _v2 ABI:
+# 64-bit CUdeviceptr, size_t sizes and pitches, and the size_t-based
+# CUDA_MEMCPY2D / CUDA_MEMCPY3D / CUDA_ARRAY3D_DESCRIPTOR layouts. Each line
+# makes the second symbol an alias at the same address as the first.
+#
+# Only names whose signature matches NVIDIA's _v2 export are listed:
+#   cuGraphInstantiate_v2 is CUDA 11's 5-argument form (error node + log).
+# cuGetProcAddress is not here: its unsuffixed export keeps the original
+# 4-argument ABI and cuGetProcAddress_v2 is a separate 5-argument function
+# (runtime/driver/cuda_driver.cpp).
+# Not aliased: cuCtxCreate_v3/_v4 (extra affinity/params arguments), and
+# entry points CuMetal does not implement (cuMemHostRegister, cuArrayCreate,
+# cuMemcpy2DUnaligned, cuStreamBeginCapture, ...).
+#
+# tests/functional/driver_v2_symbols_test.cpp checks every alias resolves to
+# the same address as its unsuffixed function.
+
+_cuCtxCreate _cuCtxCreate_v2
+_cuCtxDestroy _cuCtxDestroy_v2
+_cuCtxPopCurrent _cuCtxPopCurrent_v2
+_cuCtxPushCurrent _cuCtxPushCurrent_v2
+_cuDevicePrimaryCtxRelease _cuDevicePrimaryCtxRelease_v2
+_cuDevicePrimaryCtxReset _cuDevicePrimaryCtxReset_v2
+_cuDevicePrimaryCtxSetFlags _cuDevicePrimaryCtxSetFlags_v2
+_cuDeviceTotalMem _cuDeviceTotalMem_v2
+_cuModuleGetGlobal _cuModuleGetGlobal_v2
+_cuLinkCreate _cuLinkCreate_v2
+_cuLinkAddData _cuLinkAddData_v2
+_cuLinkAddFile _cuLinkAddFile_v2
+_cuMemGetInfo _cuMemGetInfo_v2
+_cuMemAlloc _cuMemAlloc_v2
+_cuMemAllocPitch _cuMemAllocPitch_v2
+_cuMemFree _cuMemFree_v2
+_cuMemGetAddressRange _cuMemGetAddressRange_v2
+_cuMemAllocHost _cuMemAllocHost_v2
+_cuMemHostGetDevicePointer _cuMemHostGetDevicePointer_v2
+_cuMemcpyHtoD _cuMemcpyHtoD_v2
+_cuMemcpyDtoH _cuMemcpyDtoH_v2
+_cuMemcpyDtoD _cuMemcpyDtoD_v2
+_cuMemcpyHtoDAsync _cuMemcpyHtoDAsync_v2
+_cuMemcpyDtoHAsync _cuMemcpyDtoHAsync_v2
+_cuMemcpyDtoDAsync _cuMemcpyDtoDAsync_v2
+_cuMemcpy2D _cuMemcpy2D_v2
+_cuMemcpy2DAsync _cuMemcpy2DAsync_v2
+_cuMemcpy3D _cuMemcpy3D_v2
+_cuMemcpy3DAsync _cuMemcpy3DAsync_v2
+_cuMemsetD8 _cuMemsetD8_v2
+_cuMemsetD16 _cuMemsetD16_v2
+_cuMemsetD32 _cuMemsetD32_v2
+_cuMemsetD2D8 _cuMemsetD2D8_v2
+_cuMemsetD2D16 _cuMemsetD2D16_v2
+_cuMemsetD2D32 _cuMemsetD2D32_v2
+_cuArray3DCreate _cuArray3DCreate_v2
+_cuEventDestroy _cuEventDestroy_v2
+_cuStreamDestroy _cuStreamDestroy_v2
+_cuGraphInstantiate _cuGraphInstantiate_v2

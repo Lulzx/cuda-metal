@@ -1259,6 +1259,25 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             return 1;
         }
     }
+    // Every host-visible __global__ function gets a launch stub. Kernels that
+    // only the device pass sees (e.g. defined under #ifdef __CUDA_ARCH__)
+    // cannot be launched from this executable, so no metallib is built for
+    // them; say so rather than exiting silently (#223).
+    if (kernels.empty() && device_result.started && device_result.exit_code == 0 &&
+        std::filesystem::exists(metal_source)) {
+        std::string device_io_error;
+        const auto device_bytes =
+            cumetal::common::read_file_bytes(metal_source, &device_io_error);
+        const std::string_view device_text(
+            reinterpret_cast<const char*>(device_bytes.data()), device_bytes.size());
+        if (device_io_error.empty() &&
+            (device_text.find("\nkernel void ") != std::string_view::npos ||
+             device_text.rfind("kernel void ", 0) == 0)) {
+            std::cerr << "cumetalc warning: " << options.input
+                      << " defines device kernels with no host launch stub; they cannot be "
+                         "launched and no metallib is built for them\n";
+        }
+    }
     std::string metal_text;
     if (!kernels.empty()) {
         const auto metal_bytes = cumetal::common::read_file_bytes(metal_source, &io_error);

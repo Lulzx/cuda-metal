@@ -4150,12 +4150,43 @@ struct AstLowerer {
                                               MslType::uint(64)),
                         true));
             }
-            return declare_result(
-                operation,
-                MslExpression::member(
-                    expression_for(operation.operands[0]),
-                    "field" + operation.operands[1].text,
-                    result_type));
+            // The extraction may read a field as a different scalar of the
+            // same width: a by-value .b8[16] PTX parameter lowers to a struct
+            // of four uint words, and `ld.param.f32 [p+8]` reads word 2 as a
+            // float. That is a reinterpretation of the bits, never a numeric
+            // conversion (#231: it used to emit `float v = p.field2;`).
+            std::size_t field_index = 0;
+            try {
+                field_index = std::stoul(operation.operands[1].text);
+            } catch (...) {
+                fail(&operation, "struct aggregate extraction has a malformed index");
+                return std::nullopt;
+            }
+            if (field_index >= aggregate_type.elements.size()) {
+                fail(&operation, "struct aggregate extraction index is out of range");
+                return std::nullopt;
+            }
+            const ir::Type& field_type = aggregate_type.elements[field_index];
+            const MslType stored_type = lower_type(field_type);
+            MslExpr field = MslExpression::member(expression_for(operation.operands[0]),
+                                                  "field" + operation.operands[1].text,
+                                                  stored_type);
+            const ir::Type& result_ir_type = operation.result_types.front();
+            const bool scalar_pair =
+                (field_type.kind == ir::TypeKind::kInteger ||
+                 field_type.kind == ir::TypeKind::kFloat) &&
+                (result_ir_type.kind == ir::TypeKind::kInteger ||
+                 result_ir_type.kind == ir::TypeKind::kFloat);
+            if (scalar_pair && field_type.kind != result_ir_type.kind) {
+                if (field_type.bit_width != result_ir_type.bit_width) {
+                    fail(&operation, "struct field read changes both the scalar kind and width");
+                    return std::nullopt;
+                }
+                field = MslExpression::bitcast(result_type, std::move(field));
+            } else if (stored_type.str() != result_type.str()) {
+                field = MslExpression::cast(result_type, std::move(field));
+            }
+            return declare_result(operation, std::move(field));
         }
 
         if (operation.opcode == ir::OpCode::kAggregateConstruct) {
@@ -4389,12 +4420,15 @@ struct AstLowerer {
                         operation,
                         MslExpression::call(div_target, {one, arguments[0]},
                                             MslType::uint(64)));
-                } else if (callee->second == "fmin" || callee->second == "fmax") {
+                } else if (callee->second == "fmin" || callee->second == "fmax" ||
+                           callee->second == "min" || callee->second == "max") {
+                    // PTX min/max.f64 (#231: xgrid-gpu) have libdevice
+                    // fmin/fmax semantics: a NaN operand yields the other.
+                    const bool is_min =
+                        callee->second == "fmin" || callee->second == "min";
                     target = mode == "fast48"
-                                 ? "cm_fp64_fast_" +
-                                       std::string(callee->second == "fmin" ? "min" : "max")
-                                 : "vf64_" +
-                                       std::string(callee->second == "fmin" ? "min" : "max");
+                                 ? "cm_fp64_fast_" + std::string(is_min ? "min" : "max")
+                                 : "vf64_" + std::string(is_min ? "min" : "max");
                 } else if (callee->second == "remainder") {
                     target = mode == "fast48" ? "cm_fp64_fast_remainder"
                                                : "vf64_remainder";

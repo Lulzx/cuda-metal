@@ -181,6 +181,10 @@ half-warp shared-memory ordering is covered by a production GPU test.
 |------------|------------------------|-------|
 | `sqrt.rn.f32` | `llvm.sqrt` | Square root |
 | `rsqrt.approx.f32` | `llvm.rsqrt` | Reciprocal square root |
+| `sqrt.rn.f64` | FP64 mode sqrt (typed PTX) | `cm_fp64_fast_sqrt` / `vf64_wide_sqrt` / `vf64_sqrt_rne` (correctly rounded) |
+| `sqrt.{rz,rm,rp}.f64` | `vf64_sqrt_round` (typed PTX) | Directed rounding, exact in every FP64 mode |
+| `rsqrt.approx.f64` | `1 / sqrt(x)` in the FP64 mode (typed PTX) | At least as accurate as PTX's approximation |
+| `min.f64` / `max.f64` | FP64 mode min/max (typed PTX) | A NaN operand yields the other; fast48/wide48 canonicalize operands first |
 | `ex2.approx.f32` | `llvm.exp2` | 2^x (exp base 2) |
 | `lg2.approx.f32` | `llvm.log2` | log₂(x) |
 | `sin.approx.f32` | `llvm.sin` | Sine; precision may differ ≤1 ULP from NVIDIA |

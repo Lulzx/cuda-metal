@@ -170,6 +170,95 @@ All notable changes to CuMetal are documented here. Format follows
   the GGML validation switch, and the printf buffer override, which also took
   the heap mutex for kernels without `printf`). These are now read once per
   process or only when relevant.
+
+- **Driver `_v2` entry points are exported (#230).** `cuCtxCreate_v2`,
+  `cuMemAlloc_v2`, `cuMemcpyHtoD_v2` and the rest of NVIDIA's 39 versioned
+  names for entry points CuMetal implements are linker aliases of the
+  unsuffixed functions, which already have the `_v2` ABI
+  (`runtime/driver/driver_v2_aliases.txt`). Programs that resolve the driver
+  with `dlsym`, such as xgrid-gpu, now load. `functional_driver_v2_symbols`
+  checks every alias against its unsuffixed function.
+- **`cuGetProcAddress` has NVIDIA's two ABIs.** The unsuffixed export took
+  CUDA 12's five arguments, so a caller that resolved it with `dlsym` and
+  passed CUDA 11.3's four left `symbolStatus` as whatever was in the fifth
+  argument register, which the function then wrote through. The unsuffixed
+  export now has the original four arguments and `cuGetProcAddress_v2` is the
+  five-argument function. `cuda.h` maps source-level `cuGetProcAddress` to
+  `_v2` as NVIDIA's CUDA 12 header does. Looking up `"cuGetProcAddress"` through
+  either function, or through `cudaGetDriverEntryPoint{,ByVersion}`, returns
+  the form the requested CUDA version expects: `_v2` from 12.0, the
+  four-argument form before. Warp, which `dlsym`s the plain name and passes a
+  NULL fifth argument, is unaffected.
+- **Graph instantiation has CUDA 12's ABI.** The runtime exported
+  `cudaGraphInstantiate` with CUDA 11's five arguments, so a CUDA 12 caller's
+  `flags` landed in `pErrorNode` and was written through. The exported
+  function now takes `(exec, graph, flags)`, and the five-argument spelling is
+  a C++ inline overload, as in NVIDIA's CUDA 12 `cuda_runtime.h`. The driver
+  adds `cuGraphInstantiateWithFlags`. `cuda.h` maps `cuGraphInstantiate` to it
+  from `CUDA_VERSION` 12000, while the exported `cuGraphInstantiate` and
+  `cuGraphInstantiate_v2` keep CUDA 11's five-argument ABI. `cuGetProcAddress`
+  and `cudaGetDriverEntryPoint{,ByVersion}` return `WithFlags` for
+  `"cuGraphInstantiate"` from 12.0 and the five-argument form before.
+  `AUTO_FREE_ON_LAUNCH` is honoured. `UPLOAD`, `DEVICE_LAUNCH`,
+  `USE_NODE_PRIORITY` and unknown bits return `CUDA_ERROR_INVALID_VALUE` /
+  `cudaErrorInvalidValue` instead of being ignored. `cudaTypedefs.h` gains
+  `PFN_cuGraphInstantiate_v{10000,11000,12000}`,
+  `PFN_cuGraphInstantiateWithFlags_v11040` and `PFN_cuGetProcAddress_v11030`.
+- **Run-time FP64 PTX takes the typed path with exact argument metadata
+  (#231).** `max.f64`/`min.f64` were accepted by the typed importer but had no
+  software-FP64 lowering, so every module with them (xgrid-gpu's
+  `biot_savart.ptx`) fell to the legacy driver JIT. They now use the mode's
+  min/max, and the module's three kernels run on the typed path in every FP64
+  mode (bit-exact against the host in ieee64). A float read from a by-value
+  `.b8` array parameter (`ld.param.f32 [p+8]`) was converted numerically from
+  the packed `uint` word instead of reinterpreted, so a 16-byte struct's
+  `float` field arrived as roughly 1e9; it is now `as_type<float>`. When the
+  typed path declines a module, `CUMETAL_DEBUG_ERRORS` prints the typed
+  backend's reason, and `CUMETAL_PTX_BACKEND=cumetal-ir` prints it
+  unconditionally before `cuModuleLoadData` returns `CUDA_ERROR_INVALID_PTX`.
+  `functional_driver_raw_ptx_fp64_abi_{fast48,wide48,ieee64,strict_typed}`
+  launch an xgrid-shaped module with a non-NULL-terminated `kernelParams`.
+- **`sqrt.rn.f64` and `rsqrt.approx.f64` on the typed PTX path (#232).** They
+  were refused as "only supported for binary32". `sqrt.rn.f64` uses the mode's
+  square root (correctly rounded in ieee64), `sqrt.{rz,rm,rp}.f64` use VF64's
+  directed-rounding square root in every mode, and `rsqrt.approx.f64` is
+  `1/sqrt(x)` in the active mode, at least as accurate as PTX's approximation.
+- **Allocations reached through stored device addresses are resident (#224).**
+  A kernel following a pointer it loaded from device memory touched an
+  allocation it never bound; in the default pointer mode the GPU read zeros
+  and dropped the writes for every allocation from 1 MiB up, with no error.
+  Every allocation now joins a Metal residency set on every command queue.
+  Residency declares no usage, so cross-stream concurrency is unaffected.
+- **Embedded pointers survive pinned-memory copies (#225).** A stream-ordered
+  copy between pinned host memory and device memory used a verbatim blit, so
+  pointers a kernel wrote reached the host as GPU addresses (PhysX contact
+  reports crashed dereferencing them) and host-written pointers reached
+  kernels as CPU addresses. The rewrite direction now follows where each end
+  lives, not the `cudaMemcpyKind` (`cudaMemcpyDefault` between pinned and
+  device memory resolves to device-to-device), and only copies needing no
+  rewrite stay on the blit. Restored device pointers are the application's
+  public pointers in both pointer modes.
+- **Driver memsets are stream-ordered (#211).** `cuMemsetD16Async` and
+  `cuMemsetD32Async` ignored their stream and wrote at once, and the
+  synchronous D16/D32/D2D forms and `cudaMemset2D`/`3D` did not wait for queued
+  kernels, so a clear could land before a kernel still writing the buffer.
+  All of them now share one element fill ordered like `cudaMemset` or
+  `cudaMemsetAsync`, including event waits and graph capture.
+- **Raw PTX through the driver API (#222).** `cuModuleLoadData` recognised
+  direct PTX text only up to 1 MiB; the bound is now 1 GiB. A module whose
+  kernels needed the FP64 or libdevice helpers left the typed driver JIT for
+  the legacy lowering, which built only the first entry and wrote no ABI
+  sidecar, so other kernels were missing and launches guessed argument counts.
+  The typed path now includes the helpers in each entry's translation unit and
+  retries a declined entry with the legacy MSL lowering; the legacy LLVM path
+  builds one metallib per entry. A module the JIT cannot compile reports
+  `CUDA_ERROR_INVALID_PTX`, and `cuModuleGetFunction` on a name a JIT-built
+  module lacks reports `CUDA_ERROR_NOT_FOUND`.
+- **Failure paths that looked like success (#223).** A registered kernel with
+  no metallib fails its launch with `cudaErrorNoKernelImageForDevice` instead
+  of `cudaErrorInvalidValue`, and `cumetalc` warns when device-only kernels
+  (for example under `#ifdef __CUDA_ARCH__`) get no metallib.
+
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the

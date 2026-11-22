@@ -1,3 +1,7 @@
+// This file defines the driver entry points under their exported names
+// (both cuGetProcAddress ABIs, CUDA 11's 5-argument cuGraphInstantiate), so
+// it opts out of cuda.h's source-level versioned-name mappings.
+#define CUMETAL_DRIVER_API_IMPLEMENTATION 1
 #include "cuda.h"
 
 #include "cumetal/air_emitter/emitter.h"
@@ -56,6 +60,15 @@ struct DriverGlobalSymbol {
 struct CUmod_st {
     std::string metallib_path;
     bool owns_metallib_path = false;
+    // The legacy driver JIT lowers one PTX entry per metallib, so a module it
+    // built holds one metallib per entry (owned like metallib_path). Empty for
+    // every other module: all its kernels live in metallib_path.
+    std::map<std::string, std::string> entry_metallibs;
+    // Entry names of a module the driver JIT built from PTX; looking up any
+    // other name is CUDA_ERROR_NOT_FOUND, as in CUDA. Unset for modules whose
+    // kernel list the driver does not know (prebuilt metallibs).
+    bool entry_names_known = false;
+    std::vector<std::string> entry_names;
     std::vector<CUfunc_st*> functions;
     // One allocation per symbol per module: two kernels in the same module that
     // reference the same device global must see the same storage.
@@ -65,6 +78,8 @@ struct CUmod_st {
 struct CUfunc_st {
     CUmod_st* module = nullptr;
     std::string kernel_name;
+    // The metallib holding this kernel: the module's, or its own entry's.
+    std::string metallib_path;
     std::uint32_t argument_count = 0;
     bool has_argument_count = false;
     std::vector<cumetalKernelArgInfo_t> argument_info;
@@ -81,10 +96,19 @@ extern "C" cudaError_t cumetalSetMaxDynamicSharedBytes(
 extern "C" int cumetalRuntimeGetAllocationInfo(const void* ptr, void** base_out, size_t* size_out);
 extern "C" int cumetalRuntimeIsManaged(const void* ptr);
 extern "C" void* cumetalRuntimeGetHostPointer(const void* ptr, size_t count);
+extern "C" cudaError_t cumetalRuntimeMemsetElements(void* dev_ptr, size_t pitch, unsigned int value,
+                                                    size_t element_size, size_t width,
+                                                    size_t height, cudaStream_t stream,
+                                                    int synchronous);
 
 constexpr int kCudaCompatVersion = 12000;
 constexpr std::uint32_t kFatbinWrapperMagic = 0x466243b1u;
 constexpr std::size_t kMaxImageBytes = 64ull * 1024ull * 1024ull;
+// Raw PTX text is a NUL-terminated string. It is only read once its first
+// directive has been seen, so the bound exists to stop a missing terminator,
+// not to cap real modules: generated PTX passes 64 MiB (COLMAP's PatchMatch
+// module is 63 MB, and Warp loads PTX rather than cubin).
+constexpr std::size_t kMaxPtxTextBytes = 1024ull * 1024ull * 1024ull;
 
 struct FatbinWrapper {
     std::uint32_t magic = 0;
@@ -235,7 +259,7 @@ CUresult query_function_properties(
         if (!has_current_context_locked(state)) return CUDA_ERROR_INVALID_CONTEXT;
         if (!is_valid_function_locked(state, function) || function->module == nullptr)
             return CUDA_ERROR_INVALID_VALUE;
-        metallib_path = function->module->metallib_path;
+        metallib_path = function->metallib_path;
         kernel_name = function->kernel_name;
     }
     std::string error;
@@ -378,7 +402,7 @@ void load_function_argument_count(CUfunc_st* function) {
     // malformed is abandoned in favour of the scan below, which is correct,
     // just slower and noisier.
     std::vector<SidecarKernel> kernels;
-    parse_abi_sidecar(function->module->metallib_path, &kernels);
+    parse_abi_sidecar(function->metallib_path, &kernels);
     for (SidecarKernel& kernel : kernels) {
         if (kernel.name == function->kernel_name && !kernel.info.empty()) {
             function->argument_count = static_cast<std::uint32_t>(kernel.info.size());
@@ -391,12 +415,12 @@ void load_function_argument_count(CUfunc_st* function) {
 
     std::string error;
     const auto bytes =
-        cumetal::common::read_file_bytes(function->module->metallib_path, &error);
+        cumetal::common::read_file_bytes(function->metallib_path, &error);
     if (bytes.empty()) {
         return;
     }
     const auto summary = cumetal::common::inspect_metallib_bytes(
-        function->module->metallib_path, bytes, 0);
+        function->metallib_path, bytes, 0);
     for (const auto& kernel : summary.kernels) {
         if (kernel.name != function->kernel_name) {
             continue;
@@ -553,7 +577,14 @@ bool parse_direct_ptx_image(const void* image, std::string* out_ptx) {
         return false;
     }
 
-    return extract_ptx_cstr(chars, 1ull << 20, out_ptx);
+    if (!extract_ptx_cstr(chars, kMaxPtxTextBytes, out_ptx)) {
+        std::fprintf(stderr,
+                     "cumetal: PTX image is not NUL-terminated within %zu bytes or has no "
+                     ".version/.entry; refusing it\n",
+                     kMaxPtxTextBytes);
+        return false;
+    }
+    return true;
 }
 
 bool parse_fatbin_blob_ptx(const void* image, std::string* out_ptx) {
@@ -619,6 +650,36 @@ bool parse_ptx_image(const void* image, std::string* out_ptx) {
            cumetal::fatbin::ElfPtxStatus::kFound;
 }
 
+// An xcrun-built metallib carries no kernel.arg_count metadata, so both
+// driver JIT paths write the ABI sidecar the driver reads for exact argument
+// counts and static shared sizes. Without it cuLaunchKernel falls back to
+// scanning kernelParams for a NULL terminator CUDA never promises, which can
+// walk off the caller's array (#222).
+bool write_driver_abi_sidecar(const cumetal::ptx::ModuleInfo& module, const std::string& ptx,
+                              const std::filesystem::path& metallib,
+                              const std::string& only_entry = {}) {
+    std::string sidecar = "CUMETAL_ABI_V2\n";
+    for (const auto& entry : module.entries) {
+        if (!only_entry.empty() && entry.name != only_entry) continue;
+        sidecar += "kernel " + entry.name + "\n";
+        sidecar += "shared " +
+                   std::to_string(cumetal::ptx::compute_static_shared_bytes(ptx, entry.name)) +
+                   "\n";
+        for (const auto& param : entry.params) {
+            sidecar += param.is_pointer
+                           ? "arg buffer 8\n"
+                           : "arg bytes " +
+                                 std::to_string(param.byte_size == 0 ? std::size_t{8}
+                                                                     : param.byte_size) +
+                                 "\n";
+        }
+    }
+    const std::vector<std::uint8_t> sidecar_bytes(sidecar.begin(), sidecar.end());
+    std::string sidecar_error;
+    return cumetal::common::write_file_bytes(metallib.string() + ".cumetal-abi", sidecar_bytes,
+                                             &sidecar_error);
+}
+
 // Typed-first PTX JIT for the driver path, mirroring the registration
 // JIT's backend policy: cumetal-ir by default with a legacy retry on
 // typed refusals, strict under CUMETAL_PTX_BACKEND=cumetal-ir, and
@@ -643,9 +704,15 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         for (const auto& path : metal_paths) std::filesystem::remove(path, ec);
     };
 
+    bool needs_fp64_support = false;
+    bool needs_libdevice_support = false;
     cumetal::ptx::LowerToMetalOptions options;
     options.backend = cumetal::ptx::PtxMetalBackend::kCumetalIr;
-    options.allow_legacy_fallback = false;
+    // As on the registration path: an entry the typed backend declines is
+    // retried with the legacy MSL lowering, so one entry cannot send the whole
+    // module to the per-entry LLVM path. Strict typed selection keeps a
+    // refusal a refusal.
+    options.allow_legacy_fallback = backend != "cumetal-ir";
     options.fp64_mode = std::string(
         cumetal::ptx::fp64_mode_name(cumetal::ptx::fp64_mode_from_env()));
     for (std::size_t i = 0; i < parsed.module.entries.size(); ++i) {
@@ -653,22 +720,45 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         const cumetal::ptx::LowerToMetalResult lowered =
             cumetal::ptx::lower_ptx_to_metal_source(ptx, options);
         if (!lowered.ok || lowered.metal_source.empty() || lowered.approximate) {
-            if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
+            // Say why (#231). When the typed backend declines and the legacy
+            // MSL retry also produces nothing, the typed reason survives only
+            // as a fallback warning, so report the warnings too.
+            std::string reason = lowered.error;
+            if (reason.empty() && lowered.approximate) {
+                reason = "the lowering is approximate";
+            }
+            if (lowered.error.empty()) {
+                for (const std::string& warning : lowered.warnings) {
+                    reason += (reason.empty() ? "" : "; ") + warning;
+                }
+            }
+            if (reason.empty()) reason = "no MSL produced";
+            // Strict typed selection turns this into a load failure, so the
+            // reason is printed unconditionally there; otherwise the module
+            // continues on the legacy JIT and the reason is a diagnostic.
+            if (backend == "cumetal-ir") {
+                std::fprintf(stderr,
+                             "CuMetal: CUMETAL_PTX_BACKEND=cumetal-ir cannot load kernel "
+                             "'%s': %s\n",
+                             options.entry_name.c_str(), reason.c_str());
+            } else if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
                 std::fprintf(stderr,
                              "CUMETAL_DEBUG_ERRORS: typed PTX lowering declined "
-                             "'%s': %s\n",
-                             options.entry_name.c_str(),
-                             lowered.error.empty() ? "no MSL produced"
-                                                   : lowered.error.c_str());
+                             "'%s', using the legacy JIT for this module: %s\n",
+                             options.entry_name.c_str(), reason.c_str());
             }
             cleanup_metal();
             return false;
         }
+        // FP64 and libdevice helpers must share each kernel's translation
+        // unit, as on the registration path. Sending such modules to the
+        // legacy lowering instead lost every entry but the first (#222).
         if (lowered.metal_source.find("cm_fp64_") != std::string::npos ||
-            lowered.metal_source.find("cm_libdevice_") != std::string::npos ||
             lowered.metal_source.find("vf64_") != std::string::npos) {
-            cleanup_metal();
-            return false;
+            needs_fp64_support = true;
+        }
+        if (lowered.metal_source.find("cm_libdevice_") != std::string::npos) {
+            needs_libdevice_support = true;
         }
         const std::filesystem::path metal_path =
             tmp / ("cumetal-driver-typed-" + std::to_string(stamp) + "-" +
@@ -687,9 +777,6 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         tmp / ("cumetal-driver-typed-" + std::to_string(stamp) + ".metallib");
     cumetal::air_emitter::EmitOptions emit_options;
     emit_options.input = metal_paths.front();
-    for (std::size_t i = 1; i < metal_paths.size(); ++i) {
-        emit_options.additional_link_inputs.push_back(metal_paths[i]);
-    }
     emit_options.output = metallib_path;
     emit_options.mode = cumetal::air_emitter::EmitMode::kXcrun;
     emit_options.overwrite = true;
@@ -698,6 +785,52 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
     emit_options.kernel_name = parsed.module.entries.front().name;
     emit_options.math_mode =
         cumetal::metal_math_mode_name(cumetal::current_metal_math_mode());
+    const std::filesystem::path fp64_support =
+        cumetal::common::metal_support_path("cumetal_fp64_inline_support.metal", CUMETAL_SOURCE_DIR);
+    const std::filesystem::path libdevice_support =
+        cumetal::common::metal_support_path("cumetal_libdevice_support.metal", CUMETAL_SOURCE_DIR);
+    if (needs_fp64_support) emit_options.precise_textual_include_inputs.push_back(fp64_support);
+    if (needs_libdevice_support) emit_options.textual_include_inputs.push_back(libdevice_support);
+    const std::size_t entry_files = metal_paths.size();
+    for (std::size_t i = 1; i < entry_files; ++i) {
+        if (!needs_fp64_support && !needs_libdevice_support) {
+            emit_options.additional_link_inputs.push_back(metal_paths[i]);
+            continue;
+        }
+        // The emitter applies textual includes to its primary input only, so
+        // every other entry gets the same framing written out: the FP64
+        // helpers compiled IEEE-safe without contraction, then the caller's
+        // math mode for the kernel itself.
+        std::string combined;
+        if (needs_fp64_support) {
+            combined += "#pragma METAL fp math_mode(safe)\n#pragma METAL fp contract(off)\n";
+            combined += "#include \"" + std::filesystem::absolute(fp64_support).string() + "\"\n";
+            combined += std::string("#pragma METAL fp math_mode(") +
+                        (emit_options.math_mode == "fast" ? "fast" : "safe") + ")\n" +
+                        "#pragma METAL fp contract(" +
+                        (emit_options.fp_contract ? "fast" : "off") + ")\n";
+        }
+        if (needs_libdevice_support) {
+            combined +=
+                "#include \"" + std::filesystem::absolute(libdevice_support).string() + "\"\n";
+        }
+        combined += "#include \"" + std::filesystem::absolute(metal_paths[i]).string() + "\"\n";
+        const std::filesystem::path combined_path =
+            tmp / ("cumetal-driver-typed-" + std::to_string(stamp) + "-" + std::to_string(i) +
+                   "-tu.metal");
+        std::string io_error;
+        const std::vector<std::uint8_t> combined_bytes(combined.begin(), combined.end());
+        if (!cumetal::common::write_file_bytes(combined_path, combined_bytes, &io_error)) {
+            cleanup_metal();
+            return false;
+        }
+        metal_paths.push_back(combined_path);
+        if (needs_fp64_support) {
+            emit_options.precise_link_inputs.push_back(combined_path);
+        } else {
+            emit_options.additional_link_inputs.push_back(combined_path);
+        }
+    }
     const cumetal::air_emitter::EmitResult emitted =
         cumetal::air_emitter::emit_metallib(emit_options);
     cleanup_metal();
@@ -717,80 +850,21 @@ bool try_typed_ptx_to_temp_metallib(const std::string& ptx, std::string* out_pat
         if (toolchain_missing != nullptr) *toolchain_missing = true;
         return false;
     }
-    // The xcrun-built metallib carries no kernel.arg_count metadata (the
-    // legacy AIR path stamps it), so write the ABI sidecar the driver
-    // reads for exact argument counts. Without it cuLaunchKernel falls
-    // back to scanning kernelParams for a NULL terminator CUDA never
-    // promises, which can walk off the caller's array.
-    {
-        std::string sidecar = "CUMETAL_ABI_V2\n";
-        for (const auto& entry : parsed.module.entries) {
-            sidecar += "kernel " + entry.name + "\n";
-            sidecar += "shared " +
-                       std::to_string(cumetal::ptx::compute_static_shared_bytes(
-                           ptx, entry.name)) +
-                       "\n";
-            for (const auto& param : entry.params) {
-                sidecar += param.is_pointer
-                               ? "arg buffer 8\n"
-                               : "arg bytes " +
-                                     std::to_string(param.byte_size == 0
-                                                        ? std::size_t{8}
-                                                        : param.byte_size) +
-                                     "\n";
-            }
-        }
-        const std::vector<std::uint8_t> sidecar_bytes(sidecar.begin(),
-                                                      sidecar.end());
-        std::string sidecar_error;
-        if (!cumetal::common::write_file_bytes(
-                emitted.output.string() + ".cumetal-abi", sidecar_bytes,
-                &sidecar_error)) {
-            std::error_code ec;
-            std::filesystem::remove(emitted.output, ec);
-            return false;
-        }
+    if (!write_driver_abi_sidecar(parsed.module, ptx, emitted.output)) {
+        std::error_code ec;
+        std::filesystem::remove(emitted.output, ec);
+        return false;
     }
     *out_path = emitted.output.string();
     return true;
 }
 
-bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
-                               bool* toolchain_missing) {
-    if (ptx.empty() || out_path == nullptr) {
-        return false;
-    }
-    if (try_typed_ptx_to_temp_metallib(ptx, out_path, toolchain_missing)) {
-        return true;
-    }
-    const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
-    if (backend_env != nullptr && std::string(backend_env) == "cumetal-ir") {
-        // Strict typed selection: a typed refusal stays a refusal (the
-        // toolchain flag from the typed attempt, when set, still lets the
-        // caller report JIT_COMPILER_NOT_FOUND accurately).
-        return false;
-    }
-
-    // Default to kEmulate: Apple Silicon GPU rejects double-precision ALU ops
-    // (fmul double, @llvm.fma.f64) at pipeline-creation time even though the
-    // xcrun metal compiler accepts them.  kEmulate uses Dekker FP32-pair
-    // arithmetic (~48-bit significand) which runs on all Apple Silicon hardware.
-    // Set CUMETAL_FP64_MODE=native to force kNative (IEEE 754 double, fails
-    // at runtime on current hardware but useful for testing the compilation path).
-    cumetal::ptx::LowerToLlvmOptions lower_opts;
-    lower_opts.fp64_mode = cumetal::ptx::fp64_mode_from_env();
-    // Emulated FP64 uses Dekker FP32-pair arithmetic (~48-bit significand), not full
-    // IEEE-754 double. Warn once when a kernel actually contains double-precision
-    // ops so numerically sensitive code knows the reduced precision is in effect.
-    if (lower_opts.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate &&
-        ptx.find(".f64") != std::string::npos) {
-        cumetal::warn_once(
-            "fp64-emulate",
-            "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
-            "arithmetic (~48-bit significand with binary32 exponent range, not full "
-            "precision. Set CUMETAL_FP64_MODE=native to compile true doubles (fails "
-            "at launch on current Apple Silicon)");
-    }
+// One PTX entry through the legacy PTX -> LLVM -> AIR lowering, with the
+// ABI sidecar describing that entry.
+bool emit_legacy_entry_metallib(const std::string& ptx,
+                                const cumetal::ptx::LowerToLlvmOptions& lower_opts,
+                                const cumetal::ptx::ModuleInfo& module, std::string* out_path,
+                                bool* toolchain_missing) {
     const auto lowered = cumetal::ptx::lower_ptx_to_llvm_ir(ptx, lower_opts);
     if (!lowered.ok || lowered.llvm_ir.empty()) {
         if (cumetal::diag_env_truthy("CUMETAL_DEBUG_ERRORS")) {
@@ -805,10 +879,12 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
     }
 
     const auto stamp = std::chrono::steady_clock::now().time_since_epoch().count();
-    const std::filesystem::path ll_path =
-        std::filesystem::temp_directory_path() / ("cumetal-driver-" + std::to_string(stamp) + ".ll");
+    static std::atomic<std::uint64_t> sequence{0};
+    const std::string stem = "cumetal-driver-" + std::to_string(stamp) + "-" +
+                             std::to_string(sequence.fetch_add(1));
+    const std::filesystem::path ll_path = std::filesystem::temp_directory_path() / (stem + ".ll");
     const std::filesystem::path metallib_path =
-        std::filesystem::temp_directory_path() / ("cumetal-driver-" + std::to_string(stamp) + ".metallib");
+        std::filesystem::temp_directory_path() / (stem + ".metallib");
 
     std::string io_error;
     const std::vector<std::uint8_t> ll_bytes(lowered.llvm_ir.begin(), lowered.llvm_ir.end());
@@ -869,7 +945,82 @@ bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
         return false;
     }
 
+    // The legacy lowering keeps the entry's PTX parameter list, so the same
+    // sidecar format describes it.
+    if (!write_driver_abi_sidecar(module, ptx, emitted.output, lowered.entry_name)) {
+        std::filesystem::remove(emitted.output, ec);
+        return false;
+    }
     *out_path = emitted.output.string();
+    return true;
+}
+
+bool emit_ptx_to_temp_metallib(const std::string& ptx, std::string* out_path,
+                               bool* toolchain_missing,
+                               std::map<std::string, std::string>* out_entry_metallibs) {
+    if (ptx.empty() || out_path == nullptr) {
+        return false;
+    }
+    if (try_typed_ptx_to_temp_metallib(ptx, out_path, toolchain_missing)) {
+        return true;
+    }
+    const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
+    if (backend_env != nullptr && std::string(backend_env) == "cumetal-ir") {
+        // Strict typed selection: a typed refusal stays a refusal (the
+        // toolchain flag from the typed attempt, when set, still lets the
+        // caller report JIT_COMPILER_NOT_FOUND accurately).
+        return false;
+    }
+
+    // Default to kEmulate: Apple Silicon GPU rejects double-precision ALU ops
+    // (fmul double, @llvm.fma.f64) at pipeline-creation time even though the
+    // xcrun metal compiler accepts them.  kEmulate uses Dekker FP32-pair
+    // arithmetic (~48-bit significand) which runs on all Apple Silicon hardware.
+    // Set CUMETAL_FP64_MODE=native to force kNative (IEEE 754 double, fails
+    // at runtime on current hardware but useful for testing the compilation path).
+    cumetal::ptx::LowerToLlvmOptions lower_opts;
+    lower_opts.fp64_mode = cumetal::ptx::fp64_mode_from_env();
+    // Emulated FP64 uses Dekker FP32-pair arithmetic (~48-bit significand), not full
+    // IEEE-754 double. Warn once when a kernel actually contains double-precision
+    // ops so numerically sensitive code knows the reduced precision is in effect.
+    if (lower_opts.fp64_mode == cumetal::ptx::Fp64Mode::kEmulate &&
+        ptx.find(".f64") != std::string::npos) {
+        cumetal::warn_once(
+            "fp64-emulate",
+            "kernel uses FP64 (double) instructions, emulated with Dekker FP32-pair "
+            "arithmetic (~48-bit significand with binary32 exponent range, not full "
+            "precision. Set CUMETAL_FP64_MODE=native to compile true doubles (fails "
+            "at launch on current Apple Silicon)");
+    }
+    // The legacy lowering emits one entry per LLVM module, and the emitter
+    // cannot link several of those into one metallib, so every entry gets its
+    // own metallib. Loading only the first entry left the rest of the module
+    // unlaunchable (#222).
+    const cumetal::ptx::ParseResult parsed = cumetal::ptx::parse_ptx(ptx);
+    if (!parsed.ok || parsed.module.entries.empty()) return false;
+    std::vector<std::pair<std::string, std::string>> built;
+    const auto discard_built = [&]() {
+        std::error_code ec;
+        for (const auto& [name, path] : built) {
+            (void)name;
+            std::filesystem::remove(path, ec);
+            std::filesystem::remove(path + ".cumetal-abi", ec);
+        }
+    };
+    for (const auto& entry : parsed.module.entries) {
+        lower_opts.entry_name = entry.name;
+        std::string entry_path;
+        if (!emit_legacy_entry_metallib(ptx, lower_opts, parsed.module, &entry_path,
+                                        toolchain_missing)) {
+            discard_built();
+            return false;
+        }
+        built.emplace_back(entry.name, std::move(entry_path));
+    }
+    *out_path = built.front().second;
+    if (out_entry_metallibs != nullptr && built.size() > 1) {
+        for (const auto& [name, path] : built) (*out_entry_metallibs)[name] = path;
+    }
     return true;
 }
 
@@ -1002,8 +1153,20 @@ CUresult cuInit(unsigned int flags) {
 // the table cannot drift from the real surface. The per-thread-default-stream
 // flag has no distinct entry points here: CuMetal's null stream already
 // follows the per-thread policy set at build time.
-CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
-                          uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
+//
+// Two exported functions, as in NVIDIA's libcuda: `cuGetProcAddress_v2` is
+// the CUDA 12 form with symbolStatus, and the unsuffixed `cuGetProcAddress`
+// keeps the original CUDA 11.3 4-argument ABI, so a caller that dlsyms the
+// plain name and calls it with four arguments never has a garbage fifth
+// argument dereferenced. cuda.h maps source-level calls to `_v2`.
+extern "C" CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
+                                     uint64_t flags);
+extern "C" CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                       CUgraphNode* phErrorNode, char* logBuffer,
+                                       size_t bufferSize);
+
+CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
+                             uint64_t /*flags*/, CUdriverProcAddressQueryResult* symbolStatus) {
     if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
     if (symbol == nullptr || pfn == nullptr || cudaVersion < 0) {
         return CUDA_ERROR_INVALID_VALUE;
@@ -1011,7 +1174,7 @@ CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
     *pfn = nullptr;
     static void* const self_handle = [] {
         Dl_info info{};
-        if (dladdr(reinterpret_cast<const void*>(&cuGetProcAddress), &info) == 0 ||
+        if (dladdr(reinterpret_cast<const void*>(&cuGetProcAddress_v2), &info) == 0 ||
             info.dli_fname == nullptr) {
             return static_cast<void*>(nullptr);
         }
@@ -1023,11 +1186,36 @@ CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
     if (std::strncmp(symbol, "cu", 2) != 0 || symbol[2] < 'A' || symbol[2] > 'Z') {
         return CUDA_ERROR_NOT_FOUND;
     }
+    // Names whose ABI changed at CUDA 12.0 and that CuMetal implements in
+    // both forms: a caller asking with cudaVersion >= 12000 expects the
+    // PFN_*_v12000 signature, an older one the previous form. Every other
+    // versioned name is an alias of one implementation.
+    struct VersionedName {
+        const char* name;
+        void* before_12000;
+        void* from_12000;
+    };
+    const VersionedName versioned[] = {
+        {"cuGetProcAddress", reinterpret_cast<void*>(&cuGetProcAddress),
+         reinterpret_cast<void*>(&cuGetProcAddress_v2)},
+        {"cuGraphInstantiate", reinterpret_cast<void*>(&cuGraphInstantiate),
+         reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)},
+    };
+    for (const VersionedName& entry : versioned) {
+        if (std::strcmp(symbol, entry.name) != 0) continue;
+        *pfn = cudaVersion >= 12000 ? entry.from_12000 : entry.before_12000;
+        if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
+        return CUDA_SUCCESS;
+    }
     void* resolved = dlsym(self_handle, symbol);
     if (resolved == nullptr) return CUDA_ERROR_NOT_FOUND;
     *pfn = resolved;
     if (symbolStatus != nullptr) *symbolStatus = CU_GET_PROC_ADDRESS_SUCCESS;
     return CUDA_SUCCESS;
+}
+
+CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion, uint64_t flags) {
+    return cuGetProcAddress_v2(symbol, pfn, cudaVersion, flags, nullptr);
 }
 
 CUresult cuDriverGetVersion(int* driverVersion) {
@@ -1776,11 +1964,18 @@ CUresult cuModuleGetGlobal(CUdeviceptr* dptr, size_t* bytes,
     }
     // A global is part of the module, not of whichever kernels the caller has
     // looked up so far: read every kernel block the compiler recorded.
-    std::vector<SidecarKernel> kernels;
-    parse_abi_sidecar(hmod->metallib_path, &kernels);
-    for (const SidecarKernel& kernel : kernels) {
-        for (const DriverGlobalSymbol& symbol : kernel.globals) {
-            if (symbol.name == name) return resolve(symbol);
+    std::vector<std::string> sidecar_owners = {hmod->metallib_path};
+    for (const auto& [entry, path] : hmod->entry_metallibs) {
+        (void)entry;
+        if (path != hmod->metallib_path) sidecar_owners.push_back(path);
+    }
+    for (const std::string& owner : sidecar_owners) {
+        std::vector<SidecarKernel> kernels;
+        parse_abi_sidecar(owner, &kernels);
+        for (const SidecarKernel& kernel : kernels) {
+            for (const DriverGlobalSymbol& symbol : kernel.globals) {
+                if (symbol.name == name) return resolve(symbol);
+            }
         }
     }
     return CUDA_ERROR_NOT_FOUND;
@@ -1901,19 +2096,43 @@ CUresult cuModuleLoadData(CUmodule* module, const void* image) {
     std::string ptx_text;
     if (parse_ptx_image(image, &ptx_text)) {
         std::string compiled_metallib_path;
+        std::map<std::string, std::string> entry_metallibs;
         bool toolchain_missing = false;
-        if (emit_ptx_to_temp_metallib(ptx_text, &compiled_metallib_path, &toolchain_missing)) {
+        if (emit_ptx_to_temp_metallib(ptx_text, &compiled_metallib_path, &toolchain_missing,
+                                      &entry_metallibs)) {
             const CUresult load_status =
                 create_module_from_path(compiled_metallib_path, /*owns_path=*/true, module);
             if (load_status != CUDA_SUCCESS) {
                 std::error_code ec;
                 std::filesystem::remove(compiled_metallib_path, ec);
+                for (const auto& [name, path] : entry_metallibs) {
+                    (void)name;
+                    std::filesystem::remove(path, ec);
+                }
+                return load_status;
+            }
+            (*module)->entry_metallibs = std::move(entry_metallibs);
+            const cumetal::ptx::ParseResult parsed = cumetal::ptx::parse_ptx(ptx_text);
+            if (parsed.ok) {
+                for (const auto& entry : parsed.module.entries)
+                    (*module)->entry_names.push_back(entry.name);
+                (*module)->entry_names_known = true;
             }
             return load_status;
         }
         if (toolchain_missing) {
             return CUDA_ERROR_JIT_COMPILER_NOT_FOUND;
         }
+        // The image is PTX, so no metallib parse below can accept it; CUDA
+        // reports a PTX module the JIT cannot compile as CUDA_ERROR_INVALID_PTX.
+        // Strict typed selection has already printed the typed reason.
+        const char* backend_env = std::getenv("CUMETAL_PTX_BACKEND");
+        if (backend_env == nullptr || std::string(backend_env) != "cumetal-ir") {
+            std::fprintf(stderr,
+                         "cumetal: PTX module could not be compiled for the Apple GPU "
+                         "(set CUMETAL_DEBUG_ERRORS=1 for the lowering diagnostic)\n");
+        }
+        return CUDA_ERROR_INVALID_PTX;
     }
 
     std::size_t size = 0;
@@ -1967,6 +2186,7 @@ CUresult cuModuleUnload(CUmodule module) {
     DriverState& state = driver_state();
     std::string owned_path;
     bool remove_owned_path = false;
+    std::vector<std::string> owned_entry_paths;
     std::vector<void*> released_globals;
     {
         std::lock_guard<std::mutex> lock(state.mutex);
@@ -1988,6 +2208,10 @@ CUresult cuModuleUnload(CUmodule module) {
             owned_path = module->metallib_path;
             remove_owned_path = true;
         }
+        for (const auto& [name, path] : module->entry_metallibs) {
+            (void)name;
+            if (path != module->metallib_path) owned_entry_paths.push_back(path);
+        }
         state.modules.erase(module);
     }
 
@@ -1999,6 +2223,11 @@ CUresult cuModuleUnload(CUmodule module) {
     if (remove_owned_path) {
         std::error_code ec;
         std::filesystem::remove(owned_path, ec);
+    }
+    for (const std::string& path : owned_entry_paths) {
+        std::error_code ec;
+        std::filesystem::remove(path, ec);
+        std::filesystem::remove(path + ".cumetal-abi", ec);
     }
     return CUDA_SUCCESS;
 }
@@ -2020,6 +2249,11 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
         if (!is_valid_module_locked(state, hmod)) {
             return CUDA_ERROR_INVALID_VALUE;
         }
+        if (hmod->entry_names_known &&
+            std::find(hmod->entry_names.begin(), hmod->entry_names.end(), name) ==
+                hmod->entry_names.end()) {
+            return CUDA_ERROR_NOT_FOUND;
+        }
     }
 
     auto* function = new (std::nothrow) CUfunc_st{};
@@ -2028,6 +2262,12 @@ CUresult cuModuleGetFunction(CUfunction* hfunc, CUmodule hmod, const char* name)
     }
     function->module = hmod;
     function->kernel_name = name;
+    {
+        const auto entry = hmod->entry_metallibs.find(function->kernel_name);
+        function->metallib_path = entry != hmod->entry_metallibs.end()
+                                      ? entry->second
+                                      : hmod->metallib_path;
+    }
     load_function_argument_count(function);
 
     {
@@ -2231,7 +2471,7 @@ CUresult cuLaunchKernel(CUfunction f,
     }
 
     const cumetalKernel_t kernel{
-        .metallib_path = f->module->metallib_path.c_str(),
+        .metallib_path = f->metallib_path.c_str(),
         .kernel_name = f->kernel_name.c_str(),
         .arg_count = static_cast<std::uint32_t>(arg_info.size()),
         .arg_info = arg_info.empty() ? nullptr : arg_info.data(),
@@ -2969,6 +3209,9 @@ CUresult cuGetErrorName(CUresult error, const char** pStr) {
         case CUDA_ERROR_NO_BINARY_FOR_GPU:
             *pStr = "CUDA_ERROR_NO_BINARY_FOR_GPU";
             break;
+        case CUDA_ERROR_INVALID_PTX:
+            *pStr = "CUDA_ERROR_INVALID_PTX";
+            break;
         case CUDA_ERROR_JIT_COMPILER_NOT_FOUND:
             *pStr = "CUDA_ERROR_JIT_COMPILER_NOT_FOUND";
             break;
@@ -3080,163 +3323,73 @@ CUresult cuLaunchCooperativeKernel(CUfunction f,
                           sharedMemBytes, hStream, kernelParams, nullptr);
 }
 
-// Memset 16/32-bit variants backed by the existing 8-bit path (via loop for correctness).
+// 16/32-bit and pitched memsets share the runtime's element fill, so the
+// synchronous forms are ordered after prior device work like cuMemsetD8 and
+// the *Async forms are ordered on their stream (and captured into graphs).
+namespace {
+CUresult memset_elements(CUdeviceptr dst, size_t pitch, unsigned int value, size_t element_size,
+                         size_t width, size_t height, CUstream stream, bool synchronous) {
+    const CUresult ready = require_initialized_context();
+    if (ready != CUDA_SUCCESS) {
+        return ready;
+    }
+    return map_cuda_error(cumetalRuntimeMemsetElements(
+        reinterpret_cast<void*>(static_cast<std::uintptr_t>(dst)), pitch, value, element_size,
+        width, height, reinterpret_cast<cudaStream_t>(stream), synchronous ? 1 : 0));
+}
+}  // namespace
+
 CUresult cuMemsetD16(CUdeviceptr dstDevice, unsigned short us, size_t N) {
-    if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    auto* ptr = static_cast<unsigned short*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned short)));
-    if (ptr == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = us;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, N * sizeof(unsigned short), us, sizeof(unsigned short), N, 1,
+                           nullptr, true);
 }
 
 CUresult cuMemsetD32(CUdeviceptr dstDevice, unsigned int ui, size_t N) {
-    if (dstDevice == 0) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    auto* ptr = static_cast<unsigned int*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<uintptr_t>(dstDevice)),
-        N * sizeof(unsigned int)));
-    if (ptr == nullptr) {
-        return CUDA_ERROR_INVALID_VALUE;
-    }
-    for (size_t i = 0; i < N; ++i) {
-        ptr[i] = ui;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, N * sizeof(unsigned int), ui, sizeof(unsigned int), N, 1,
+                           nullptr, true);
 }
 
-CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD16(dstDevice, us, N);
+CUresult cuMemsetD16Async(CUdeviceptr dstDevice, unsigned short us, size_t N, CUstream hStream) {
+    return memset_elements(dstDevice, N * sizeof(unsigned short), us, sizeof(unsigned short), N, 1,
+                           hStream, false);
 }
 
-CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N,
-                           CUstream /*hStream*/) {
-    return cuMemsetD32(dstDevice, ui, N);
+CUresult cuMemsetD32Async(CUdeviceptr dstDevice, unsigned int ui, size_t N, CUstream hStream) {
+    return memset_elements(dstDevice, N * sizeof(unsigned int), ui, sizeof(unsigned int), N, 1,
+                           hStream, false);
 }
 
 // 2D strided memset — fills Width elements per row for Height rows (pitch stride).
 CUresult cuMemsetD2D8(CUdeviceptr dstDevice, size_t dstPitch,
                        unsigned char uc, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        std::memset(base + row * dstPitch, static_cast<int>(uc), Width);
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, uc, 1, Width, Height, nullptr, true);
 }
 
 CUresult cuMemsetD2D16(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned short us, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned short)));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        auto* row_ptr = reinterpret_cast<unsigned short*>(base + row * dstPitch);
-        for (size_t col = 0; col < Width; ++col) row_ptr[col] = us;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, us, sizeof(unsigned short), Width, Height, nullptr,
+                           true);
 }
 
 CUresult cuMemsetD2D32(CUdeviceptr dstDevice, size_t dstPitch,
                         unsigned int ui, size_t Width, size_t Height) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(dstDevice)),
-        Height == 0 ? 0 : (Height - 1) * dstPitch + Width * sizeof(unsigned int)));
-    if (base == nullptr && Width > 0 && Height > 0) return CUDA_ERROR_INVALID_VALUE;
-    for (size_t row = 0; row < Height; ++row) {
-        auto* row_ptr = reinterpret_cast<unsigned int*>(base + row * dstPitch);
-        for (size_t col = 0; col < Width; ++col) row_ptr[col] = ui;
-    }
-    return CUDA_SUCCESS;
+    return memset_elements(dstDevice, dstPitch, ui, sizeof(unsigned int), Width, Height, nullptr,
+                           true);
 }
 
-// Async variants enqueue their host-coherent fill in the CUDA stream timeline.
 CUresult cuMemsetD2D8Async(CUdeviceptr d, size_t p, unsigned char uc,
                             size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned char value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, uc};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row)
-                std::memset(data->base + row * data->pitch, data->value, data->width);
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, uc, 1, W, H, s, false);
 }
+
 CUresult cuMemsetD2D16Async(CUdeviceptr d, size_t p, unsigned short us,
                              size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned short)));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned short value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, us};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row) {
-                auto* values = reinterpret_cast<unsigned short*>(
-                    data->base + row * data->pitch);
-                std::fill_n(values, data->width, data->value);
-            }
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, us, sizeof(unsigned short), W, H, s, false);
 }
+
 CUresult cuMemsetD2D32Async(CUdeviceptr d, size_t p, unsigned int ui,
                              size_t W, size_t H, CUstream s) {
-    const CUresult ready = require_initialized_context();
-    if (ready != CUDA_SUCCESS) return ready;
-    auto* base = static_cast<unsigned char*>(cumetalRuntimeGetHostPointer(
-        reinterpret_cast<const void*>(static_cast<std::uintptr_t>(d)),
-        H == 0 ? 0 : (H - 1) * p + W * sizeof(unsigned int)));
-    if (base == nullptr && W > 0 && H > 0) return CUDA_ERROR_INVALID_VALUE;
-    struct Payload { unsigned char* base; size_t pitch, width, height; unsigned int value; };
-    auto* payload = new (std::nothrow) Payload{base, p, W, H, ui};
-    if (!payload) return CUDA_ERROR_OUT_OF_MEMORY;
-    const cudaError_t status = cudaLaunchHostFunc(
-        reinterpret_cast<cudaStream_t>(s),
-        [](void* opaque) {
-            std::unique_ptr<Payload> data(static_cast<Payload*>(opaque));
-            for (size_t row = 0; row < data->height; ++row) {
-                auto* values = reinterpret_cast<unsigned int*>(
-                    data->base + row * data->pitch);
-                std::fill_n(values, data->width, data->value);
-            }
-        }, payload);
-    if (status != cudaSuccess) delete payload;
-    return map_cuda_error(status);
+    return memset_elements(d, p, ui, sizeof(unsigned int), W, H, s, false);
 }
 
 // cuMemGetAddressRange — returns the base address and size of the allocation
@@ -3477,7 +3630,7 @@ CUresult cuFuncLoad(CUfunction function) {
         if (!has_current_context_locked(state)) return CUDA_ERROR_INVALID_CONTEXT;
         if (!is_valid_function_locked(state, function) || function->module == nullptr)
             return CUDA_ERROR_INVALID_HANDLE;
-        metallib_path = function->module->metallib_path;
+        metallib_path = function->metallib_path;
         kernel_name = function->kernel_name;
     }
     // The driver mutex is released before preparation: Apple's compiler runs
@@ -3511,7 +3664,7 @@ CUresult cuFuncIsLoaded(CUfunctionLoadingState* state_out, CUfunction function) 
         // loaded because the same path and name are still cached.
         if (!is_valid_function_locked(state, function) || function->module == nullptr)
             return CUDA_ERROR_INVALID_HANDLE;
-        metallib_path = function->module->metallib_path;
+        metallib_path = function->metallib_path;
         kernel_name = function->kernel_name;
     }
     // Query only: this must not start a compilation, so it asks the backend
@@ -3620,18 +3773,33 @@ CUresult cuGraphDestroy(CUgraph hGraph) {
     return err == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 
+// CUDA 11's 5-argument form, exported as cuGraphInstantiate and (through the
+// alias list) cuGraphInstantiate_v2. CUDA 12 callers reach the 3-argument
+// cuGraphInstantiateWithFlags instead: cuda.h maps the source spelling and
+// cuGetProcAddress maps the name by requested version.
 CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
-                             CUgraphNode* phErrorNode, char* logBuffer,
-                             size_t bufferSize) {
+                            CUgraphNode* phErrorNode, char* logBuffer,
+                            size_t bufferSize) {
+    if (phErrorNode != nullptr) *phErrorNode = nullptr;
+    // No instantiation diagnostics are produced; leave an empty log.
+    if (logBuffer != nullptr && bufferSize != 0) logBuffer[0] = '\0';
+    return cuGraphInstantiateWithFlags(phGraphExec, hGraph, 0);
+}
+
+CUresult cuGraphInstantiateWithFlags(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags) {
     if (phGraphExec == nullptr) {
         return CUDA_ERROR_INVALID_VALUE;
     }
+    // cudaGraphInstantiateWithFlags honours AUTO_FREE_ON_LAUNCH and refuses
+    // every other bit: UPLOAD applies only to the WithParams form, and device
+    // launch and node priorities are not implemented.
+    static_assert(static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH) ==
+                  static_cast<unsigned long long>(cudaGraphInstantiateFlagAutoFreeOnLaunch));
     cudaGraphExec_t exec = nullptr;
-    cudaGraphNode_t errNode = nullptr;
-    cudaError_t err = cudaGraphInstantiate(
-        &exec, reinterpret_cast<cudaGraph_t>(hGraph), &errNode, logBuffer, bufferSize);
+    const cudaError_t err = cudaGraphInstantiateWithFlags(
+        &exec, reinterpret_cast<cudaGraph_t>(hGraph), flags);
     *phGraphExec = reinterpret_cast<CUgraphExec>(exec);
-    if (phErrorNode) { *phErrorNode = reinterpret_cast<CUgraphNode>(errNode); }
     return err == cudaSuccess ? CUDA_SUCCESS : CUDA_ERROR_INVALID_VALUE;
 }
 

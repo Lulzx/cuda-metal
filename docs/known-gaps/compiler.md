@@ -258,6 +258,18 @@ The exact 27-project in-tree numerical corpus passes both typed PTX and direct
 native AOT on Apple M4 Pro with workload specializations disabled. This closes
 the reviewed corpus, not the residual combinations listed above.
 
+Open legacy defect (driver JIT, found with xgrid-gpu, #231): through the legacy
+PTX->LLVM path, xgrid's double-single (`biot_savart_ds`, FP32 error-free
+transformations with `fma.rn.f32`) kernel returned results with relative error
+around 1e-3, worse than plain FP32, with no diagnostic; its FP32 kernel was
+also not bit-exact. The same kernels are bit-exact on the typed path, which
+the driver now uses for that module. A module reaches the legacy path only
+when the typed backend declines one of its entries (or under
+`CUMETAL_PTX_BACKEND=legacy`); `CUMETAL_DEBUG_ERRORS=1` reports when that
+happens. On the same path, a binary64 kernel can also crash Apple's Metal
+compiler service at pipeline creation (`XPC_ERROR_CONNECTION_INTERRUPTED`),
+which surfaces as a launch error.
+
 ### FP64 libdevice math
 
 Double-precision libdevice calls without a software-ALU primitive --

@@ -1132,9 +1132,17 @@ cudaError_t cudaStreamIsCapturing(cudaStream_t stream, cudaStreamCaptureStatus* 
 cudaError_t cudaGraphCreate(cudaGraph_t* pGraph, unsigned int flags);
 cudaError_t cudaGraphClone(cudaGraph_t* pGraphClone, cudaGraph_t originalGraph);
 cudaError_t cudaGraphDestroy(cudaGraph_t graph);
+// CUDA 12's exported form: flags as in cudaGraphInstantiateWithFlags. CUDA
+// 11's 5-argument spelling is a C++ inline overload further down, as in
+// NVIDIA's CUDA 12 cuda_runtime.h, so the exported symbol has the ABI a CUDA 12
+// caller expects.
+#ifdef __cplusplus
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
-                                  cudaGraphNode_t* pErrorNode, char* pLogBuffer,
-                                  size_t bufferSize);
+                                  unsigned long long flags = 0);
+#else
+cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
+                                  unsigned long long flags);
+#endif
 cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
                                            cudaGraph_t graph,
                                            unsigned long long flags);
@@ -1569,13 +1577,18 @@ static inline cudaError_t cudaEventCreate(cudaEvent_t* event, unsigned int flags
     return cudaEventCreateWithFlags(event, flags);
 }
 
-// CUDA 12 forms of the graph instantiate/update calls. The 5-argument
-// cudaGraphInstantiate and the cudaGraphExecUpdateResult* cudaGraphExecUpdate
-// above are the CUDA 11 spellings; both are still in use, so both are offered.
+// CUDA 11's 5-argument cudaGraphInstantiate, kept for C++ source as NVIDIA's
+// CUDA 12 cuda_runtime.h keeps it: an inline overload of the exported 3-argument
+// function. No instantiation diagnostics are produced, so the error node is
+// cleared and the log left empty.
 static inline cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec,
                                                cudaGraph_t graph,
-                                               unsigned long long flags) {
-    return cudaGraphInstantiateWithFlags(pGraphExec, graph, flags);
+                                               cudaGraphNode_t* pErrorNode,
+                                               char* pLogBuffer,
+                                               size_t bufferSize) {
+    if (pErrorNode != NULL) *pErrorNode = NULL;
+    if (pLogBuffer != NULL && bufferSize != 0) pLogBuffer[0] = '\0';
+    return cudaGraphInstantiate(pGraphExec, graph, 0ull);
 }
 
 // Device-side graph launch sentinels (CUDA 12 device graph launch API).

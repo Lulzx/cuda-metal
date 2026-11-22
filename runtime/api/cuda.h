@@ -124,6 +124,7 @@ typedef enum CUresult {
     CUDA_ERROR_INVALID_IMAGE = 200,
     CUDA_ERROR_INVALID_CONTEXT = 201,
     CUDA_ERROR_NO_BINARY_FOR_GPU = 209,
+    CUDA_ERROR_INVALID_PTX = 218,
     CUDA_ERROR_JIT_COMPILER_NOT_FOUND = 221,
     CUDA_ERROR_FILE_NOT_FOUND = 301,
     CUDA_ERROR_NOT_FOUND = 500,
@@ -229,8 +230,17 @@ typedef enum CUdriverProcAddressQueryResult_enum {
 } CUdriverProcAddressQueryResult;
 
 CUresult cuDriverGetVersion(int* driverVersion);
-CUresult cuGetProcAddress(const char* symbol, void** pfn, int cudaVersion,
-                          uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
+// The library exports two functions, as NVIDIA's libcuda does: the original
+// 4-argument `cuGetProcAddress` (CUDA 11.3) and the CUDA 12 5-argument
+// `cuGetProcAddress_v2`. Like NVIDIA's CUDA 12 header, this header spells the
+// 5-argument form and maps source-level calls to `_v2`, so code compiled
+// against it passes symbolStatus to the function that takes it, while
+// binaries that dlsym "cuGetProcAddress" get the 4-argument ABI they expect.
+CUresult cuGetProcAddress_v2(const char* symbol, void** pfn, int cudaVersion,
+                             uint64_t flags, CUdriverProcAddressQueryResult* symbolStatus);
+#ifndef CUMETAL_DRIVER_API_IMPLEMENTATION
+#define cuGetProcAddress cuGetProcAddress_v2
+#endif
 CUresult cuDeviceGetCount(int* count);
 CUresult cuDeviceGet(CUdevice* device, int ordinal);
 CUresult cuDeviceGetName(char* name, int len, CUdevice dev);
@@ -829,9 +839,30 @@ CUresult cuPointerGetAttributes(unsigned int numAttributes,
 // ── CUDA Graphs (Driver API) ─────────────────────────────────────────────────
 CUresult cuGraphCreate(CUgraph* phGraph, unsigned int flags);
 CUresult cuGraphDestroy(CUgraph hGraph);
-CUresult cuGraphInstantiate(CUgraphExec* phGraphExec, CUgraph hGraph,
-                             CUgraphNode* phErrorNode, char* logBuffer,
-                             size_t bufferSize);
+typedef enum CUgraphInstantiate_flags_enum {
+    CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH = 1,
+    CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD = 2,
+    CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH = 4,
+    CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY = 8,
+} CUgraphInstantiate_flags;
+// The library exports CUDA 11's 5-argument cuGraphInstantiate (also as
+// cuGraphInstantiate_v2) and CUDA 11.4's cuGraphInstantiateWithFlags. As in
+// NVIDIA's CUDA 12 header, source-level cuGraphInstantiate is the 3-argument
+// flags form from CUDA_VERSION 12000, and the _v2 form before.
+// cuGraphInstantiateWithFlags honours CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH;
+// any other flag bit is refused with CUDA_ERROR_INVALID_VALUE.
+CUresult cuGraphInstantiate_v2(CUgraphExec* phGraphExec, CUgraph hGraph,
+                               CUgraphNode* phErrorNode, char* logBuffer,
+                               size_t bufferSize);
+CUresult cuGraphInstantiateWithFlags(CUgraphExec* phGraphExec, CUgraph hGraph,
+                                     unsigned long long flags);
+#ifndef CUMETAL_DRIVER_API_IMPLEMENTATION
+#if CUDA_VERSION >= 12000
+#define cuGraphInstantiate cuGraphInstantiateWithFlags
+#else
+#define cuGraphInstantiate cuGraphInstantiate_v2
+#endif
+#endif
 CUresult cuGraphLaunch(CUgraphExec hGraphExec, CUstream hStream);
 CUresult cuGraphExecDestroy(CUgraphExec hGraphExec);
 

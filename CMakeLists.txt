@@ -328,6 +328,16 @@ set_target_properties(cumetal_runtime
         OUTPUT_NAME cumetal
 )
 
+# Export the driver API's _v2 names (cuMemAlloc_v2, ...) as true aliases of
+# the unsuffixed implementations, as NVIDIA's libcuda does (#230).
+if(APPLE)
+    set(CUMETAL_DRIVER_V2_ALIASES "${CMAKE_SOURCE_DIR}/runtime/driver/driver_v2_aliases.txt")
+    target_link_options(cumetal_runtime PRIVATE
+        "LINKER:-alias_list,${CUMETAL_DRIVER_V2_ALIASES}")
+    set_property(TARGET cumetal_runtime APPEND PROPERTY LINK_DEPENDS
+        "${CUMETAL_DRIVER_V2_ALIASES}")
+endif()
+
 set_source_files_properties(
     runtime/metal_backend/metal_backend.mm
     PROPERTIES

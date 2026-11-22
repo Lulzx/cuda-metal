@@ -1,6 +1,11 @@
 #include "cuda.h"
+#include "cuda_runtime.h"
+#include "cudaTypedefs.h"
+
+#include <dlfcn.h>
 
 #include <cstdint>
+#include <type_traits>
 #include <cstdio>
 #include <cstring>
 #include <vector>
@@ -69,6 +74,173 @@ int main() {
             CUDA_ERROR_INVALID_VALUE) {
             return fail("cuGetProcAddress(nullptr) must be an invalid value");
         }
+    }
+
+    // --- cuGetProcAddress ABI split (CUDA 11.3 4-argument vs CUDA 12 _v2) ---
+    // Source compiled against cuda.h calls the 5-argument _v2, as with
+    // NVIDIA's CUDA 12 header; the unsuffixed export keeps 4 arguments.
+    static_assert(std::is_same_v<decltype(&cuGetProcAddress), PFN_cuGetProcAddress_v12000>,
+                  "cuda.h's cuGetProcAddress must be the CUDA 12 5-argument form");
+    static_assert(std::is_same_v<decltype(&cuGetProcAddress), decltype(&cuGetProcAddress_v2)>,
+                  "cuGetProcAddress must map to cuGetProcAddress_v2 at source level");
+    if (reinterpret_cast<const void*>(&cuGetProcAddress) !=
+        reinterpret_cast<const void*>(&cuGetProcAddress_v2)) {
+        return fail("cuGetProcAddress in source must name cuGetProcAddress_v2");
+    }
+    {
+        void* self = dlopen(nullptr, RTLD_NOW);
+        auto* const four = reinterpret_cast<PFN_cuGetProcAddress_v11030>(
+            dlsym(self, "cuGetProcAddress"));
+        if (four == nullptr ||
+            reinterpret_cast<void*>(four) == reinterpret_cast<void*>(&cuGetProcAddress_v2)) {
+            return fail("the unsuffixed cuGetProcAddress export must be the 4-argument function");
+        }
+        void* pfn = nullptr;
+        if (four("cuStreamGetCtx", &pfn, 12000, CU_GET_PROC_ADDRESS_DEFAULT) != CUDA_SUCCESS ||
+            pfn != reinterpret_cast<void*>(&cuStreamGetCtx)) {
+            return fail("4-argument cuGetProcAddress(cuStreamGetCtx)");
+        }
+        // The runtime hands out the ABI each CUDA version expects.
+        cudaDriverEntryPointQueryResult status = cudaDriverEntryPointSymbolNotFound;
+        pfn = nullptr;
+        if (cudaGetDriverEntryPoint("cuGetProcAddress", &pfn, cudaEnableDefault, &status) !=
+                cudaSuccess ||
+            status != cudaDriverEntryPointSuccess ||
+            pfn != reinterpret_cast<void*>(&cuGetProcAddress_v2)) {
+            return fail("cudaGetDriverEntryPoint(cuGetProcAddress) must return the CUDA 12 form");
+        }
+        pfn = nullptr;
+        if (cudaGetDriverEntryPointByVersion("cuGetProcAddress", &pfn, 11080, cudaEnableDefault,
+                                             &status) != cudaSuccess ||
+            status != cudaDriverEntryPointSuccess || pfn != reinterpret_cast<void*>(four)) {
+            return fail("cudaGetDriverEntryPointByVersion(cuGetProcAddress, 11.8) must return "
+                        "the 4-argument form");
+        }
+        pfn = nullptr;
+        if (cudaGetDriverEntryPoint("cuMemAlloc", &pfn, cudaEnableDefault) != cudaSuccess ||
+            pfn != reinterpret_cast<void*>(&cuMemAlloc)) {
+            return fail("cudaGetDriverEntryPoint without driverStatus");
+        }
+    }
+
+    // --- cuGraphInstantiate: CUDA 11 5-argument form vs CUDA 12 flags form ---
+    static_assert(std::is_same_v<decltype(&cuGraphInstantiate), PFN_cuGraphInstantiate_v12000>,
+                  "cuda.h's cuGraphInstantiate must be the CUDA 12 flags form");
+    if (reinterpret_cast<const void*>(&cuGraphInstantiate) !=
+        reinterpret_cast<const void*>(&cuGraphInstantiateWithFlags)) {
+        return fail("cuGraphInstantiate in source must name cuGraphInstantiateWithFlags");
+    }
+    {
+        void* self = dlopen(nullptr, RTLD_NOW);
+        auto* const five = reinterpret_cast<PFN_cuGraphInstantiate_v11000>(
+            dlsym(self, "cuGraphInstantiate"));
+        auto* const five_v2 = reinterpret_cast<PFN_cuGraphInstantiate_v11000>(
+            dlsym(self, "cuGraphInstantiate_v2"));
+        if (five == nullptr || five != five_v2 ||
+            reinterpret_cast<void*>(five) == reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)) {
+            return fail("cuGraphInstantiate and _v2 must export the CUDA 11 5-argument function");
+        }
+        // Version-aware lookups, through the driver and the runtime.
+        void* pfn = nullptr;
+        CUdriverProcAddressQueryResult query = CU_GET_PROC_ADDRESS_SYMBOL_NOT_FOUND;
+        if (cuGetProcAddress("cuGraphInstantiate", &pfn, 12000, CU_GET_PROC_ADDRESS_DEFAULT,
+                             &query) != CUDA_SUCCESS ||
+            pfn != reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)) {
+            return fail("cuGetProcAddress(cuGraphInstantiate, 12.0) must return WithFlags");
+        }
+        if (cuGetProcAddress("cuGraphInstantiate", &pfn, 11080, CU_GET_PROC_ADDRESS_DEFAULT,
+                             &query) != CUDA_SUCCESS ||
+            pfn != reinterpret_cast<void*>(five)) {
+            return fail("cuGetProcAddress(cuGraphInstantiate, 11.8) must return the 5-argument form");
+        }
+        if (cudaGetDriverEntryPointByVersion("cuGraphInstantiate", &pfn, 11040, cudaEnableDefault,
+                                             nullptr) != cudaSuccess ||
+            pfn != reinterpret_cast<void*>(five)) {
+            return fail("cudaGetDriverEntryPointByVersion(cuGraphInstantiate, 11.4)");
+        }
+        if (cudaGetDriverEntryPoint("cuGraphInstantiate", &pfn, cudaEnableDefault) != cudaSuccess ||
+            pfn != reinterpret_cast<void*>(&cuGraphInstantiateWithFlags)) {
+            return fail("cudaGetDriverEntryPoint(cuGraphInstantiate) must return WithFlags");
+        }
+
+        // An empty graph instantiates and launches in every supported form.
+        CUgraph graph = nullptr;
+        if (cuGraphCreate(&graph, 0) != CUDA_SUCCESS) return fail("cuGraphCreate");
+        CUgraphExec exec = nullptr;
+        if (cuGraphInstantiate(&exec, graph, 0) != CUDA_SUCCESS || exec == nullptr ||
+            cuGraphLaunch(exec, nullptr) != CUDA_SUCCESS || cuCtxSynchronize() != CUDA_SUCCESS ||
+            cuGraphExecDestroy(exec) != CUDA_SUCCESS) {
+            return fail("cuGraphInstantiate (CUDA 12 form) with no flags");
+        }
+        exec = nullptr;
+        if (cuGraphInstantiateWithFlags(&exec, graph,
+                                        CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH) !=
+                CUDA_SUCCESS ||
+            exec == nullptr || cuGraphExecDestroy(exec) != CUDA_SUCCESS) {
+            return fail("cuGraphInstantiateWithFlags(AUTO_FREE_ON_LAUNCH)");
+        }
+        // Flags CuMetal cannot honour are refused, not ignored.
+        for (const unsigned long long refused :
+             {static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_UPLOAD),
+              static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_DEVICE_LAUNCH),
+              static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY),
+              static_cast<unsigned long long>(CUDA_GRAPH_INSTANTIATE_FLAG_AUTO_FREE_ON_LAUNCH |
+                                              CUDA_GRAPH_INSTANTIATE_FLAG_USE_NODE_PRIORITY),
+              1ull << 20}) {
+            exec = nullptr;
+            if (cuGraphInstantiateWithFlags(&exec, graph, refused) != CUDA_ERROR_INVALID_VALUE ||
+                exec != nullptr) {
+                std::fprintf(stderr, "FAIL: cuGraphInstantiateWithFlags accepted flags 0x%llx\n",
+                             refused);
+                return 1;
+            }
+        }
+        if (cuGraphInstantiateWithFlags(nullptr, graph, 0) != CUDA_ERROR_INVALID_VALUE) {
+            return fail("cuGraphInstantiateWithFlags(nullptr exec) must be an invalid value");
+        }
+        // The CUDA 11 form, called with exactly its five arguments: it clears
+        // the error node and leaves an empty log.
+        exec = nullptr;
+        CUgraphNode error_node = reinterpret_cast<CUgraphNode>(0x1);
+        char log[16] = "stale";
+        if (five(&exec, graph, &error_node, log, sizeof(log)) != CUDA_SUCCESS ||
+            exec == nullptr || error_node != nullptr || log[0] != '\0' ||
+            cuGraphExecDestroy(exec) != CUDA_SUCCESS) {
+            return fail("CUDA 11 5-argument cuGraphInstantiate");
+        }
+
+        // Runtime: the exported cudaGraphInstantiate is CUDA 12's flags form;
+        // the 5-argument spelling is a C++ overload.
+        cudaGraph_t rgraph = reinterpret_cast<cudaGraph_t>(graph);
+        cudaGraphExec_t rexec = nullptr;
+        if (cudaGraphInstantiate(&rexec, rgraph) != cudaSuccess || rexec == nullptr ||
+            cudaGraphExecDestroy(rexec) != cudaSuccess) {
+            return fail("cudaGraphInstantiate(exec, graph) with default flags");
+        }
+        rexec = nullptr;
+        if (cudaGraphInstantiate(&rexec, rgraph, cudaGraphInstantiateFlagUseNodePriority) !=
+                cudaErrorInvalidValue ||
+            rexec != nullptr) {
+            return fail("cudaGraphInstantiate must refuse cudaGraphInstantiateFlagUseNodePriority");
+        }
+        (void)cudaGetLastError();
+        rexec = nullptr;
+        cudaGraphNode_t rerror = reinterpret_cast<cudaGraphNode_t>(0x1);
+        if (cudaGraphInstantiate(&rexec, rgraph, &rerror, nullptr, 0) != cudaSuccess ||
+            rexec == nullptr || rerror != nullptr || cudaGraphExecDestroy(rexec) != cudaSuccess) {
+            return fail("CUDA 11 5-argument cudaGraphInstantiate overload");
+        }
+        using RuntimeInstantiate3 = cudaError_t (*)(cudaGraphExec_t*, cudaGraph_t,
+                                                    unsigned long long);
+        auto* const exported = reinterpret_cast<RuntimeInstantiate3>(
+            dlsym(self, "cudaGraphInstantiate"));
+        rexec = nullptr;
+        if (exported == nullptr ||
+            exported(&rexec, rgraph, cudaGraphInstantiateFlagAutoFreeOnLaunch) != cudaSuccess ||
+            rexec == nullptr || cudaGraphExecDestroy(rexec) != cudaSuccess) {
+            return fail("the exported cudaGraphInstantiate must take (exec, graph, flags)");
+        }
+        if (cuGraphDestroy(graph) != CUDA_SUCCESS) return fail("cuGraphDestroy");
     }
 
     // --- cuStreamGetCtx ---

@@ -1421,9 +1421,12 @@ void relocate_embedded_device_pointers(
     relocate_embedded_device_pointers(bytes->data(), bytes->size(), resident_buffers);
 }
 
+bool use_metal_device_addresses();
+
 void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
     if (data == nullptr || size < sizeof(std::uintptr_t)) return;
     RuntimeState& state = runtime_state();
+    const bool device_addresses = use_metal_device_addresses();
     if (state.allocations.pointer_relocation_is_identity(/*to_device=*/false)) {
         return;
     }
@@ -1437,6 +1440,13 @@ void restore_embedded_host_pointers(std::uint8_t* data, std::size_t size) {
         cumetal::rt::AllocationTable::ResolvedAllocation resolved;
         if (!state.allocations.resolve(reinterpret_cast<void*>(candidate), &resolved) ||
             resolved.buffer == nullptr || resolved.buffer->contents() == nullptr) {
+            continue;
+        }
+        // Hand back the pointer the application was given: a device
+        // allocation's public pointer is its GPU address when
+        // CUMETAL_USE_METAL_DEVICE_ADDRESSES is set, which is what a kernel
+        // stored; pinned memory's public pointer is always its CPU mapping.
+        if (device_addresses && resolved.kind == cumetal::rt::AllocationKind::kDevice) {
             continue;
         }
         const std::uintptr_t host_base =
@@ -3653,6 +3663,36 @@ cudaError_t cudaFree(void* dev_ptr) {
     return fail(cudaSuccess);
 }
 
+}  // extern "C"
+
+namespace {
+
+// Device pointers stored in memory are GPU virtual addresses on the device
+// side and the application's public pointers on the host side. A copy that
+// moves bytes between the two sides rewrites them; which way is decided by
+// where the ends live, not by the cudaMemcpyKind: cudaMemcpyDefault between
+// pinned and device memory resolves to device-to-device, yet its pinned end
+// is read and written by the host (#225).
+enum class PointerFixup { kNone, kToDevice, kToHost };
+
+bool is_device_side_allocation(const void* ptr) {
+    cumetal::rt::AllocationTable::ResolvedAllocation resolved;
+    return cumetal::rt::resolve_allocation_for_pointer(ptr, &resolved) &&
+           resolved.kind == cumetal::rt::AllocationKind::kDevice;
+}
+
+PointerFixup pointer_fixup_for_copy(const void* dst, const void* src) {
+    const bool dst_device = is_device_side_allocation(dst);
+    const bool src_device = is_device_side_allocation(src);
+    if (dst_device && !src_device) return PointerFixup::kToDevice;
+    if (!dst_device && src_device) return PointerFixup::kToHost;
+    return PointerFixup::kNone;
+}
+
+}  // namespace
+
+extern "C" {
+
 cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind kind) {
     if ((dst == nullptr || src == nullptr) && count > 0) {
         return fail(cudaErrorInvalidValue);
@@ -3684,9 +3724,10 @@ cudaError_t cudaMemcpy(void* dst, const void* src, size_t count, cudaMemcpyKind 
         // in the destination after a single copy; the caller's source is
         // never modified.
         std::memmove(host_dst, host_src, count);
-        if (resolved_kind == cudaMemcpyHostToDevice) {
+        const PointerFixup fixup = pointer_fixup_for_copy(dst, src);
+        if (fixup == PointerFixup::kToDevice) {
             relocate_embedded_device_pointers(static_cast<std::uint8_t*>(host_dst), count);
-        } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+        } else if (fixup == PointerFixup::kToHost) {
             restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
         }
     }
@@ -3741,9 +3782,15 @@ cudaError_t cudaMemcpyAsync(void* dst,
     // one device buffer to another between two kernels; it was 77% of a PDLP
     // iteration on datt256. It stays for the cases the blit cannot serve, which
     // is pageable host memory on either end.
+    //
+    // A blit copies bytes verbatim, so it serves only copies whose embedded
+    // pointers need no rewriting: both ends on the same side. Pinned host
+    // memory <-> device memory takes the host path, which rewrites them.
+    const PointerFixup fixup = count > 0 ? pointer_fixup_for_copy(dst, src) : PointerFixup::kNone;
     cumetal::rt::AllocationTable::ResolvedAllocation dst_alloc;
     cumetal::rt::AllocationTable::ResolvedAllocation src_alloc;
-    if (count > 0 && resolve_allocation_for_pointer(dst, &dst_alloc) &&
+    if (count > 0 && fixup == PointerFixup::kNone &&
+        resolve_allocation_for_pointer(dst, &dst_alloc) &&
         resolve_allocation_for_pointer(src, &src_alloc) &&
         dst_alloc.buffer != nullptr && src_alloc.buffer != nullptr &&
         dst_alloc.remaining_size >= count && src_alloc.remaining_size >= count) {
@@ -3774,7 +3821,7 @@ cudaError_t cudaMemcpyAsync(void* dst,
     // Uninitialized storage: a zero-filled vector cost as much as the copy
     // itself in unoptimized builds.
     std::shared_ptr<std::uint8_t[]> staged_h2d;
-    if (count > 0 && resolved_kind == cudaMemcpyHostToDevice) {
+    if (count > 0 && fixup == PointerFixup::kToDevice) {
         staged_h2d.reset(new std::uint8_t[count]);
         std::memcpy(staged_h2d.get(), host_src, count);
         relocate_embedded_device_pointers(staged_h2d.get(), count);
@@ -3785,11 +3832,11 @@ cudaError_t cudaMemcpyAsync(void* dst,
     const bool complete_before_return = count > 0 && is_pageable_host_memory(dst);
     const cudaError_t enqueue_status = enqueue_stream_host_op_pageable(
         stream, complete_before_return,
-        [host_dst, host_src, count, resolved_kind, staged_h2d]() {
+        [host_dst, host_src, count, fixup, staged_h2d]() {
             if (count == 0) return;
             if (staged_h2d != nullptr) {
                 std::memcpy(host_dst, staged_h2d.get(), count);
-            } else if (resolved_kind == cudaMemcpyDeviceToHost) {
+            } else if (fixup == PointerFixup::kToHost) {
                 std::memmove(host_dst, host_src, count);
                 restore_embedded_host_pointers(static_cast<std::uint8_t*>(host_dst), count);
             } else {
@@ -4194,6 +4241,13 @@ cudaError_t cudaMemset2D(void* dev_ptr, size_t pitch,
     if (d == nullptr && width > 0 && height > 0) {
         return fail(cudaErrorInvalidValue);
     }
+    // Like cudaMemset: a kernel still queued that touches this memory must
+    // finish before the host-side fill, or the fill lands out of order.
+    std::string sync_error;
+    const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+    if (sync_status != cudaSuccess) {
+        return fail(sync_status);
+    }
     for (size_t row = 0; row < height; ++row) {
         if (width > 0) {
             std::memset(d + row * pitch, value, width);
@@ -4217,6 +4271,77 @@ cudaError_t cudaMemset2DAsync(void* dev_ptr, size_t pitch,
     }));
 }
 
+// Element-sized fills for the driver API's cuMemsetD16/D32 and the pitched
+// cuMemsetD2D8/16/32 families. `value` holds the element in its low
+// `element_size` bytes. A synchronous fill is ordered like cudaMemset (after
+// all prior device work); an asynchronous one is ordered on `stream` like
+// cudaMemsetAsync, including graph capture.
+cudaError_t cumetalRuntimeMemsetElements(void* dev_ptr, size_t pitch, unsigned int value,
+                                         size_t element_size, size_t width, size_t height,
+                                         cudaStream_t stream, int synchronous) {
+    if (element_size != 1 && element_size != 2 && element_size != 4) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const size_t row_bytes = width * element_size;
+    if (width != 0 && row_bytes / element_size != width) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const bool empty = width == 0 || height == 0;
+    if (!empty && (dev_ptr == nullptr || (height > 1 && pitch < row_bytes))) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t init_status = ensure_initialized();
+    if (init_status != cudaSuccess) {
+        return fail(init_status);
+    }
+    if (!synchronous) {
+        if (cudaGraph_t graph = get_capture_graph(stream)) {
+            (void)graph;
+            const bool captured = cumetal::rt::capture_library_call(
+                stream, [=](cudaStream_t replay) {
+                    return cumetalRuntimeMemsetElements(dev_ptr, pitch, value, element_size,
+                                                        width, height, replay, 0);
+                });
+            return fail(captured ? cudaSuccess : cudaErrorMemoryAllocation);
+        }
+    }
+    auto* base = static_cast<unsigned char*>(host_accessible_pointer(
+        dev_ptr, empty ? 0 : (height - 1) * pitch + row_bytes));
+    if (base == nullptr && !empty) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const auto fill = [=]() {
+        if (empty) return;
+        for (size_t row = 0; row < height; ++row) {
+            unsigned char* out = base + row * pitch;
+            switch (element_size) {
+            case 1:
+                std::memset(out, static_cast<int>(value & 0xffu), width);
+                break;
+            case 2: {
+                const auto element = static_cast<std::uint16_t>(value);
+                for (size_t i = 0; i < width; ++i) std::memcpy(out + i * 2, &element, 2);
+                break;
+            }
+            default:
+                for (size_t i = 0; i < width; ++i) std::memcpy(out + i * 4, &value, 4);
+                break;
+            }
+        }
+    };
+    if (synchronous) {
+        std::string sync_error;
+        const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+        if (sync_status != cudaSuccess) {
+            return fail(sync_status);
+        }
+        fill();
+        return fail(cudaSuccess);
+    }
+    return fail(enqueue_stream_host_op_pageable(
+        stream, !empty && is_pageable_host_memory(dev_ptr), fill));
+}
+
 // cudaMemset3D — fills a 3D pitched allocation plane-by-row.
 cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent extent) {
     if (pitchedDevPtr.ptr == nullptr && (extent.width > 0 && extent.height > 0 && extent.depth > 0)) {
@@ -4236,6 +4361,11 @@ cudaError_t cudaMemset3D(cudaPitchedPtr pitchedDevPtr, int value, cudaExtent ext
         host_accessible_pointer(pitchedDevPtr.ptr, span));
     if (base == nullptr && extent.width > 0 && extent.height > 0 && extent.depth > 0) {
         return fail(cudaErrorInvalidValue);
+    }
+    std::string sync_error;
+    const cudaError_t sync_status = cumetal::metal_backend::synchronize(&sync_error);
+    if (sync_status != cudaSuccess) {
+        return fail(sync_status);
     }
     for (size_t z = 0; z < extent.depth; ++z) {
         for (size_t y = 0; y < extent.height; ++y) {
@@ -5014,13 +5144,38 @@ cudaError_t cudaGraphDestroy(cudaGraph_t graph) {
     return fail(cudaSuccess);
 }
 
+namespace {
+cudaError_t instantiate_graph(cudaGraphExec_t* pGraphExec, cudaGraph_t graph);
+}  // namespace
+
+// CUDA 12's exported form. AUTO_FREE_ON_LAUNCH is honoured; UPLOAD belongs to
+// the WithParams form, and device launch and node priorities are not
+// implemented, so those bits are refused rather than ignored.
 cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
-                                  cudaGraphNode_t* pErrorNode, char* /*pLogBuffer*/,
-                                  size_t /*bufferSize*/) {
+                                  unsigned long long flags) {
+    if ((flags & ~static_cast<unsigned long long>(
+                     cudaGraphInstantiateFlagAutoFreeOnLaunch)) != 0) {
+        return fail(cudaErrorInvalidValue);
+    }
+    const cudaError_t status = instantiate_graph(pGraphExec, graph);
+    if (status == cudaSuccess && pGraphExec != nullptr && *pGraphExec != nullptr) {
+        (*pGraphExec)->auto_free_on_launch =
+            (flags & cudaGraphInstantiateFlagAutoFreeOnLaunch) != 0;
+    }
+    return fail(status);
+}
+
+cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
+                                           cudaGraph_t graph,
+                                           unsigned long long flags) {
+    return cudaGraphInstantiate(pGraphExec, graph, flags);
+}
+
+namespace {
+cudaError_t instantiate_graph(cudaGraphExec_t* pGraphExec, cudaGraph_t graph) {
     if (pGraphExec == nullptr || graph == nullptr) {
         return fail(cudaErrorInvalidValue);
     }
-    if (pErrorNode) { *pErrorNode = nullptr; }
     // Keep the availability check and instance-count reservation atomic. A
     // split check/increment lets two concurrent instantiations both observe
     // zero and violates CUDA's one-executable rule for memory-node graphs.
@@ -5070,21 +5225,7 @@ cudaError_t cudaGraphInstantiate(cudaGraphExec_t* pGraphExec, cudaGraph_t graph,
     return fail(cudaSuccess);
 }
 
-cudaError_t cudaGraphInstantiateWithFlags(cudaGraphExec_t* pGraphExec,
-                                           cudaGraph_t graph,
-                                           unsigned long long flags) {
-    if ((flags & ~static_cast<unsigned long long>(
-                     cudaGraphInstantiateFlagAutoFreeOnLaunch)) != 0) {
-        return fail(cudaErrorInvalidValue);
-    }
-    const cudaError_t status =
-        cudaGraphInstantiate(pGraphExec, graph, nullptr, nullptr, 0);
-    if (status == cudaSuccess && pGraphExec != nullptr && *pGraphExec != nullptr) {
-        (*pGraphExec)->auto_free_on_launch =
-            (flags & cudaGraphInstantiateFlagAutoFreeOnLaunch) != 0;
-    }
-    return fail(status);
-}
+}  // namespace
 
 cudaError_t cudaGraphLaunch(cudaGraphExec_t graphExec, cudaStream_t stream) {
     if (graphExec == nullptr) {
@@ -6258,7 +6399,10 @@ cudaError_t cudaLaunchKernel(const void* func,
                          func,
                          registered_kernel.kernel_name.c_str(),
                          registered_kernel.metallib_path.c_str());
-            return launch_fail(cudaErrorInvalidValue, "registered kernel missing metallib/name");
+            // CUDA reports a kernel with no loadable image for this device as
+            // cudaErrorNoKernelImageForDevice at the launch (#223).
+            return launch_fail(cudaErrorNoKernelImageForDevice,
+                               "registered kernel missing metallib/name");
         }
 
         // A kernel that takes no parameters may be launched with a null argv --

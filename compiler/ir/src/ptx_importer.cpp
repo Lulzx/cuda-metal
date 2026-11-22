@@ -7224,18 +7224,42 @@ struct Importer {
         } else if (root == "sqrt" || root == "rsqrt") {
             // PTX emits `sqrt.rn.f32` directly rather than a libdevice call
             // whenever the source spells std::sqrt, which is how AMReX writes
-            // every ParallelFor body. Only binary32 has a Metal builtin with
-            // the right semantics; binary64 must say so instead of quietly
-            // evaluating at float precision.
+            // every ParallelFor body (and clang emits `sqrt.rn.f64` for
+            // sqrt(double)). binary32 uses the Metal builtin; binary64 uses
+            // the FP64 mode's software ALU, never float precision.
             const Type type = ptx_scalar_type(instruction.opcode);
-            if (type != Type::floating(32))
-                return fail(&instruction, "PTX opcode '" + instruction.opcode +
-                                              "' is only supported for binary32");
-            operation.opcode = OpCode::kCall;
-            operation.result_types.front() = Type::floating(32);
-            operation.operands.push_back(bit_container_operand(1, Type::floating(32)));
-            operation.attributes["builtin"] = "true";
-            operation.attributes["callee"] = root == "sqrt" ? "sqrt" : "rsqrt";
+            if (type == Type::floating(64)) {
+                // binary64 goes through the active FP64 mode's software ALU
+                // (fp64_mode is already attached for every .f64 opcode).
+                // sqrt.rn is correctly rounded in ieee64; the directed forms
+                // use VF64's rounding-mode sqrt in every mode. rsqrt.approx
+                // only promises an approximation; it is computed as
+                // 1/sqrt(x) in the active mode, which is at least as accurate.
+                operation.opcode = OpCode::kCall;
+                operation.result_types.front() = Type::floating(64);
+                operation.operands.push_back(
+                    bit_container_operand(1, Type::floating(64)));
+                operation.attributes["builtin"] = "true";
+                std::string callee = root == "sqrt" ? "sqrt" : "rsqrt";
+                if (root == "sqrt") {
+                    if (instruction.opcode.find(".rz.") != std::string::npos)
+                        callee = "dsqrt_rz";
+                    else if (instruction.opcode.find(".rm.") != std::string::npos)
+                        callee = "dsqrt_rd";
+                    else if (instruction.opcode.find(".rp.") != std::string::npos)
+                        callee = "dsqrt_ru";
+                }
+                operation.attributes["callee"] = callee;
+            } else {
+                if (type != Type::floating(32))
+                    return fail(&instruction, "PTX opcode '" + instruction.opcode +
+                                                  "' is only supported for binary32 and binary64");
+                operation.opcode = OpCode::kCall;
+                operation.result_types.front() = Type::floating(32);
+                operation.operands.push_back(bit_container_operand(1, Type::floating(32)));
+                operation.attributes["builtin"] = "true";
+                operation.attributes["callee"] = root == "sqrt" ? "sqrt" : "rsqrt";
+            }
         } else if (root == "rcp") {
             operation.opcode = OpCode::kDiv;
             operation.operands.push_back(

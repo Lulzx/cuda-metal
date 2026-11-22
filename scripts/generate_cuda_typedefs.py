@@ -37,6 +37,7 @@ VERSIONS = {
     "cuEventDestroy": 4000, "cuEventQuery": 2000, "cuEventRecord": 2000,
     "cuEventRecordWithFlags": 11010, "cuEventSynchronize": 2000, "cuFuncSetAttribute": 9000,
     "cuGetErrorName": 6000, "cuGetErrorString": 6000, "cuGetProcAddress": 12000,
+    "cuGraphInstantiate": 12000, "cuGraphInstantiateWithFlags": 11040,
     "cuGraphAddNode": 12030, "cuGraphicsMapResources": 3000,
     "cuGraphicsResourceGetMappedPointer": 3020, "cuGraphicsUnmapResources": 3000,
     "cuGraphicsUnregisterResource": 3000, "cuGraphNodeGetDependentNodes": 10000,
@@ -88,6 +89,23 @@ UNDECLARED = {
 }
 
 
+# Names cuda.h maps, at source level, to a differently named CUDA 12 function
+# (as NVIDIA's header does); their PFN_*_v12000 typedef takes that signature.
+DECLARED_AS = {
+    "cuGetProcAddress": "cuGetProcAddress_v2",
+    "cuGraphInstantiate": "cuGraphInstantiateWithFlags",
+}
+
+# Older ABIs of names whose signature changed at CUDA 12.0. CuMetal exports
+# these as separate functions (runtime/driver/cuda_driver.cpp), and
+# cuGetProcAddress returns them for requested versions before 12000.
+OLDER_ABIS = [
+    ("cuGetProcAddress", 11030, "const char* symbol, void** pfn, int cudaVersion, uint64_t flags"),
+    ("cuGraphInstantiate", 10000, "@cuGraphInstantiate_v2"),
+    ("cuGraphInstantiate", 11000, "@cuGraphInstantiate_v2"),
+]
+
+
 def declared_signatures(text: str) -> dict[str, str]:
     """Return {name: parameter list} for every CUresult cuX(...) declaration."""
     signatures: dict[str, str] = {}
@@ -107,7 +125,9 @@ def render() -> str:
         "//",
         "// Versioned driver entry-point typedefs in the shape of NVIDIA's",
         "// cudaTypedefs.h. CuMetal exports each entry point once with the CUDA 12",
-        "// ABI, so every version of a name shares one signature.",
+        "// ABI, so every version of a name shares one signature, except the names",
+        "// whose ABI changed at CUDA 12.0 (cuGetProcAddress, cuGraphInstantiate),",
+        "// which also carry their pre-12.0 typedefs.",
         "#ifndef CUMETAL_CUDA_TYPEDEFS_H",
         "#define CUMETAL_CUDA_TYPEDEFS_H",
         "",
@@ -120,12 +140,21 @@ def render() -> str:
     ]
     missing = []
     for name in sorted(VERSIONS):
-        params = declared.get(name) or UNDECLARED.get(name)
+        source = DECLARED_AS.get(name, name)
+        params = declared.get(source) or UNDECLARED.get(name)
         if params is None:
             missing.append(name)
             continue
-        status = "" if name in declared else "  // not implemented; cuGetProcAddress reports NOT_FOUND"
+        status = "" if source in declared else "  // not implemented; cuGetProcAddress reports NOT_FOUND"
         lines.append(f"typedef CUresult (CUDAAPI *PFN_{name}_v{VERSIONS[name]})({params});{status}")
+    for name, version, params in OLDER_ABIS:
+        if params.startswith("@"):
+            params = declared.get(params[1:])
+            if params is None:
+                missing.append(f"{name}_v{version}")
+                continue
+        lines.append(f"typedef CUresult (CUDAAPI *PFN_{name}_v{version})({params});"
+                     "  // pre-CUDA 12 ABI")
     if missing:
         raise SystemExit(f"no signature for: {', '.join(missing)}")
 

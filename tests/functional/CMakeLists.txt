@@ -361,6 +361,10 @@ add_executable(cumetal_driver_memset_test
     driver_memset_test.cpp
 )
 
+add_executable(cumetal_driver_raw_ptx_module_test
+    driver_raw_ptx_module_test.cpp
+)
+
 add_executable(cumetal_driver_mem_get_info_test
     driver_mem_get_info_test.cpp
 )
@@ -1147,6 +1151,11 @@ target_link_libraries(cumetal_driver_async_memcpy_test
 )
 
 target_link_libraries(cumetal_driver_memset_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_driver_raw_ptx_module_test
     PRIVATE
         cumetal_runtime
 )
@@ -3134,6 +3143,22 @@ add_test(
     COMMAND cumetal_driver_memset_test
 )
 
+# #222: raw PTX through the driver API -- a two-entry FP32 module, a mixed
+# FP32/FP64/static-shared module, a module above the old 1 MiB direct-PTX
+# bound, CUDA_ERROR_INVALID_PTX and CUDA_ERROR_NOT_FOUND -- on the default
+# backend, strict typed, and the legacy lowering (one metallib per entry; it
+# refuses binary64 memory access).
+foreach(raw_ptx_backend IN ITEMS default cumetal-ir legacy)
+    add_test(
+        NAME functional_driver_raw_ptx_module_${raw_ptx_backend}
+        COMMAND cumetal_driver_raw_ptx_module_test
+    )
+    if(NOT raw_ptx_backend STREQUAL "default")
+        set_tests_properties(functional_driver_raw_ptx_module_${raw_ptx_backend}
+            PROPERTIES ENVIRONMENT "CUMETAL_PTX_BACKEND=${raw_ptx_backend}")
+    endif()
+endforeach()
+
 add_test(
     NAME functional_driver_mem_get_info
     COMMAND cumetal_driver_mem_get_info_test
@@ -4492,6 +4517,118 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     set_tests_properties(functional_cumetalc_native_aot_device_assert
         PROPERTIES SKIP_RETURN_CODE 77)
 
+    # Driver-API 16/32-bit and pitched memsets are ordered on their stream,
+    # after prior device work when synchronous, across an event wait, and
+    # only at graph launch when captured (#211).
+    add_test(
+        NAME functional_cumetalc_driver_memset_stream_order
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/driver_memset_stream_order.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_driver_memset_stream_order
+                "--expect-output=PASS: driver memsets are ordered on their streams"
+    )
+    set_tests_properties(functional_cumetalc_driver_memset_stream_order
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # #223: a pure copy kernel runs and host-side half conversions match the
+    # device's; a kernel only the device pass sees compiles with a warning
+    # instead of silently producing no metallib.
+    add_test(
+        NAME functional_cumetalc_copy_kernel_host_half
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/copy_kernel_host_half.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_copy_kernel_host_half
+                "--expect-output=PASS: copy kernel and host half conversions"
+    )
+    set_tests_properties(functional_cumetalc_copy_kernel_host_half
+        PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
+        NAME functional_cumetalc_device_only_kernel_warning
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_device_only_kernel.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/device_only_kernel.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_device_only_kernel
+    )
+    set_tests_properties(functional_cumetalc_device_only_kernel_warning
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # #225: pointers a kernel stored in device memory reach pinned host memory
+    # as host-usable pointers, and host-written pointers in pinned memory
+    # reach the device as GPU addresses, for synchronous, stream-ordered and
+    # driver-API copies, in both pointer modes.
+    add_test(
+        NAME functional_cumetalc_pinned_pointer_copies
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pinned_pointer_copies.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_pinned_pointer_copies
+                "--expect-output=PASS: embedded pointers survive pinned copies"
+    )
+    set_tests_properties(functional_cumetalc_pinned_pointer_copies
+        PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
+        NAME functional_cumetalc_pinned_pointer_copies_device_addresses
+        COMMAND ${CMAKE_COMMAND} -E env CUMETAL_USE_METAL_DEVICE_ADDRESSES=1
+                bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/pinned_pointer_copies.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_pinned_pointer_copies_device_addresses
+                "--expect-output=PASS: embedded pointers survive pinned copies"
+    )
+    set_tests_properties(functional_cumetalc_pinned_pointer_copies_device_addresses
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+
+    # #222: an FP64 kernel does not send an FP32 kernel of the same module
+    # down the FP64 path on the registration JIT.
+    add_test(
+        NAME functional_cumetalc_registration_fp64_neighbor
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/fp64_neighbor_kernel.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_registration_fp64_neighbor
+                --backend=legacy
+                "--expect-output=PASS: FP64 handling is decided per kernel"
+    )
+    set_tests_properties(functional_cumetalc_registration_fp64_neighbor
+        PROPERTIES SKIP_RETURN_CODE 77)
+
+    # #224: kernels follow device addresses stored in device memory into
+    # allocations they never bound. Every allocation sits in a residency set
+    # on every queue, so the default pointer mode no longer reads zeros and
+    # drops writes; the device-address mode keeps working.
+    add_test(
+        NAME functional_cumetalc_indirect_pointer_residency
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indirect_pointer_residency.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_indirect_pointer_residency
+                "--expect-output=PASS: kernels reach allocations through stored device addresses"
+    )
+    set_tests_properties(functional_cumetalc_indirect_pointer_residency
+        PROPERTIES SKIP_RETURN_CODE 77)
+    add_test(
+        NAME functional_cumetalc_indirect_pointer_residency_device_addresses
+        COMMAND ${CMAKE_COMMAND} -E env CUMETAL_USE_METAL_DEVICE_ADDRESSES=1
+                bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/indirect_pointer_residency.cu
+                ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_indirect_pointer_residency_device_addresses
+                "--expect-output=PASS: kernels reach allocations through stored device addresses"
+    )
+    set_tests_properties(functional_cumetalc_indirect_pointer_residency_device_addresses
+        PROPERTIES SKIP_RETURN_CODE 77)
+
     # Shared memory past Metal's 32 KB threadgroup limit runs from the
     # kernel's spill variant: CUDA's 48 KB default, the 99 KB opt-in, static
     # shared above 32 KB, shared atomics and barriers in spilled memory, and
@@ -4787,3 +4924,55 @@ add_test(
             ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
 )
 set_tests_properties(functional_metal_backend_encoder_label PROPERTIES SKIP_RETURN_CODE 77)
+# #230: NVIDIA's _v2 driver names are exported as aliases. The test loads the
+# library with dlopen, so it does not link against it; it uses the libcuda
+# alias when the binary shim is enabled, else libcumetal itself.
+add_executable(cumetal_driver_v2_symbols_test driver_v2_symbols_test.cpp)
+target_compile_options(cumetal_driver_v2_symbols_test PRIVATE -Wall -Wextra -Wpedantic)
+add_dependencies(cumetal_driver_v2_symbols_test cumetal_runtime)
+if(CUMETAL_ENABLE_BINARY_SHIM)
+    set(CUMETAL_V2_TEST_DRIVER "$<TARGET_FILE_DIR:cumetal_runtime>/libcuda.dylib")
+else()
+    set(CUMETAL_V2_TEST_DRIVER "$<TARGET_FILE:cumetal_runtime>")
+endif()
+add_test(
+    NAME functional_driver_v2_symbols
+    COMMAND $<TARGET_FILE:cumetal_driver_v2_symbols_test>
+            ${CUMETAL_V2_TEST_DRIVER}
+            ${CMAKE_SOURCE_DIR}/runtime/driver/driver_v2_aliases.txt
+)
+set_tests_properties(functional_driver_v2_symbols PROPERTIES SKIP_RETURN_CODE 77)
+
+# #231 / #232: run-time binary64 PTX through the driver JIT, with exact
+# kernelParams counts (no NULL terminator) and a 16-byte by-value struct, in
+# every FP64 mode, on the default and strict typed backends.
+add_executable(cumetal_driver_raw_ptx_fp64_abi_test driver_raw_ptx_fp64_abi_test.cpp)
+target_link_libraries(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE cumetal_runtime)
+target_compile_features(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE cxx_std_20)
+target_compile_options(cumetal_driver_raw_ptx_fp64_abi_test PRIVATE
+    -Wall -Wextra -Wpedantic -ffp-contract=off)
+foreach(cumetal_fp64_mode fast48 wide48 ieee64)
+    add_test(
+        NAME functional_driver_raw_ptx_fp64_abi_${cumetal_fp64_mode}
+        COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test>
+    )
+    set_tests_properties(functional_driver_raw_ptx_fp64_abi_${cumetal_fp64_mode} PROPERTIES
+        SKIP_RETURN_CODE 77
+        ENVIRONMENT "CUMETAL_FP64_MODE=${cumetal_fp64_mode}")
+endforeach()
+add_test(
+    NAME functional_driver_raw_ptx_fp64_abi_strict_typed
+    COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test>
+)
+set_tests_properties(functional_driver_raw_ptx_fp64_abi_strict_typed PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_FP64_MODE=ieee64;CUMETAL_PTX_BACKEND=cumetal-ir")
+add_test(
+    NAME functional_driver_raw_ptx_strict_typed_refusal
+    COMMAND $<TARGET_FILE:cumetal_driver_raw_ptx_fp64_abi_test> --expect-refusal
+)
+set_tests_properties(functional_driver_raw_ptx_strict_typed_refusal PROPERTIES
+    SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_PTX_BACKEND=cumetal-ir"
+    PASS_REGULAR_EXPRESSION "PASS: strict typed selection refuses"
+    FAIL_REGULAR_EXPRESSION "FAIL:")
