@@ -63,6 +63,19 @@ if [[ -n "$FP64_SOURCE" ]]; then
     echo "FAIL: installed FP64/bfloat16 program produced wrong results" >&2
     exit 1
   fi
+  # The device pass must read the installed headers too, not the source tree
+  # baked in at build time (Homebrew deletes it): poison them for device code.
+  HEADER="$PREFIX/include/cuda_runtime.h"
+  cp "$HEADER" "$TMP_ROOT/header.orig"
+  printf '#ifdef __CUDA_ARCH__\n#error "cumetal-installed-header-used"\n#endif\n' >> "$HEADER"
+  if "$PREFIX/bin/cumetalc" "$FP64_SOURCE" -o "$TMP_ROOT/header-poisoned" \
+       >"$TMP_ROOT/header-poisoned.log" 2>&1 ||
+     ! grep -q "cumetal-installed-header-used" "$TMP_ROOT/header-poisoned.log"; then
+    cat "$TMP_ROOT/header-poisoned.log" >&2
+    echo "FAIL: installed cumetalc's device pass ignored its installed headers" >&2
+    exit 1
+  fi
+  cp "$TMP_ROOT/header.orig" "$HEADER"
   if otool -L "$PREFIX/bin/cumetalc" "$PREFIX/lib/libcumetal.dylib" | grep -q libz3; then
     echo "FAIL: installed binaries load libz3, which they never use" >&2
     exit 1

@@ -1915,7 +1915,17 @@ int run_nvcc_compat(int argc, char** argv) {
     return -1;
 }
 
+// Directory holding CuMetal's CUDA headers (cuda_runtime.h), resolved like the
+// rest of the toolchain so an installed cumetalc does not depend on the build's
+// source tree, which Homebrew and relocated installs delete.
+std::filesystem::path g_runtime_api_dir;
+
 int main(int argc, char** argv) {
+    {
+        const ResourceLayout layout = resolve_resources(argc > 0 ? argv[0] : nullptr);
+        g_runtime_api_dir = layout.ok ? layout.include_dir
+                                      : std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+    }
     const bool nvcc_compat =
         std::filesystem::path(argv[0]).filename() == "nvcc" ||
         std::getenv("CUMETAL_NVCC_COMPAT") != nullptr;
@@ -2400,8 +2410,7 @@ int main(int argc, char** argv) {
         }
 
         const std::filesystem::path input_cu = options.input;
-        const std::filesystem::path runtime_api_dir =
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+        const std::filesystem::path runtime_api_dir = g_runtime_api_dir;
         temp_stage_file = make_temp_path(".ptx");
         std::string command =
             quote_shell(compiler.string()) +
@@ -2706,8 +2715,7 @@ int main(int argc, char** argv) {
             const std::filesystem::path raw_device_ll =
                 make_temp_path(".raw-device.ll");
             const std::filesystem::path device_ll = make_temp_path(".device.ll");
-            const std::filesystem::path runtime_api_dir =
-                std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+            const std::filesystem::path runtime_api_dir = g_runtime_api_dir;
             const std::string arch = cuda_arch;
             const std::string ptx_feature = ptx_feature_for_arch(arch);
             const bool emit_ptx = emit_stage == EmitStage::kPtx;
@@ -2856,8 +2864,7 @@ int main(int argc, char** argv) {
         }
 
         temp_stage_file = make_temp_path(".ll");
-        const std::filesystem::path runtime_api_dir =
-            std::filesystem::path(CUMETAL_SOURCE_DIR) / "runtime" / "api";
+        const std::filesystem::path runtime_api_dir = g_runtime_api_dir;
         const std::string command =
             "xcrun clang++ -std=c++20 -S -emit-llvm -x c++ "
             "-D__global__= -D__host__= -D__device__= -D__shared__= -D__constant__= "
