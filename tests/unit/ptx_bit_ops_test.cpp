@@ -130,7 +130,13 @@ int main() {
     ok &= expect(funnel.source.find("uchar(") != std::string::npos &&
                  funnel.source.find("ushort(") != std::string::npos,
                  "narrow stores truncate wider PTX source registers");
-    for (const auto* invalid_opcode : {"shf.l.clamp.b32", "shf.l.wrap.b64", "shf.l.extra.wrap.b32"}) {
+    for (const auto* clamp_opcode : {"shf.l.clamp.b32", "shf.r.clamp.b32"}) {
+        auto clamp_ptx = funnel_ptx;
+        clamp_ptx.replace(clamp_ptx.find("shf.l.wrap.b32"), 14, clamp_opcode);
+        const auto compiled = metal::compile_ptx_to_msl(clamp_ptx, strict_options);
+        ok &= expect(compiled.ok, std::string(clamp_opcode) + " compiles: " + compiled.error);
+    }
+    for (const auto* invalid_opcode : {"shf.l.clamp.b64", "shf.l.wrap.b64", "shf.l.extra.wrap.b32"}) {
         auto invalid_ptx = funnel_ptx;
         invalid_ptx.replace(invalid_ptx.find("shf.l.wrap.b32"), 14, invalid_opcode);
         ok &= expect(!metal::compile_ptx_to_msl(invalid_ptx, strict_options).ok,
@@ -208,6 +214,10 @@ int main() {
         {"shf.l.wrap.b32 %r3, %r1, %r2, 7;", "shf.l.wrap.b32", 3},
         {"shf.r.wrap.b32 %r3, %r1, %r2, 39;", "shf.r.wrap.b32", 3},
         {"shf.l.wrap.b32 %r3, %r1, %r2, 32;", "shf.l.wrap.b32", 1},
+        // A clamped count at or beyond 32 selects a whole word.
+        {"shf.l.clamp.b32 %r3, %r1, %r2, 40;", "shf.l.clamp.b32", 1},
+        {"shf.r.clamp.b32 %r3, %r1, %r2, 32;", "shf.r.clamp.b32", 1},
+        {"shf.r.clamp.b32 %r3, %r1, %r2, 7;", "shf.r.clamp.b32", 3},
         {"bfi.b32 %r3, %r1, %r2, 8, 16;", "bfi.b32", 4},
         {"bfi.b64 %rd2, %rd2, %rd2, 40, 30;", "bfi.b64", 4},
         {"bfi.b32 %r3, %r1, %r2, 40, 3;", "bfi.b32", 1},

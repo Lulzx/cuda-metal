@@ -231,6 +231,13 @@ bool env_truthy(const char* value) {
     return lowered == "1" || lowered == "true" || lowered == "yes" || lowered == "on";
 }
 
+// Read once per process: the launch path asks on every kernel, and getenv walks
+// the whole environment under a lock each time.
+bool trace_gpu_enabled() {
+    static const bool enabled = env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
+    return enabled;
+}
+
 const char* legacy_source_for_provenance(const std::string& provenance) {
     if (provenance == "generic_nvvm_lowering") return "generic_nvvm";
     if (provenance == "generic_ptx_lowering") return "generic_ptx";
@@ -3917,7 +3924,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         // tracing turns batching off rather than reporting one buffer's timing
         // as if it were one kernel's.
         const bool trace_async =
-            stream_impl != nullptr && env_truthy(std::getenv("CUMETAL_TRACE_GPU"));
+            stream_impl != nullptr && trace_gpu_enabled();
         const bool batching_allowed =
             stream_impl != nullptr && !trap_status && !grid_barrier && !shared_spill && !trace_async &&
             !config.disable_batching && max_batch_dispatches() > 0;
@@ -4183,7 +4190,7 @@ cudaError_t launch_kernel(const std::string& metallib_path,
         if (completion_status == cudaSuccess) {
             completion_status = check_grid_barrier_status(grid_barrier, error_message);
         }
-        if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
+        if (trace_gpu_enabled()) {
             const char* device_name = [[[backend.device name] description] UTF8String];
             const char* legacy_source =
                 legacy_source_for_provenance(lowering_source);
@@ -4360,7 +4367,7 @@ cudaError_t fft_r2c_3d_f32(const Fft3dR2CConfig& config,
         }
         [encoder endEncoding];
         encode_resource_signals(command_buffer, fences);
-        if (env_truthy(std::getenv("CUMETAL_TRACE_GPU"))) {
+        if (trace_gpu_enabled()) {
             const bool inverse = config.inverse;
             NSString* device_name = [[device name] description];
             [command_buffer addCompletedHandler:^(id<MTLCommandBuffer> completed) {

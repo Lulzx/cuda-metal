@@ -326,6 +326,16 @@ the last byte of every image it receives and the module image still loads.
 
 ### Device assertions
 
+The registration path classifies kernel parameters from the PTX signature.
+An entry that marks any parameter `.ptr` (Clang marks every pointer) has its
+unqualified `.u64/.s64/.b64` parameters bound as 64-bit scalars. An entry with
+no `.ptr` at all (NVCC) keeps the pointer default for those parameters, and a
+value that is not an allocation is rebound as a scalar only when it fits in 32
+bits; a larger non-allocation value fails the launch with
+`cudaErrorInvalidDevicePointer`.
+
+### Device assertions in synchronized kernels
+
 A failed device `assert` reports `cudaErrorAssert` (710, driver
 `CUDA_ERROR_ASSERT`) from the synchronization that observes its launch. Like
 other trap errors it is sticky on the stream that ran the launch, so every

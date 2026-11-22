@@ -397,6 +397,14 @@ add_executable(cumetal_byval_aggregate_launch_test
     byval_aggregate_launch_test.cpp
 )
 
+add_executable(cumetal_byval_pointer_walk_test
+    byval_pointer_walk_test.cpp
+)
+
+add_executable(cumetal_stwo_compat_probe_test
+    stwo_compat_probe_test.cpp
+)
+
 add_executable(cumetal_driver_module_load_data_ptx_test
     driver_module_load_data_ptx_test.cpp
 )
@@ -1184,6 +1192,16 @@ target_link_libraries(cumetal_nested_device_pointer_test
 )
 
 target_link_libraries(cumetal_byval_aggregate_launch_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_byval_pointer_walk_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_stwo_compat_probe_test
     PRIVATE
         cumetal_runtime
 )
@@ -3187,6 +3205,42 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/byval_aggregate_launch.metallib
 )
 set_tests_properties(functional_byval_aggregate_launch PROPERTIES SKIP_RETURN_CODE 77)
+
+add_test(
+    NAME functional_byval_pointer_walk
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_byval_pointer_walk.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/byval_pointer_walk.cu
+            $<TARGET_FILE:cumetal_byval_pointer_walk_test>
+)
+set_tests_properties(functional_byval_pointer_walk PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS "gpu;functional")
+
+foreach(frontend ptx direct)
+    add_test(
+        NAME functional_stwo_compat_probe_${frontend}
+        COMMAND bash
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_stwo_compat_probe.sh
+                $<TARGET_FILE:cumetalc>
+                ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/stwo_compat_probe.cu
+                $<TARGET_FILE:cumetal_stwo_compat_probe_test>
+                ${frontend}
+    )
+    set_tests_properties(functional_stwo_compat_probe_${frontend} PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 120 LABELS "gpu;functional")
+endforeach()
+
+add_test(
+    NAME functional_non_finite_constants
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_cumetalc_link_executable.sh
+            $<TARGET_FILE:cumetalc>
+            ${CMAKE_CURRENT_SOURCE_DIR}/fixtures/non_finite_constants.cu
+            ${CMAKE_CURRENT_BINARY_DIR}/non_finite_constants
+)
+set_tests_properties(functional_non_finite_constants PROPERTIES
+    SKIP_RETURN_CODE 77 TIMEOUT 120)
 
 # roundf's LLVM intrinsic can survive metallib emission yet fail when Metal
 # creates its pipeline. Require a real dispatch and exact edge-case results.
