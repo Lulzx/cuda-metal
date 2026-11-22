@@ -13,7 +13,7 @@ producers:
         - "scripts/claimwire_evidence.py"
     on_stale: error
     epochs:
-      current: backend_matrix-c4ce7fd3
+      current: backend_matrix-ac096cd2
 
   cumetal.samples_sweep:
     command: ["scripts/claimwire_evidence.py", "samples-sweep"]
@@ -46,7 +46,7 @@ producers:
         - "scripts/claimwire_evidence.py"
     on_stale: error
     epochs:
-      current: coverage_manifest-7561f533
+      current: coverage_manifest-d265218d
 
   cumetal.matmul:
     command: ["scripts/claimwire_evidence.py", "matmul"]

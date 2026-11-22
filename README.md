@@ -23,19 +23,8 @@ brew install lulzx/tap/cumetal
 cumetal doctor
 ```
 
-`cumetal doctor` exits 0 when everything is ready, 3 when only runtime JIT
-works (programs that register kernels with `libcumetal` run, but `cumetalc`
-cannot build ahead of time), and 1 when CuMetal is not usable. Ahead-of-time
-builds need Apple's offline Metal compiler. With Xcode 26 or 27, `xcrun --find
-metal` can point at a launcher stub until the Metal Toolchain component is
-installed:
-
-```bash
-sudo xcode-select -s /Applications/Xcode.app/Contents/Developer  # not the Command Line Tools
-sudo xcodebuild -runFirstLaunch
-xcodebuild -downloadComponent MetalToolchain
-cumetal doctor
-```
+If `cumetal doctor` reports a missing or placeholder Metal toolchain, see
+[checking the toolchain](docs/build.md#checking-the-toolchain).
 
 Compile and run your CUDA source:
 

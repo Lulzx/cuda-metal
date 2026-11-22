@@ -1,0 +1,23 @@
+{
+  "schema": "claimwire-run/v1",
+  "run_id": "coverage_manifest-d265218d",
+  "producer": "cumetal.coverage_manifest",
+  "timestamp": "2026-11-22T04:47:40Z",
+  "git_commit": "8d3fb27",
+  "git_dirty": true,
+  "hardware": "Apple M4 Pro",
+  "command": [
+    "scripts/claimwire_evidence.py",
+    "coverage-manifest"
+  ],
+  "input_set_digest": "blake3:d265218d2d25846793b5a703d0be27162b4bc1d1e73eb9523b20ffb247e22a26",
+  "input_files": {
+    "scripts/claimwire_evidence.py": "blake3:2387a416e05adf0378063adc7f5d0df8c4553765157ed2ec4ad082fe19fb187e",
+    "tests/cuda_projects/coverage_manifest.json": "blake3:5602b52151942a3490b0b8132cf79e536d982964b621d9be685a59c00f298f5b"
+  },
+  "scalars": {
+    "total": 55.0,
+    "typed_ptx": 52.0,
+    "native_aot": 51.0
+  }
+}
