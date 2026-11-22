@@ -24,7 +24,7 @@ producers:
         - "scripts/claimwire_evidence.py"
     on_stale: error
     epochs:
-      current: samples_sweep-ab6d3a69
+      current: samples_sweep-17a04a88
 
   cumetal.phase4_manifest:
     command: ["scripts/claimwire_evidence.py", "phase4-manifest"]

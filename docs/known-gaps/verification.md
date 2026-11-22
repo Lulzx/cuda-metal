@@ -10,7 +10,9 @@ The Phase 4 denominator is the reviewed 192-test manifest at
 outcome `pass`; skips and waivers are not removed from the denominator. In
 Debug builds on Apple M4 Pro (2026-11-08), with the binary shim on and off,
 each run passed all 192 with zero skips. The
-separate NVIDIA `cuda-samples` manifest has 83 enrolled headless samples; all 83 pass.
+separate NVIDIA `cuda-samples` manifest has 83 enrolled headless samples; 81 pass.
+The two dynamic-parallelism samples, `cdpQuadtree` and `cdpAdvancedQuicksort`,
+have not lowered since Homebrew LLVM 23 and are recorded as `no-lowering`.
 Both are bounded snapshots, not general CUDA compatibility percentages;
 tests and samples outside the enrollments are unclassified.
 

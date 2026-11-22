@@ -14,10 +14,10 @@
     "cumetal.samples_sweep": {
       "epochs": {
         "current": {
-          "run_id": "samples_sweep-ab6d3a69",
-          "git_commit": "7f3f805",
+          "run_id": "samples_sweep-17a04a88",
+          "git_commit": "7eef97b",
           "git_dirty": true,
-          "input_set_digest": "blake3:ab6d3a696ceb3dadee81935c092ce16265dd3b84552ba12eea4225ba1052635e"
+          "input_set_digest": "blake3:17a04a883ed553b31e8df630f948303ea7c05950524658e7d9e846bb405b44ca"
         }
       }
     },
@@ -34,10 +34,10 @@
     "cumetal.coverage_manifest": {
       "epochs": {
         "current": {
-          "run_id": "coverage_manifest-7561f533",
-          "git_commit": "7f3f805",
+          "run_id": "coverage_manifest-d265218d",
+          "git_commit": "7ab063b",
           "git_dirty": true,
-          "input_set_digest": "blake3:7561f5337bc608336517d5d929907cef9f09905cd49603a25e4c26cb3d3fb567"
+          "input_set_digest": "blake3:d265218d2d25846793b5a703d0be27162b4bc1d1e73eb9523b20ffb247e22a26"
         }
       }
     },
@@ -262,7 +262,7 @@
       "epoch": "current"
     },
     "samples.pass": {
-      "value": 83,
+      "value": 81,
       "unit": "count",
       "epoch": "current"
     },
@@ -277,17 +277,17 @@
       "epoch": "current"
     },
     "corpus.total": {
-      "value": 53,
+      "value": 55,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.typed_ptx": {
-      "value": 51,
+      "value": 52,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.native_aot": {
-      "value": 49,
+      "value": 51,
       "unit": "count",
       "epoch": "current"
     },
@@ -551,36 +551,6 @@
       "rendered_digest": "blake3:ffac6a78338ed581fcb8f2989df88f9fd8c07317e6d469ca0f2953ae96f31dc7",
       "context_digest": "blake3:8868447ce462e2aae1f30668d0cb6eab3b6c1b86edb234e8a9a197c050935a18"
     },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#0": {
-      "rendered": "reviewed 192-test manifest",
-      "rendered_digest": "blake3:613bc08b8ff72e78f62980f1842503233479c2ace99fd65318f46ff31b54e27c",
-      "context_digest": "blake3:7d22391d68bf10d84a046ebcbbb78232c93bb70f163fb04ca4098aa486d9f186"
-    },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#1": {
-      "rendered": "run passed all 192 with zero skips",
-      "rendered_digest": "blake3:c3db08bc4eac914ff58d1e5f2683dbf672b687fd4ae485c5529ef11d555d468e",
-      "context_digest": "blake3:5cd9bb2bfc3536c8724bb1b2d4637d56d7b1ace200553c463849fb69eeb77418"
-    },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#2": {
-      "rendered": "manifest has 83 enrolled headless samples; all 83 pass.",
-      "rendered_digest": "blake3:09c56097962d05afd4e38cfc22202c2a3743c33fcc5157e6dd072b6639c1d2db",
-      "context_digest": "blake3:5a4fe60eb6a4a784c124fda80a94de9f3ba91e080c95d600c0287e2e92be6f65"
-    },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#0": {
-      "rendered": "32,000-atom, 100-step LJ benchmark",
-      "rendered_digest": "blake3:f4021e5287341426e46e60b529d4860b14955abe4e07e8b1ca8e868c5e33f601",
-      "context_digest": "blake3:a8bec03f37916f89cf53f25be59f6fe272528e73d9fc4de2b29e3c6f82c5d41f"
-    },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#1": {
-      "rendered": "CPU-double error is `4.49e-6`",
-      "rendered_digest": "blake3:5ccdfa4ac1b9872ee1f6ec1b90dee7b0c05130d90f67642ff9983cc59cc7da81",
-      "context_digest": "blake3:fa2bf0e2bacded74c4d0d6d42e02d61b164a3a47f66dc48ef5cf228169356f94"
-    },
-    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#2": {
-      "rendered": "difference `3.25e-7`, and analytic initial pair-energy error `2.00e-7`",
-      "rendered_digest": "blake3:8ef50b175e5f2cb6d7ad25919cd07f677f7a77be83c84b7044adf8cf8d16eb26",
-      "context_digest": "blake3:d96af433710eb7e901951027a2e815fd6eabadf2f2a9474bf808a2d22cbf31a6"
-    },
     "docs/matmul-performance.md::block:matmul.outcome#0": {
       "rendered": "by **1.48x**, reaching **2.03 TFLOP/s**, or **40.1% of MPS**",
       "rendered_digest": "blake3:39d4acbf5e0560c0e6bc123021c83ed35d7a5378df34661869538b9ea5760474",
@@ -767,13 +737,13 @@
       "context_digest": "blake3:068f2ca4e353b5ec3c4d748ebc775f893d6dcb97e5a10b950632daf8201eee97"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#8": {
-      "rendered": "rerun passes 83/83.",
-      "rendered_digest": "blake3:8f699b4e59301b784523798262c138620c1f7fe3ee9260c582c3d0eecb344a39",
+      "rendered": "rerun passes 81/83.",
+      "rendered_digest": "blake3:4b87c0924f199ef97a87c64897c162346bff61424ab6630e79fe0a75c238b0ed",
       "context_digest": "blake3:f6c5cdafab1b906337e8fc48cf7b71cc068d128f3a779a0085e486252c88278d"
     },
     "docs/status.md::block:status.snapshot#0": {
-      "rendered": "`cuda-samples`: **83/83 pass**",
-      "rendered_digest": "blake3:ae6f154969025f821cf5ee0f2b845455fae069cc719cb2760d640eedfee81ced",
+      "rendered": "`cuda-samples`: **81/83 pass**",
+      "rendered_digest": "blake3:45f515634ddba5a3e2bbf73d2a23067e9c8188cadfd05f54971f92293a67f38d",
       "context_digest": "blake3:58314b1865745b3cdaa5a7c28ed1b49e37ae18ddf45d077120468a14495cf689"
     },
     "docs/status.md::block:status.snapshot#1": {
@@ -840,6 +810,36 @@
       "rendered": "classifies all 83 enrolled",
       "rendered_digest": "blake3:f9e4f5671d5f9e4cf390353f1e786cbd9b8c78b510ded68570bccc9b221464c0",
       "context_digest": "blake3:0846777d18aa97c4b094961572562bc14351a15643a6e67b13bb82e50ce8adcd"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#0": {
+      "rendered": "reviewed 192-test manifest",
+      "rendered_digest": "blake3:613bc08b8ff72e78f62980f1842503233479c2ace99fd65318f46ff31b54e27c",
+      "context_digest": "blake3:7d22391d68bf10d84a046ebcbbb78232c93bb70f163fb04ca4098aa486d9f186"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#1": {
+      "rendered": "run passed all 192 with zero skips",
+      "rendered_digest": "blake3:c3db08bc4eac914ff58d1e5f2683dbf672b687fd4ae485c5529ef11d555d468e",
+      "context_digest": "blake3:5cd9bb2bfc3536c8724bb1b2d4637d56d7b1ace200553c463849fb69eeb77418"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#2": {
+      "rendered": "manifest has 83 enrolled headless samples; 81 pass.",
+      "rendered_digest": "blake3:91ed883907a1f806e418e386895d6382cb171c7d626136705ac8276ac560d28b",
+      "context_digest": "blake3:b85c30ec313037754e76c7589570c03ee07c94b54474370b6fb66effd24e75e9"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#0": {
+      "rendered": "32,000-atom, 100-step LJ benchmark",
+      "rendered_digest": "blake3:f4021e5287341426e46e60b529d4860b14955abe4e07e8b1ca8e868c5e33f601",
+      "context_digest": "blake3:a8bec03f37916f89cf53f25be59f6fe272528e73d9fc4de2b29e3c6f82c5d41f"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#1": {
+      "rendered": "CPU-double error is `4.49e-6`",
+      "rendered_digest": "blake3:5ccdfa4ac1b9872ee1f6ec1b90dee7b0c05130d90f67642ff9983cc59cc7da81",
+      "context_digest": "blake3:fa2bf0e2bacded74c4d0d6d42e02d61b164a3a47f66dc48ef5cf228169356f94"
+    },
+    "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#2": {
+      "rendered": "difference `3.25e-7`, and analytic initial pair-energy error `2.00e-7`",
+      "rendered_digest": "blake3:8ef50b175e5f2cb6d7ad25919cd07f677f7a77be83c84b7044adf8cf8d16eb26",
+      "context_digest": "blake3:d96af433710eb7e901951027a2e815fd6eabadf2f2a9474bf808a2d22cbf31a6"
     }
   }
 }
