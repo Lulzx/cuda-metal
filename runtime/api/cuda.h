@@ -20,7 +20,7 @@
 #define __CUMETAL__ 1
 #endif
 #ifndef __CUMETAL_VERSION__
-#define __CUMETAL_VERSION__ 800
+#define __CUMETAL_VERSION__ 900
 #endif
 
 
