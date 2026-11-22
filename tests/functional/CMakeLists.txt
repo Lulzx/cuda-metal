@@ -20,6 +20,28 @@ if(CUMETAL_TRACE_PYTHON3_EXECUTABLE)
     )
     set_tests_properties(functional_compile_trace PROPERTIES
         SKIP_RETURN_CODE 77 TIMEOUT 180 LABELS "gpu")
+
+    # Human-readable per-phase timing and the MSL size limit, ahead of time
+    # and at runtime (#220).
+    add_test(
+        NAME functional_compile_timing
+        COMMAND ${CUMETAL_TRACE_PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_compile_timing_test.py
+                $<TARGET_FILE:cumetalc>
+                $<TARGET_FILE:cumetal_runtime>
+    )
+    set_tests_properties(functional_compile_timing PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 600 LABELS "gpu")
+
+    # share/cumetal-cache next to a relocated libcumetal.dylib (#229).
+    add_test(
+        NAME functional_bundled_cache
+        COMMAND ${CUMETAL_TRACE_PYTHON3_EXECUTABLE}
+                ${CMAKE_CURRENT_SOURCE_DIR}/run_bundled_cache_test.py
+                $<TARGET_FILE:cumetal_runtime>
+    )
+    set_tests_properties(functional_bundled_cache PROPERTIES
+        SKIP_RETURN_CODE 77 TIMEOUT 300 LABELS "gpu")
 endif()
 
 add_executable(cumetal_runtime_vector_add_test
@@ -4674,3 +4696,33 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/cumetalc_nvcc_host_options
 )
 set_tests_properties(functional_cumetalc_nvcc_host_options PROPERTIES SKIP_RETURN_CODE 77)
+
+# Compute encoders are labelled with their kernel for Instruments and GPU
+# captures (#227).
+add_executable(cumetal_metal_backend_encoder_label_test
+    metal_backend_encoder_label_test.cpp
+)
+target_link_libraries(cumetal_metal_backend_encoder_label_test
+    PRIVATE
+        cumetal_runtime
+)
+target_include_directories(cumetal_metal_backend_encoder_label_test
+    PRIVATE
+        ${CMAKE_SOURCE_DIR}/runtime/metal_backend
+        ${CMAKE_SOURCE_DIR}/runtime/api
+)
+target_compile_options(cumetal_metal_backend_encoder_label_test
+    PRIVATE
+        -Wall
+        -Wextra
+        -Wpedantic
+)
+add_test(
+    NAME functional_metal_backend_encoder_label
+    COMMAND bash
+            ${CMAKE_CURRENT_SOURCE_DIR}/run_runtime_vector_add.sh
+            ${CMAKE_SOURCE_DIR}/scripts/generate_reference_metallib.sh
+            $<TARGET_FILE:cumetal_metal_backend_encoder_label_test>
+            ${CMAKE_SOURCE_DIR}/tests/air_abi/reference/reference.metallib
+)
+set_tests_properties(functional_metal_backend_encoder_label PROPERTIES SKIP_RETURN_CODE 77)

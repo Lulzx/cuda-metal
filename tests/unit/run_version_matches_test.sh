@@ -46,6 +46,19 @@ if [[ "${STRING_VERSION}" != "${HEADER_VERSION}" ]]; then
     fail=1
 fi
 
+# cuda.h carries the __CUMETAL_VERSION__ capability macro (same encoding as CUMETAL_VERSION)
+# that cumetalc-compiled code sees on host and device.
+CUDA_HEADER="$(dirname "${NATIVE_HEADER}")/cuda.h"
+CAPABILITY_VERSION="$(sed -n \
+    's/^#define __CUMETAL_VERSION__[[:space:]][[:space:]]*\([0-9][0-9]*\).*/\1/p' \
+    "${CUDA_HEADER}" | head -1)"
+EXPECTED_ENCODED=$((MAJOR * 10000 + MINOR * 100 + PATCH))
+if [[ "${CAPABILITY_VERSION}" != "${EXPECTED_ENCODED}" ]]; then
+    echo "FAIL: cuda.h defines __CUMETAL_VERSION__ ${CAPABILITY_VERSION:-<missing>}," \
+         "expected ${EXPECTED_ENCODED} for ${HEADER_VERSION}"
+    fail=1
+fi
+
 # cumetalc takes its version from CMake at compile time, so this catches a stale binary too.
 CUMETALC_VERSION="$("${CUMETALC}" --version | awk '{print $2}')"
 if [[ "${CUMETALC_VERSION}" != "${CMAKE_VERSION}" ]]; then

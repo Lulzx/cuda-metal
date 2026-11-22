@@ -9105,7 +9105,7 @@ std::unordered_map<int, Importer::GuardedStore> scan_guarded_stores(std::string_
 }
 
 PtxImportResult import_ptx_once(std::string_view ptx, const PtxImportOptions& options) {
-    common::CompileTrace import_trace("ptx_import", ptx.size());
+    common::CompilePhase import_trace("ptx_import", ptx.size());
     Importer importer;
     importer.guarded_stores = scan_guarded_stores(ptx);
     importer.type_solver_step_limit = options.type_solver_step_limit;

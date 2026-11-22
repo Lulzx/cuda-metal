@@ -154,6 +154,9 @@ cudaError_t create_stream(std::shared_ptr<Stream>* out_stream,
 std::shared_ptr<Stream> legacy_default_stream();
 cudaError_t destroy_stream(const std::shared_ptr<Stream>& stream, std::string* error_message);
 cudaError_t stream_synchronize(const std::shared_ptr<Stream>& stream, std::string* error_message);
+// Label of the stream's open batched compute encoder, as Instruments and GPU
+// captures show it; empty when no compute batch is open. For tests.
+std::string stream_open_compute_encoder_label(const std::shared_ptr<Stream>& stream);
 cudaError_t stream_tail_ticket(const std::shared_ptr<Stream>& stream,
                                std::uint64_t* out_ticket,
                                std::string* error_message);

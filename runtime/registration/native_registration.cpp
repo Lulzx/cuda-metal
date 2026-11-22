@@ -1,4 +1,5 @@
 #include "native_registration.h"
+#include "module_cache.h"
 
 #include "cumetal/common/metallib.h"
 #include "cumetal_native.h"
@@ -58,16 +59,7 @@ std::uint64_t fnv1a(const std::uint8_t* bytes, std::size_t size) {
 }
 
 std::filesystem::path cache_root() {
-    if (const char* configured = std::getenv("CUMETAL_CACHE_DIR");
-        configured != nullptr && configured[0] != '\0') {
-        return std::filesystem::path(configured) / "native-aot";
-    }
-    if (const char* user_home = std::getenv("HOME");
-        user_home != nullptr && user_home[0] != '\0') {
-        return std::filesystem::path(user_home) / "Library" / "Caches" /
-               "io.cumetal" / "native-aot";
-    }
-    return std::filesystem::temp_directory_path() / "io.cumetal" / "native-aot";
+    return cumetal::cache::cache_base_dir() / "native-aot";
 }
 
 std::filesystem::path materialize_metallib(const CuMetalModuleDescriptor& descriptor,

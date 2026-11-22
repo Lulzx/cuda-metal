@@ -75,6 +75,7 @@ endif()
 
 add_library(cumetal_common STATIC
     compiler/common/src/air_target.cpp
+    compiler/common/src/compile_timing.cpp
     compiler/common/src/metallib.cpp
 )
 

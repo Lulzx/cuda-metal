@@ -10430,7 +10430,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     result.gpu_ir = imported.module;
     result.gpu_ir.attributes["provenance"] = "generic_ptx_lowering";
     MetalLegalizeResult legalized = [&] {
-        common::CompileTrace trace("metal_legalization");
+        common::CompilePhase trace("metal_legalization");
         return legalize_for_metal(result.gpu_ir);
     }();
     result.warnings.insert(result.warnings.end(), legalized.warnings.begin(), legalized.warnings.end());
@@ -10440,7 +10440,7 @@ PtxToMslResult compile_ptx_to_msl(std::string_view ptx, const PtxToMslOptions& o
     }
     result.metal_ir = legalized.module;
     LowerToMslResult lowered = [&] {
-        common::CompileTrace trace("msl_generation");
+        common::CompilePhase trace("msl_generation");
         return lower_to_msl(result.metal_ir);
     }();
     result.warnings.insert(result.warnings.end(), lowered.warnings.begin(), lowered.warnings.end());
@@ -10481,7 +10481,10 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     options.source_name = std::string(source_name);
     options.entry_name = std::string(entry_name);
     options.fp64_mode = std::string(fp64_mode);
-    ir::NvvmImportResult imported = ir::import_nvvm_llvm_ir(llvm_ir, options);
+    ir::NvvmImportResult imported = [&] {
+        common::CompilePhase trace("nvvm_import", llvm_ir.size());
+        return ir::import_nvvm_llvm_ir(llvm_ir, options);
+    }();
     result.warnings = imported.warnings;
     result.printf_formats = imported.printf_formats;
     result.uses_device_heap = imported.uses_device_heap;
@@ -10492,14 +10495,20 @@ NvvmToMslResult compile_nvvm_to_msl(std::string_view llvm_ir,
     }
     result.gpu_ir = imported.module;
     result.gpu_ir.attributes["provenance"] = "generic_nvvm_lowering";
-    MetalLegalizeResult legalized = legalize_for_metal(result.gpu_ir);
+    MetalLegalizeResult legalized = [&] {
+        common::CompilePhase trace("metal_legalization");
+        return legalize_for_metal(result.gpu_ir);
+    }();
     result.warnings.insert(result.warnings.end(), legalized.warnings.begin(), legalized.warnings.end());
     if (!legalized.ok) {
         result.error = legalized.error;
         return result;
     }
     result.metal_ir = legalized.module;
-    LowerToMslResult lowered = lower_to_msl(result.metal_ir);
+    LowerToMslResult lowered = [&] {
+        common::CompilePhase trace("msl_generation");
+        return lower_to_msl(result.metal_ir);
+    }();
     result.warnings.insert(result.warnings.end(), lowered.warnings.begin(), lowered.warnings.end());
     if (!lowered.ok) {
         result.error = lowered.error;

@@ -7,6 +7,22 @@
 #define __cuda_cuda_h__ 1
 #endif
 
+// Capability detection (docs/downstream.md). Defined for every translation
+// unit built against CuMetal's headers: cumetalc force-includes
+// cuda_runtime.h, which includes this file, on both the host and device
+// sides. Use these instead of guessing from CUMETAL_ROOT or the platform:
+//   #if defined(__CUMETAL__) && __CUMETAL_VERSION__ >= 800   // 0.8.0+
+// __CUMETAL_VERSION__ is major*10000 + minor*100 + patch, the same encoding
+// as CUMETAL_VERSION in cumetal_native.h; unit_version_matches keeps the
+// two and CMake's project version in step. These are CuMetal's own macros:
+// NVIDIA's toolkit never defines them, so they cannot misfire under nvcc.
+#ifndef __CUMETAL__
+#define __CUMETAL__ 1
+#endif
+#ifndef __CUMETAL_VERSION__
+#define __CUMETAL_VERSION__ 800
+#endif
+
 
 #include <stddef.h>
 #include <stdint.h>

@@ -34,9 +34,12 @@ does not prove a kernel was dispatched or that its result is correct. Set
 `CUMETAL_TRACE_GPU=1` for the separate execution/provenance records and verify
 numerical results. Compilation spans use CPU wall time, not GPU duration.
 
-This initial tracing covers the typed PTX-to-MSL path and runtime source/pipeline
-creation only. NVVM translation, legacy compilation, precompiled-metallib loads,
-cache hits, source reads, and lock waiting have no spans. Runtime cache hits
+Tracing covers the typed PTX-to-MSL and NVVM-to-MSL paths (`ptx_import`,
+`nvvm_import`, `metal_legalization`, `msl_generation`), Apple's offline compiler
+steps (`air_opt`, `metal_compile`, `air_link`, `metallib_package`), `cumetalc`'s
+external steps, and runtime source/pipeline creation. Legacy PTX lowering,
+precompiled-metallib loads, cache hits, source reads, and lock waiting have no
+spans. Runtime cache hits
 therefore produce no additional creation spans. The total PTX span includes its
 nested stages and intervening work; do not add it to its children. Apple's own
 compiler caches can affect timings even when a creation call is recorded.
@@ -46,6 +49,69 @@ allocation failures.
 Focused checks are `unit_compile_trace` (host-only pairing, opt-in, interruption,
 and successful/failed PTX compilation) and `functional_compile_trace` (real Metal
 preparation, cache reuse, errors, GPU values, and guards).
+
+## Per-phase timing for people
+
+`CUMETAL_TRACE_COMPILE` is for tools. For a readable report of where a slow
+compile spends its time, pass `--compile-timing` to `cumetalc` or set
+`CUMETAL_COMPILE_TIMING=1` for `cumetalc` or for an application that JIT-compiles
+kernels through `libcumetal`:
+
+```text
+$ cumetalc saxpy.cu -o saxpy --compile-timing
+cumetal timing: start cuda_frontend
+cumetal timing: done  cuda_frontend 124.5 ms
+cumetal timing: start nvvm_import (2.8 KiB input)
+...
+cumetal timing: Metal source for saxpy.cu: 3.2 KiB; largest functions: _Z5saxpyfPfS_ (585 B)
+cumetal timing: start metal_compile [saxpy.cu] (3.2 KiB input)
+cumetal timing: done  metal_compile [saxpy.cu] 39.7 ms
+...
+cumetal timing: summary (wall clock; phases can nest or overlap, do not add)
+cumetal timing:   cuda_frontend                           1x        124.5 ms
+...
+```
+
+Each phase prints a `start` line before it runs, so a compile that stalls for
+minutes shows which phase it is in. Before Apple's compiler sees generated
+Metal source, the report gives the source size and its five largest functions,
+which is usually enough to find the kernel that blew up. The process prints a
+per-phase total at exit; phases nest (a `cumetalc` executable build runs the
+device compile as a child, whose lines are passed through), so totals do not
+add up to the wall time. Only the exact value `1` enables timing; `-v` keeps
+its nvcc meaning. Unlike the machine-readable trace, timing lines name the
+source file or kernel.
+
+Phases: `cuda_frontend`, `llvm_opt`, `nvvm_import`, `ptx_import`,
+`metal_legalization`, `msl_generation`, `air_opt`, `metal_compile`,
+`metal_compile_support`, `air_link`, `metallib_package`, and for executables
+`device_compile`, `host_frontend`, `host_lower`, `metallib_embed`,
+`registration_compile`, `object_merge`, `host_link`. At runtime:
+`metal_new_library_with_source`, `metal_new_function`,
+`metal_new_compute_pipeline`.
+
+## Failing fast on very large kernels
+
+Apple's compile time grows with source size: a 24 MB generated MSL source took
+300–600 s to become a library (#115, #133). Set `CUMETAL_MSL_SIZE_LIMIT` to a
+byte count with an optional `K`, `M` or `G` suffix (binary units) to refuse
+generated Metal source above that size before Apple's compiler runs:
+
+```text
+$ CUMETAL_MSL_SIZE_LIMIT=8M cumetalc huge.cu -o huge
+cumetalc failed: generated Metal source for huge.cu is 24.1 MiB (25270519 bytes),
+over CUMETAL_MSL_SIZE_LIMIT=8M (8388608 bytes); largest functions: ...
+```
+
+The limit applies to `cumetalc` and to runtime compilation (registration JIT,
+driver-loaded modules, `cuModuleLoad` of `.metal` source); at runtime the
+message goes to stderr and the kernel fails to load with the usual CUDA error.
+A malformed value is an error rather than being ignored. The limit is unset by
+default. Without it, CuMetal still warns once per process when a generated
+source reaches 16 MiB. The limit covers generated MSL only: the legacy
+PTX-to-LLVM path hands LLVM IR to `xcrun metal` and is not size-checked.
+
+`functional_compile_timing` and `unit_compile_timing` cover both features.
 
 ## Bounded private-array optimization
 

@@ -1,4 +1,5 @@
 #include "cumetal/air_emitter/emitter.h"
+#include "cumetal/common/compile_trace.h"
 #include "cumetal/common/metal_support_path.h"
 #include "cumetal/common/metallib.h"
 #include "cumetal/ir/ir.h"
@@ -238,7 +239,7 @@ void print_usage(const char* argv0) {
                  " [-I path] [-D name[=value]] [--cuda-include path]"
                  " [--backend legacy|cumetal-ir]"
                  " [--emit llvm|cumetal-ir|metal-ir|msl|metallib|ptx|exe]"
-                 " [--link|--no-link] [--save-temps]"
+                 " [--link|--no-link] [--save-temps] [--compile-timing]"
                  " [--fp64=fast48|wide48|ieee64|native|emulate|warn]"
                  " [-gencode arch=compute_XX,code=sm_XX] [-arch sm_XX]"
                  " [-Xcompiler flag] [--expt-relaxed-constexpr]"
@@ -294,6 +295,29 @@ CommandResult run_command_capture(const std::string& command) {
     }
 
     return result;
+}
+
+// One external step of a compilation, recorded as a compile phase
+// (CUMETAL_COMPILE_TIMING / CUMETAL_TRACE_COMPILE).
+CommandResult run_timed_command(const char* phase, const std::string& command) {
+    cumetal::common::CompilePhase timing(phase);
+    return run_command_capture(command);
+}
+
+// A child cumetalc's timing lines land in its captured output, which a
+// successful step discards; pass them through so nested phases stay visible.
+void forward_timing_lines(const std::string& output) {
+    if (!cumetal::common::compile_timing_enabled()) return;
+    std::size_t begin = 0;
+    while (begin < output.size()) {
+        std::size_t end = output.find('\n', begin);
+        if (end == std::string::npos) end = output.size();
+        const std::string_view line(output.data() + begin, end - begin);
+        if (line.rfind("cumetal timing:", 0) == 0 || line.rfind("cumetal: warning:", 0) == 0) {
+            std::cerr << line << '\n';
+        }
+        begin = end + 1;
+    }
 }
 
 bool command_exists(const std::string& name) {
@@ -1202,8 +1226,8 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     CommandResult device_result;
     {
         std::thread device_thread(
-            [&]() { device_result = run_command_capture(device_compile); });
-        host_ir_result = run_command_capture(host_ir_command);
+            [&]() { device_result = run_timed_command("device_compile", device_compile); });
+        host_ir_result = run_timed_command("host_frontend", host_ir_command);
         device_thread.join();
     }
     if (!host_ir_result.started || host_ir_result.exit_code != 0) {
@@ -1224,6 +1248,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         std::cerr << "cumetalc failed: " << io_error << "\n";
         return 1;
     }
+    forward_timing_lines(device_result.exit_code == 0 ? device_result.output : std::string());
     if (!device_result.started || device_result.exit_code != 0) {
         // A kernel-free translation unit legitimately has no device code:
         // the device frontend refuses empty modules, which is fine here.
@@ -1392,7 +1417,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         const std::string lower_host = quote_shell(compiler.string()) +
             " -O2 -c " + quote_shell(host_llvm.string()) + " -o " +
             quote_shell(object_file.string()) + " 2>&1";
-        const CommandResult lowered = run_command_capture(lower_host);
+        const CommandResult lowered = run_timed_command("host_lower", lower_host);
         if (!lowered.started || lowered.exit_code != 0 ||
             !std::filesystem::exists(object_file)) {
             if (!lowered.output.empty()) std::cerr << lowered.output;
@@ -1428,7 +1453,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             quote_shell(layout.lib_dir.string()) + " -lcumetal -Wl,-rpath," +
             quote_shell(layout.lib_dir.string()) + " -o " +
             quote_shell(options.output.string()) + " 2>&1";
-        const CommandResult host_link_result = run_command_capture(host_link);
+        const CommandResult host_link_result = run_timed_command("host_link", host_link);
         if (!host_link_result.output.empty()) std::cerr << host_link_result.output;
         cleanup();
         if (!host_link_result.started || host_link_result.exit_code != 0 ||
@@ -1442,6 +1467,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     cumetal::air_emitter::EmitOptions emit;
     emit.input = metal_source;
     emit.output = metallib;
+    emit.source_label = options.input.filename().string();
     emit.mode = cumetal::air_emitter::EmitMode::kXcrun;
     emit.overwrite = true;
     emit.validate_output = true;
@@ -1492,7 +1518,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
     const std::string metallib_compile = quote_shell(compiler.string()) + " -c " +
         quote_shell(metallib_asm.string()) + " -o " +
         quote_shell(metallib_object.string()) + " 2>&1";
-    const CommandResult metallib_result = run_command_capture(metallib_compile);
+    const CommandResult metallib_result = run_timed_command("metallib_embed", metallib_compile);
     if (!metallib_result.started || metallib_result.exit_code != 0) {
         if (!metallib_result.output.empty()) std::cerr << metallib_result.output;
         cleanup();
@@ -1503,7 +1529,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
         " -std=c++17 -O2 -I " + quote_shell(layout.include_dir.string()) + " -c " +
         quote_shell(registration_source.string()) + " -o " +
         quote_shell(registration_object.string()) + " 2>&1";
-    const CommandResult registration_result = run_command_capture(registration_compile);
+    const CommandResult registration_result = run_timed_command("registration_compile", registration_compile);
     if (!registration_result.started || registration_result.exit_code != 0) {
         if (!registration_result.output.empty()) std::cerr << registration_result.output;
         cleanup();
@@ -1519,7 +1545,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             quote_shell(registration_object.string()) + " " +
             quote_shell(metallib_object.string()) + " -o " +
             quote_shell(options.output.string()) + " 2>&1";
-        const CommandResult merge_result = run_command_capture(merge);
+        const CommandResult merge_result = run_timed_command("object_merge", merge);
         if (!merge_result.output.empty()) std::cerr << merge_result.output;
         cleanup();
         if (!merge_result.started || merge_result.exit_code != 0 ||
@@ -1544,7 +1570,7 @@ int run_executable_driver(const ExecutableDriverOptions& options, const char* ar
             quote_shell(layout.lib_dir.string()) + " -o " +
             quote_shell(options.output.string()) + " 2>&1";
 
-    const CommandResult link_result = run_command_capture(link);
+    const CommandResult link_result = run_timed_command("host_link", link);
     if (!link_result.output.empty()) {
         std::cerr << link_result.output;
         if (link_result.output.back() != '\n') std::cerr << '\n';
@@ -2227,6 +2253,11 @@ int main(int argc, char** argv) {
         } else if (arg == "--no-link") {
             link_executable = false;
             link_requested_explicitly = true;
+        } else if (arg == "--compile-timing") {
+            // Same switch as CUMETAL_COMPILE_TIMING=1, exported so child
+            // cumetalc steps report their phases too. (-v stays nvcc's
+            // version/verbose spelling for CMake's toolchain probes.)
+            ::setenv("CUMETAL_COMPILE_TIMING", "1", 1);
         } else if (arg == "--save-temps") {
             keep_intermediates = true;
         } else if (arg == "--version" || arg == "-v") {
@@ -2386,7 +2417,7 @@ int main(int argc, char** argv) {
         command += " " + quote_shell(input_cu.string()) + " -o " +
                    quote_shell(temp_stage_file.string()) + " 2>&1";
 
-        const CommandResult frontend_result = run_command_capture(command);
+        const CommandResult frontend_result = run_timed_command("cuda_frontend", command);
         if (!frontend_result.output.empty()) {
             std::cerr << frontend_result.output;
             if (frontend_result.output.back() != '\n') {
@@ -2709,7 +2740,7 @@ int main(int argc, char** argv) {
                        quote_shell(emit_ptx ? options.output.string()
                                             : raw_device_ll.string()) +
                        " 2>&1";
-            const CommandResult clang_result = run_command_capture(command);
+            const CommandResult clang_result = run_timed_command("cuda_frontend", command);
             if (!clang_result.started || clang_result.exit_code != 0) {
                 if (!clang_result.output.empty()) std::cerr << clang_result.output;
                 std::cerr << "cumetalc failed: Clang CUDA device compilation failed\n";
@@ -2731,7 +2762,7 @@ int main(int argc, char** argv) {
                 llvm_lower_switch_pass(llvm_opt) + " " +
                 quote_shell(raw_device_ll.string()) + " -o " +
                 quote_shell(device_ll.string()) + " 2>&1";
-            const CommandResult opt_result = run_command_capture(opt_command);
+            const CommandResult opt_result = run_timed_command("llvm_opt", opt_command);
             if (!opt_result.started || opt_result.exit_code != 0) {
                 if (!opt_result.output.empty()) std::cerr << opt_result.output;
                 std::cerr << "cumetalc failed: conservative LLVM device-IR "
