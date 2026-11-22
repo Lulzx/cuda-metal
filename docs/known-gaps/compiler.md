@@ -106,8 +106,8 @@ With CUDA Clang 21-23, the reviewed production-metallib matrix is:
 <!-- cw:table known_gaps_compiler.backend_matrix -->
 | Frontend | Legacy | Typed CuMetal IR |
 | --- | ---: | ---: |
-| direct `.cu` | 0/55 | **55/55** |
-| PTX / `--cuda-device` | **49/55** | **55/55** |
+| direct `.cu` | 0/57 | **57/57** |
+| PTX / `--cuda-device` | **50/57** | **56/57** |
 
 The manifest is `tests/cuda_projects/backend_matrix_manifest.txt`; the CTest
 gate is `conformance_compiler_backend_matrix`. Counts are compilation evidence,
