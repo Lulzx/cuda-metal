@@ -3707,7 +3707,16 @@ static cudaError_t select_launch_pipeline_locked(BackendState& backend,
         }
     }
     const auto spill = find_shared_spill_variant_locked(backend, metallib_path, kernel_name);
-    if (!spill.has_value()) {
+    // The spill variant keeps __shared__ data in device memory: always correct,
+    // but tile-heavy kernels (tensor-core GEMMs) run many times slower than
+    // with Metal's oversized threadgroup memory. It is used when the kernel
+    // has no pipeline of its own (static shared memory past the limit), under
+    // MTL_DEBUG_LAYER (which rejects the oversized length), or on request.
+    const bool spill_preferred = own == nil ||
+                                 env_truthy(std::getenv("CUMETAL_SHARED_SPILL")) ||
+                                 env_truthy(std::getenv("MTL_DEBUG_LAYER")) ||
+                                 env_truthy(std::getenv("CUMETAL_STRICT_THREADGROUP_LIMIT"));
+    if (!spill.has_value() || !spill_preferred) {
         *out_pipeline = own;
         // No spill variant (legacy PTX lowering, hand-written Metal): keep the
         // pre-0.9 behaviour and hand the size to Metal. The request is still
@@ -3719,10 +3728,11 @@ static cudaError_t select_launch_pipeline_locked(BackendState& backend,
             static std::unordered_set<std::string> warned;
             if (warned.insert(metallib_path + "::" + kernel_name).second) {
                 std::fprintf(stderr,
-                             "cumetal: warning: kernel '%s' has no shared-memory spill variant; "
-                             "passing %zu bytes of dynamic shared memory to Metal above its "
-                             "%zu-byte threadgroup limit\n",
-                             kernel_name.c_str(), dynamic_bytes, limit);
+                             "cumetal: warning: kernel '%s': passing %zu bytes of dynamic shared "
+                             "memory to Metal above its %zu-byte threadgroup limit%s\n",
+                             kernel_name.c_str(), dynamic_bytes, limit,
+                             spill.has_value() ? " (set CUMETAL_SHARED_SPILL=1 to spill to device memory)"
+                                               : "; the kernel has no spill variant");
             }
             return cudaSuccess;
         }

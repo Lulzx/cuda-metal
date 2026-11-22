@@ -65,3 +65,4 @@ tests/cuda_projects/cta_reduce/cta_reduce.cu fail pass fail pass
 tests/cuda_projects/kokkos_compat/kokkos_compat.cu fail pass pass pass
 tests/cuda_projects/lanemask/lanemask.cu fail pass pass pass
 tests/cuda_projects/thrust_gpu_sort/thrust_gpu_sort.cu fail pass pass pass
+tests/cuda_projects/typed_ptx_fp64_switch/typed_ptx_fp64_switch.cu fail pass fail pass
