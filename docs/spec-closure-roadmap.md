@@ -33,8 +33,9 @@ compatibility claim. Implemented surfaces and detailed limitations remain in
   specializations disabled. Native ABI v3 carries kernel, symbol, and device
   `printf` metadata and performs no first-launch PTX JIT. This closes the
   reviewed numerical corpus, not the residual language combinations in P1.
-- The manifest still contains 83 enrolled headless samples and the 2026-08-30
-  rerun passes 83/83. `conjugateGradientMultiBlockCG` now uses a
+- The manifest still contains 83 enrolled headless samples and the 2026-11-22
+  rerun passes 81/83. The two dynamic-parallelism samples no longer lower with
+  Homebrew LLVM 23. `conjugateGradientMultiBlockCG` now uses a
   guaranteed-progress occupancy-derived cooperative grid and must satisfy its
   independent host equation error, while the PhysX friction, stacked, and
   triangle-mesh comparisons pass with aggregate PTX ABI sizes preserved in

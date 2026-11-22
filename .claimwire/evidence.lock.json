@@ -5,7 +5,7 @@
       "epochs": {
         "current": {
           "run_id": "backend_matrix-ac096cd2",
-          "git_commit": "8d3fb27",
+          "git_commit": "7ab063b",
           "git_dirty": true,
           "input_set_digest": "blake3:ac096cd25a93a096ed53afc87606257bc81b95b0e5c71ec3b007afd8d709365f"
         }
@@ -14,10 +14,10 @@
     "cumetal.samples_sweep": {
       "epochs": {
         "current": {
-          "run_id": "samples_sweep-ab6d3a69",
-          "git_commit": "7f3f805",
+          "run_id": "samples_sweep-17a04a88",
+          "git_commit": "7eef97b",
           "git_dirty": true,
-          "input_set_digest": "blake3:ab6d3a696ceb3dadee81935c092ce16265dd3b84552ba12eea4225ba1052635e"
+          "input_set_digest": "blake3:17a04a883ed553b31e8df630f948303ea7c05950524658e7d9e846bb405b44ca"
         }
       }
     },
@@ -34,10 +34,10 @@
     "cumetal.coverage_manifest": {
       "epochs": {
         "current": {
-          "run_id": "coverage_manifest-7561f533",
-          "git_commit": "7f3f805",
+          "run_id": "coverage_manifest-d265218d",
+          "git_commit": "7ab063b",
           "git_dirty": true,
-          "input_set_digest": "blake3:7561f5337bc608336517d5d929907cef9f09905cd49603a25e4c26cb3d3fb567"
+          "input_set_digest": "blake3:d265218d2d25846793b5a703d0be27162b4bc1d1e73eb9523b20ffb247e22a26"
         }
       }
     },
@@ -262,7 +262,7 @@
       "epoch": "current"
     },
     "samples.pass": {
-      "value": 83,
+      "value": 81,
       "unit": "count",
       "epoch": "current"
     },
@@ -277,17 +277,17 @@
       "epoch": "current"
     },
     "corpus.total": {
-      "value": 53,
+      "value": 55,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.typed_ptx": {
-      "value": 51,
+      "value": 52,
       "unit": "count",
       "epoch": "current"
     },
     "corpus.native_aot": {
-      "value": 49,
+      "value": 51,
       "unit": "count",
       "epoch": "current"
     },
@@ -562,9 +562,9 @@
       "context_digest": "blake3:5cd9bb2bfc3536c8724bb1b2d4637d56d7b1ace200553c463849fb69eeb77418"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.denominator#2": {
-      "rendered": "manifest has 83 enrolled headless samples; all 83 pass.",
-      "rendered_digest": "blake3:09c56097962d05afd4e38cfc22202c2a3743c33fcc5157e6dd072b6639c1d2db",
-      "context_digest": "blake3:5a4fe60eb6a4a784c124fda80a94de9f3ba91e080c95d600c0287e2e92be6f65"
+      "rendered": "manifest has 83 enrolled headless samples; 81 pass.",
+      "rendered_digest": "blake3:91ed883907a1f806e418e386895d6382cb171c7d626136705ac8276ac560d28b",
+      "context_digest": "blake3:b85c30ec313037754e76c7589570c03ee07c94b54474370b6fb66effd24e75e9"
     },
     "docs/known-gaps/verification.md::block:known_gaps_verification.lammps#0": {
       "rendered": "32,000-atom, 100-step LJ benchmark",
@@ -767,13 +767,13 @@
       "context_digest": "blake3:068f2ca4e353b5ec3c4d748ebc775f893d6dcb97e5a10b950632daf8201eee97"
     },
     "docs/spec-closure-roadmap.md::block:roadmap.evidence_boundary#8": {
-      "rendered": "rerun passes 83/83.",
-      "rendered_digest": "blake3:8f699b4e59301b784523798262c138620c1f7fe3ee9260c582c3d0eecb344a39",
+      "rendered": "rerun passes 81/83.",
+      "rendered_digest": "blake3:4b87c0924f199ef97a87c64897c162346bff61424ab6630e79fe0a75c238b0ed",
       "context_digest": "blake3:f6c5cdafab1b906337e8fc48cf7b71cc068d128f3a779a0085e486252c88278d"
     },
     "docs/status.md::block:status.snapshot#0": {
-      "rendered": "`cuda-samples`: **83/83 pass**",
-      "rendered_digest": "blake3:ae6f154969025f821cf5ee0f2b845455fae069cc719cb2760d640eedfee81ced",
+      "rendered": "`cuda-samples`: **81/83 pass**",
+      "rendered_digest": "blake3:45f515634ddba5a3e2bbf73d2a23067e9c8188cadfd05f54971f92293a67f38d",
       "context_digest": "blake3:58314b1865745b3cdaa5a7c28ed1b49e37ae18ddf45d077120468a14495cf689"
     },
     "docs/status.md::block:status.snapshot#1": {

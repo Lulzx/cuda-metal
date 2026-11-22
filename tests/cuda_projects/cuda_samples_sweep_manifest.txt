@@ -79,8 +79,8 @@ pass         2_Concepts_and_Techniques/shfl_scan
 pass         2_Concepts_and_Techniques/streamOrderedAllocation
 pass         3_CUDA_Features/bf16TensorCoreGemm
 pass         3_CUDA_Features/binaryPartitionCG
-pass         3_CUDA_Features/cdpAdvancedQuicksort
-pass         3_CUDA_Features/cdpQuadtree
+no-lowering  3_CUDA_Features/cdpAdvancedQuicksort
+no-lowering  3_CUDA_Features/cdpQuadtree
 pass         3_CUDA_Features/cdpSimplePrint
 pass         3_CUDA_Features/cdpSimpleQuicksort
 pass         3_CUDA_Features/cudaCompressibleMemory

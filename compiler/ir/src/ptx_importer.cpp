@@ -11,6 +11,8 @@
 #include "ptx_instruction.h"
 #include "ptx_text.h"
 #include "ptx_cfg.h"
+
+#include <cstring>
 #include "ptx_tail_calls.h"
 #include "ptx_parameters.h"
 #include "ptx_pointer_inference.h"
@@ -1118,6 +1120,30 @@ struct Importer {
     // current instruction.
     std::vector<std::string> unresolved_operands;
 
+    // A PTX constant expression built only from numeric literals, parentheses
+    // and C operators, e.g. `(0x5400 | 0x10)`. These are evaluated where they
+    // are consumed (prmt selectors, immediates), so they are not unresolved.
+    static bool is_ptx_constant_expression(std::string_view text) {
+        bool saw_literal = false;
+        std::size_t i = 0;
+        while (i < text.size()) {
+            const unsigned char c = static_cast<unsigned char>(text[i]);
+            if (std::isspace(c) || std::strchr("()+-*/%&|^~!<>", c) != nullptr) {
+                ++i;
+                continue;
+            }
+            std::size_t j = i;
+            while (j < text.size() && (std::isalnum(static_cast<unsigned char>(text[j])) ||
+                                       text[j] == '.' || text[j] == '_')) {
+                ++j;
+            }
+            if (j == i || !is_ptx_numeric_literal(text.substr(i, j - i))) return false;
+            saw_literal = true;
+            i = j;
+        }
+        return saw_literal;
+    }
+
     static bool is_ptx_numeric_literal(std::string_view text) {
         if (text.empty()) return false;
         if (text == "null") return true;
@@ -1556,19 +1582,6 @@ struct Importer {
             signature.return_type = Type::void_type();
             signature.argument_types = {
                 Type::pointer(Type::integer(8), AddressSpace::kDevice)};
-            return signature;
-        }
-        if (callee == "__cumetal_wmma_f32_mma_8x8" || callee == "__cumetal_wmma_bf16_mma_8x8") {
-            // runtime/api/mma.h's 8x8 tile multiply-accumulate marker
-            // (destination, A, B), as the NVVM importer lowers it: the MSL
-            // emitter turns it into simdgroup_matrix load/MAC/store.
-            BuiltinSignature signature;
-            signature.metal_name = callee;
-            signature.return_type = Type::void_type();
-            signature.argument_types =
-                std::vector<Type>(3, Type::pointer(Type::integer(8), AddressSpace::kNone));
-            signature.attributes.push_back(
-                {"wmma_8x8", callee.find("bf16") != std::string::npos ? "bf16" : "f32"});
             return signature;
         }
         if (callee == "cudaGetParameterBuffer") {
@@ -4521,7 +4534,8 @@ struct Importer {
         // importer does not model, or a symbol it cannot resolve, would
         // otherwise reach Metal as raw text; translate_instruction refuses
         // the instruction instead so the caller can fall back.
-        if (!is_ptx_numeric_literal(spelling)) unresolved_operands.push_back(spelling);
+        if (!is_ptx_numeric_literal(spelling) && !is_ptx_constant_expression(spelling))
+            unresolved_operands.push_back(spelling);
         return Operand::immediate(spelling, fallback_type);
     }
 

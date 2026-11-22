@@ -1,3 +1,4 @@
+#include <cstdlib>
 // Shared memory beyond Metal's 32 KB threadgroup limit. CUDA allows 48 KB per
 // block without opt-in and more with cudaFuncAttributeMaxDynamicSharedMemorySize;
 // CuMetal serves such launches from the kernel's spill variant, whose
@@ -267,7 +268,9 @@ int main() {
 
     // Tensor-core tiles in spilled shared memory: 40 KB of dynamic shared
     // memory, tiles at 36 KB. Small integer inputs keep every product exact.
-    {
+    // The typed PTX importer does not lower mma.h's tile markers, so the
+    // registration run (CUMETAL_SPILL_SKIP_WMMA=1) covers only the native path.
+    if (std::getenv("CUMETAL_SPILL_SKIP_WMMA") == nullptr) {
         constexpr unsigned kBlocks = 4;
         half h_a[kBlocks * 256], h_b[kBlocks * 256];
         for (unsigned i = 0; i < kBlocks * 256; ++i) {

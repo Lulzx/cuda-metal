@@ -15,8 +15,9 @@ is split by subsystem.
 ## Snapshot
 
 <!-- cw:block status.snapshot -->
-- Enrolled headless `cuda-samples`: **83/83 pass**, zero waivers and zero
-  nonpassing entries on the 2026-08-30 rerun. The cooperative CG entry requires
+- Enrolled headless `cuda-samples`: **81/83 pass**, zero waivers. The two
+  dynamic-parallelism samples (`cdpQuadtree`, `cdpAdvancedQuicksort`) have not
+  lowered since Homebrew LLVM 23 and are recorded as `no-lowering` (2026-11-22). The cooperative CG entry requires
   both its device residual and independent host equation error.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
   **57/57**, typed PTX **56/57**, legacy PTX **50/57**.

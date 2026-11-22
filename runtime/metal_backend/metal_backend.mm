@@ -3709,11 +3709,44 @@ static cudaError_t select_launch_pipeline_locked(BackendState& backend,
     const auto spill = find_shared_spill_variant_locked(backend, metallib_path, kernel_name);
     if (!spill.has_value()) {
         *out_pipeline = own;
+        // No spill variant (legacy PTX lowering, hand-written Metal): keep the
+        // pre-0.9 behaviour and hand the size to Metal. The request is still
+        // within CUDA's limits (checked by the runtime), and Apple GPUs run
+        // such launches in practice, but Metal does not promise it; warn once
+        // per kernel so the dependence is visible (docs/known-gaps/runtime.md).
+        if (own != nil && status == cudaErrorInvalidValue &&
+            !env_truthy(std::getenv("CUMETAL_STRICT_THREADGROUP_LIMIT"))) {
+            static std::unordered_set<std::string> warned;
+            if (warned.insert(metallib_path + "::" + kernel_name).second) {
+                std::fprintf(stderr,
+                             "cumetal: warning: kernel '%s' has no shared-memory spill variant; "
+                             "passing %zu bytes of dynamic shared memory to Metal above its "
+                             "%zu-byte threadgroup limit\n",
+                             kernel_name.c_str(), dynamic_bytes, limit);
+            }
+            return cudaSuccess;
+        }
         return status;
     }
+    std::string spill_error;
     id<MTLComputePipelineState> pipeline =
-        load_pipeline_locked(backend, metallib_path, spill->function_name, error_message);
+        load_pipeline_locked(backend, metallib_path, spill->function_name, &spill_error);
     if (pipeline == nil) {
+        // A spill variant that does not build must not make the launch worse
+        // than having no variant: use the kernel's own pipeline as above.
+        if (own != nil && !env_truthy(std::getenv("CUMETAL_STRICT_THREADGROUP_LIMIT"))) {
+            static std::unordered_set<std::string> warned;
+            if (warned.insert(metallib_path + "::" + kernel_name).second) {
+                std::fprintf(stderr,
+                             "cumetal: warning: shared-memory spill variant of '%s' failed to "
+                             "build (%s); passing %zu bytes of dynamic shared memory to Metal\n",
+                             kernel_name.c_str(), spill_error.c_str(), dynamic_bytes);
+            }
+            *out_pipeline = own;
+            *out_function_name = kernel_name;
+            return cudaSuccess;
+        }
+        if (error_message != nullptr) *error_message = spill_error;
         return cudaErrorInvalidValue;
     }
     *out_pipeline = pipeline;
@@ -4492,7 +4525,11 @@ cudaError_t launch_kernel_timed(const std::string& metallib_path,
         }
         const cudaError_t shared_status =
             check_threadgroup_memory_locked(backend, pipeline, config.shared_memory_bytes, error_message);
-        if (shared_status != cudaSuccess) {
+        // This path has no spill variant; as in select_launch_pipeline_locked,
+        // a size within CUDA's limits but above Metal's goes to Metal unless
+        // CUMETAL_STRICT_THREADGROUP_LIMIT is set.
+        if (shared_status != cudaSuccess &&
+            env_truthy(std::getenv("CUMETAL_STRICT_THREADGROUP_LIMIT"))) {
             return shared_status;
         }
         const std::string pipeline_cache_key = metallib_path + "::" + kernel_name;

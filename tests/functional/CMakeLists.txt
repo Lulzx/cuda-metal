@@ -2560,7 +2560,8 @@ add_test(
             ${CMAKE_CURRENT_BINARY_DIR}/dynamic_shared_reduce.metallib
 )
 
-set_tests_properties(functional_runtime_dynamic_shared PROPERTIES SKIP_RETURN_CODE 77)
+set_tests_properties(functional_runtime_dynamic_shared PROPERTIES SKIP_RETURN_CODE 77
+    ENVIRONMENT "CUMETAL_STRICT_THREADGROUP_LIMIT=1")
 
 add_test(
     NAME functional_runtime_struct_arg
@@ -4646,7 +4647,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
                 "--expect-output=PASS: shared memory beyond the Metal threadgroup limit"
     )
     set_tests_properties(functional_cumetalc_native_aot_shared_spill
-        PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "MTL_DEBUG_LAYER=1")
+        PROPERTIES SKIP_RETURN_CODE 77 ENVIRONMENT "MTL_DEBUG_LAYER=1;CUMETAL_STRICT_THREADGROUP_LIMIT=1")
     # Per-launch spill buffers must not exhaust Metal memory over thousands of
     # launches in device-address mode (PhysX's PBD radix sort pattern).
     add_test(
@@ -4673,7 +4674,7 @@ if(CUMETAL_ENABLE_CUDA_REGISTRATION)
     )
     set_tests_properties(functional_cumetalc_registration_shared_spill
         PROPERTIES SKIP_RETURN_CODE 77
-        ENVIRONMENT "MTL_DEBUG_LAYER=1;CUMETAL_PTX_BACKEND=cumetal-ir")
+        ENVIRONMENT "MTL_DEBUG_LAYER=1;CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_SPILL_SKIP_WMMA=1;CUMETAL_STRICT_THREADGROUP_LIMIT=1")
 
     add_test(
         NAME functional_cumetalc_native_aot_null_pointer

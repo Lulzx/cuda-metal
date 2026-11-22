@@ -20,19 +20,25 @@
   every kernel with dynamic shared memory or more than 32 KB of static shared
   memory: `__shared__` data then lives in a device buffer, one slice per
   block, sized for the whole grid and released as soon as the GPU finishes
-  the launch. Tensor-core tiles (`mma.h`'s 8x8 simdgroup-matrix path) load
-  and store from that device slice as well.
+  the launch. On the direct `.cu` path, tensor-core tiles (`mma.h`'s 8x8
+  simdgroup-matrix path) load and store from that device slice as well.
   Barriers and block-scope fences also order device memory and shared
   atomics are device atomics, so results are exact but shared-memory traffic
   runs at device-memory speed. A grid whose slices exceed the largest Metal
   buffer, or whose buffer cannot be allocated, fails with
-  `cudaErrorMemoryAllocation`. Kernels without a variant are refused with
-  `cudaErrorInvalidValue` past 32 KB: the legacy PTX lowering, hand-written
-  Metal kernels, kernels with an argument at Metal buffer index 24 (where the
-  spill buffer binds), and kernels whose shared pointers meet address-space
-  queries, integer conversions or mixed generic pointers. The kernels that
-  still go through the legacy PTX lowering are therefore limited to Metal's
-  32 KB: on the legacy path, shared memory past it is refused, not spilled.
+  `cudaErrorMemoryAllocation`. Kernels without a variant -- the legacy PTX
+  lowering, hand-written Metal kernels, kernels with an argument at Metal
+  buffer index 24 (where the spill buffer binds), and kernels whose shared
+  pointers meet address-space queries, integer conversions or mixed generic
+  pointers -- keep the pre-0.9 behaviour past 32 KB: the size, still within
+  CUDA's limits, is handed to Metal, and a one-time warning names the kernel.
+  Apple GPUs run these launches in practice (PhysX's PBD radix sort and the
+  cuda-samples tensor-core GEMMs depend on it), but Metal does not promise it
+  and `MTL_DEBUG_LAYER=1` rejects it. `CUMETAL_STRICT_THREADGROUP_LIMIT=1`
+  refuses them with `cudaErrorInvalidValue` instead.
+- The typed PTX importer does not lower `mma.h`'s 8x8 tile markers, so a
+  tensor-core kernel loaded as PTX uses the legacy lowering and the fallback
+  above, not the spill variant; the direct `.cu` path spills its tiles.
 - Launch configuration errors that CUDA itself defines -- a zero grid or block
   extent (`cudaErrorInvalidConfiguration`) and too much shared memory -- are
   reported by the launch and `cudaGetLastError` only, as in CUDA; a later
