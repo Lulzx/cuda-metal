@@ -18,6 +18,7 @@
 #include "cufftXt.h"
 
 #include "cufft_metal.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
@@ -562,6 +563,9 @@ static cufftResult make_plan(cufftHandle h, int rank, const int* n, cufftType ty
 }
 
 cufftResult synchronize_plan_stream(const CufftPlanEntry& plan) {
+    // Every caller computes on the CPU next, possibly after a declined or
+    // failed GPU attempt in the same call.
+    cumetal::rt::note_library_backend(cumetal::rt::LibraryBackend::kHost);
     return cumetal::rt::synchronize_for_host_library(plan.stream) == cudaSuccess ? CUFFT_SUCCESS
                                                               : CUFFT_EXEC_FAILED;
 }
@@ -891,6 +895,7 @@ cufftResult cufftXtMakePlanMany(cufftHandle plan,
 
 cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* odata,
                           int direction) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -916,6 +921,7 @@ cufftResult cufftExecC2C(cufftHandle plan, cufftComplex* idata, cufftComplex* od
 }
 
 cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -937,6 +943,7 @@ cufftResult cufftExecR2C(cufftHandle plan, cufftReal* idata, cufftComplex* odata
 }
 
 cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -959,6 +966,7 @@ cufftResult cufftExecC2R(cufftHandle plan, cufftComplex* idata, cufftReal* odata
 
 cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
                           cufftDoubleComplex* odata, int direction) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -981,6 +989,7 @@ cufftResult cufftExecZ2Z(cufftHandle plan, cufftDoubleComplex* idata,
 
 cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
                           cufftDoubleComplex* odata) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -1000,6 +1009,7 @@ cufftResult cufftExecD2Z(cufftHandle plan, cufftDoubleReal* idata,
 
 cufftResult cufftExecZ2D(cufftHandle plan, cufftDoubleComplex* idata,
                           cufftDoubleReal* odata) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     CufftState& s = state();
     std::lock_guard<std::mutex> lock(s.mutex);
     CufftPlanEntry* p = s.get(plan);
@@ -1055,6 +1065,7 @@ cufftResult cufftXtSetGPUs(cufftHandle plan, int nGPUs, int* whichGPUs) {
 }
 
 cufftResult cufftXtExec(cufftHandle plan, void* input, void* output, int direction) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     cufftType type;
     {
         CufftState& s = state();
@@ -1088,16 +1099,19 @@ cufftResult cufftXtExec(cufftHandle plan, void* input, void* output, int directi
 
 cufftResult cufftXtMemcpy(cufftHandle /*plan*/, void* /*dstPointer*/, void* /*srcPointer*/,
                           cufftXtCopyType /*type*/) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     return CUFFT_NOT_SUPPORTED;
 }
 
 cufftResult cufftXtExecDescriptorC2C(cufftHandle /*plan*/, cudaLibXtDesc* /*input*/,
                                      cudaLibXtDesc* /*output*/, int /*direction*/) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     return CUFFT_NOT_SUPPORTED;
 }
 
 cufftResult cufftXtExecDescriptorZ2Z(cufftHandle /*plan*/, cudaLibXtDesc* /*input*/,
                                      cudaLibXtDesc* /*output*/, int /*direction*/) {
+    CUMETAL_LIBRARY_CALL("cuFFT");
     return CUFFT_NOT_SUPPORTED;
 }
 

@@ -7,6 +7,17 @@
 #define CUDNN_H_ 1
 #endif
 
+// Version macros (cudnn_version.h in NVIDIA's layout). They must agree with
+// cudnnGetVersion(): code that gates on `#if CUDNN_VERSION >= 8000` would
+// otherwise silently compile its pre-v8 path.
+#define CUDNN_MAJOR 8
+#define CUDNN_MINOR 9
+#define CUDNN_PATCHLEVEL 7
+#define CUDNN_VERSION (CUDNN_MAJOR * 1000 + CUDNN_MINOR * 100 + CUDNN_PATCHLEVEL)
+#ifndef CUDNN_DIM_MAX
+#define CUDNN_DIM_MAX 8
+#endif
+
 
 #include "cuda_runtime.h"
 

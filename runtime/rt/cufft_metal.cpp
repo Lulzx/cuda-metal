@@ -302,6 +302,7 @@ bool dispatch(Context& ctx, const char* kernel, std::size_t threads,
         note(error.empty() ? "launch failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
     ++ctx.dispatches;
     return true;
 }
@@ -378,6 +379,7 @@ bool transform_axis_staged(Context& ctx, Field& field, bool inverse, std::size_t
         note(error.empty() ? "staged launch failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
     ++ctx.dispatches;
     field.swap();
     return true;
@@ -466,6 +468,7 @@ bool transform_axis_mixed(Context& ctx, Field& field, bool inverse, std::size_t 
         note(error.empty() ? "mixed-radix launch failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
     ++ctx.dispatches;
     field.swap();
     return true;
@@ -802,6 +805,7 @@ bool execute(const Request& request) {
             if (metal_backend::fft_r2c_3d_f32(
                     config, real_arg.buffer, real_arg.offset,
                     complex_arg.buffer, complex_arg.offset, ctx.stream, &error) == cudaSuccess) {
+                ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
                 if (debug()) {
                     std::fprintf(stderr,
                                  "CUMETAL_DEBUG_FFT: VkFFT Apple GPU rank=3 dims=%dx%dx%d\n",

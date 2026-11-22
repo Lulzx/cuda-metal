@@ -1,4 +1,5 @@
 #include "cudnn.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 
 #include <Accelerate/Accelerate.h>
@@ -26,6 +27,12 @@ struct cudnnTensorStruct {
     cudnnTensorFormat_t format = CUDNN_TENSOR_NCHW;
     int n = 0, c = 0, h = 0, w = 0;
     int nStride = 0, cStride = 0, hStride = 0, wStride = 0;
+    // The rank and per-dimension layout the descriptor was set with. A 4d
+    // setter records rank 4. Ranks above 4 are stored for round-trips only:
+    // n/c/h/w stay zero so every operation's 4d validation refuses them.
+    int nbDims = 4;
+    int dims[CUDNN_DIM_MAX] = {};
+    int strides[CUDNN_DIM_MAX] = {};
 };
 
 struct cudnnFilterStruct {
@@ -413,7 +420,7 @@ void col2im_f32(const float* data_col, int C, int H, int W,
 
 extern "C" {
 
-size_t cudnnGetVersion(void) { return 8907; } // 8.9.7
+size_t cudnnGetVersion(void) { return CUDNN_VERSION; } // 8.9.7
 
 const char* cudnnGetErrorString(cudnnStatus_t status) {
     switch (status) {
@@ -492,6 +499,11 @@ cudnnStatus_t cudnnSetTensor4dDescriptor(cudnnTensorDescriptor_t tensorDesc,
     tensorDesc->dataType = dataType;
     tensorDesc->n = n; tensorDesc->c = c; tensorDesc->h = h; tensorDesc->w = w;
     compute_strides(tensorDesc);
+    tensorDesc->nbDims = 4;
+    tensorDesc->dims[0] = n; tensorDesc->dims[1] = c;
+    tensorDesc->dims[2] = h; tensorDesc->dims[3] = w;
+    tensorDesc->strides[0] = tensorDesc->nStride; tensorDesc->strides[1] = tensorDesc->cStride;
+    tensorDesc->strides[2] = tensorDesc->hStride; tensorDesc->strides[3] = tensorDesc->wStride;
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -501,6 +513,8 @@ cudnnStatus_t cudnnGetTensor4dDescriptor(cudnnTensorDescriptor_t tensorDesc,
                                           int* nStride, int* cStride,
                                           int* hStride, int* wStride) {
     if (!tensorDesc) return CUDNN_STATUS_BAD_PARAM;
+    // A rank above 4 has no faithful n/c/h/w view.
+    if (tensorDesc->nbDims > 4) return CUDNN_STATUS_NOT_SUPPORTED;
     if (dataType) *dataType = tensorDesc->dataType;
     if (n) *n = tensorDesc->n;
     if (c) *c = tensorDesc->c;
@@ -653,6 +667,7 @@ cudnnStatus_t cudnnFindConvolutionForwardAlgorithm(cudnnHandle_t /*handle*/,
                                                     int requestedAlgoCount,
                                                     int* returnedAlgoCount,
                                                     cudnnConvolutionFwdAlgoPerf_t* perfResults) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!returnedAlgoCount) return CUDNN_STATUS_BAD_PARAM;
     int count = std::min(requestedAlgoCount, 1);
     if (count > 0 && perfResults) {
@@ -676,6 +691,7 @@ cudnnStatus_t cudnnConvolutionForward(cudnnHandle_t handle,
                                        void* workSpace, size_t workSpaceSizeInBytes,
                                        const void* beta,
                                        cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !xDesc || !x || !wDesc || !w || !convDesc || !beta || !yDesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
@@ -827,6 +843,7 @@ cudnnStatus_t cudnnFindConvolutionBackwardDataAlgorithm(cudnnHandle_t /*handle*/
                                                          int requestedAlgoCount,
                                                          int* returnedAlgoCount,
                                                          cudnnConvolutionBwdDataAlgoPerf_t* perfResults) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!returnedAlgoCount) return CUDNN_STATUS_BAD_PARAM;
     int count = std::min(requestedAlgoCount, 1);
     if (count > 0 && perfResults) {
@@ -847,6 +864,7 @@ cudnnStatus_t cudnnConvolutionBackwardData(cudnnHandle_t handle,
                                             void* workSpace, size_t workSpaceSizeInBytes,
                                             const void* beta,
                                             cudnnTensorDescriptor_t dxDesc, void* dx) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !wDesc || !w || !dyDesc || !dy || !convDesc || !beta || !dxDesc || !dx)
         return CUDNN_STATUS_BAD_PARAM;
@@ -979,6 +997,7 @@ cudnnStatus_t cudnnFindConvolutionBackwardFilterAlgorithm(cudnnHandle_t /*handle
                                                            int requestedAlgoCount,
                                                            int* returnedAlgoCount,
                                                            cudnnConvolutionBwdFilterAlgoPerf_t* perfResults) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!returnedAlgoCount) return CUDNN_STATUS_BAD_PARAM;
     int count = std::min(requestedAlgoCount, 1);
     if (count > 0 && perfResults) {
@@ -999,6 +1018,7 @@ cudnnStatus_t cudnnConvolutionBackwardFilter(cudnnHandle_t handle,
                                               void* workSpace, size_t workSpaceSizeInBytes,
                                               const void* beta,
                                               cudnnFilterDescriptor_t dwDesc, void* dw) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !xDesc || !x || !dyDesc || !dy || !convDesc || !beta || !dwDesc || !dw)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1095,6 +1115,7 @@ cudnnStatus_t cudnnConvolutionBackwardBias(cudnnHandle_t handle,
                                             cudnnTensorDescriptor_t dyDesc, const void* dy,
                                             const void* beta,
                                             cudnnTensorDescriptor_t dbDesc, void* db) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !dyDesc || !dy || !beta || !dbDesc || !db) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(dyDesc) || !supported_f32_nchw(dbDesc))
@@ -1173,6 +1194,7 @@ cudnnStatus_t cudnnActivationForward(cudnnHandle_t handle,
                                       cudnnTensorDescriptor_t xDesc, const void* x,
                                       const void* beta,
                                       cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!activationDesc || !alpha || !xDesc || !x || !beta || !yDesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1225,6 +1247,7 @@ cudnnStatus_t cudnnAddTensor(cudnnHandle_t handle,
                               cudnnTensorDescriptor_t aDesc, const void* A,
                               const void* beta,
                               cudnnTensorDescriptor_t cDesc, void* C) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !aDesc || !A || !beta || !cDesc || !C) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(aDesc) || !supported_f32_nchw(cDesc))
@@ -1267,6 +1290,7 @@ cudnnStatus_t cudnnTransformTensor(cudnnHandle_t handle,
                                     cudnnTensorDescriptor_t xDesc, const void* x,
                                     const void* beta,
                                     cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !xDesc || !x || !beta || !yDesc || !y) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(xDesc) || !supported_f32_nchw(yDesc))
@@ -1313,6 +1337,7 @@ cudnnStatus_t cudnnScaleTensor(cudnnHandle_t handle,
                                 cudnnTensorDescriptor_t yDesc,
                                 void* y,
                                 const void* alpha) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!yDesc || !y || !alpha) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(yDesc)) return CUDNN_STATUS_NOT_SUPPORTED;
@@ -1337,6 +1362,7 @@ cudnnStatus_t cudnnSoftmaxForward(cudnnHandle_t handle,
                                    cudnnTensorDescriptor_t xDesc, const void* x,
                                    const void* beta,
                                    cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !xDesc || !x || !beta || !yDesc || !y) return CUDNN_STATUS_BAD_PARAM;
     if (!supported_f32_nchw(xDesc) || !supported_f32_nchw(yDesc))
@@ -1417,6 +1443,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardInference(
     const void* bnScale, const void* bnBias,
     const void* estimatedMean, const void* estimatedVariance,
     double epsilon) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !beta || !xDesc || !x || !yDesc || !y ||
         !bnScale || !bnBias || !estimatedMean || !estimatedVariance)
@@ -1498,6 +1525,7 @@ cudnnStatus_t cudnnConvolutionBiasActivationForward(
     cudnnTensorDescriptor_t biasDesc, const void* bias,
     cudnnActivationDescriptor_t activationDesc,
     cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle || !alpha1 || !xDesc || !x || !wDesc || !w || !convDesc ||
         !alpha2 || !yDesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1555,6 +1583,7 @@ cudnnStatus_t cudnnActivationBackward(cudnnHandle_t handle,
                                        cudnnTensorDescriptor_t xDesc, const void* x,
                                        const void* beta,
                                        cudnnTensorDescriptor_t dxDesc, void* dx) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!activationDesc || !alpha || !yDesc || !y || !dyDesc || !dy ||
         !xDesc || !x || !beta || !dxDesc || !dx)
@@ -1688,6 +1717,7 @@ cudnnStatus_t cudnnPoolingForward(cudnnHandle_t handle,
                                    cudnnTensorDescriptor_t xDesc, const void* x,
                                    const void* beta,
                                    cudnnTensorDescriptor_t yDesc, void* y) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!poolingDesc || !alpha || !xDesc || !x || !beta || !yDesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1761,6 +1791,7 @@ cudnnStatus_t cudnnPoolingBackward(cudnnHandle_t handle,
                                     cudnnTensorDescriptor_t xDesc, const void* x,
                                     const void* beta,
                                     cudnnTensorDescriptor_t dxDesc, void* dx) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!poolingDesc || !alpha || !yDesc || !y || !dyDesc || !dy ||
         !xDesc || !x || !beta || !dxDesc || !dx)
@@ -1883,6 +1914,7 @@ cudnnStatus_t cudnnSetDropoutDescriptor(cudnnDropoutDescriptor_t dropoutDesc,
 }
 
 cudnnStatus_t cudnnDropoutGetStatesSize(cudnnHandle_t handle, size_t* sizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!sizeInBytes) return CUDNN_STATUS_BAD_PARAM;
     *sizeInBytes = 64; // minimal state for our RNG seed
@@ -1894,6 +1926,7 @@ cudnnStatus_t cudnnDropoutForward(cudnnHandle_t handle,
                                    cudnnTensorDescriptor_t xdesc, const void* x,
                                    cudnnTensorDescriptor_t ydesc, void* y,
                                    void* reserveSpace, size_t reserveSpaceSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!dropoutDesc || !xdesc || !x || !ydesc || !y)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1945,6 +1978,7 @@ cudnnStatus_t cudnnDropoutBackward(cudnnHandle_t handle,
                                     cudnnTensorDescriptor_t dydesc, const void* dy,
                                     cudnnTensorDescriptor_t dxdesc, void* dx,
                                     void* reserveSpace, size_t reserveSpaceSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!dropoutDesc || !dydesc || !dy || !dxdesc || !dx)
         return CUDNN_STATUS_BAD_PARAM;
@@ -1988,14 +2022,27 @@ cudnnStatus_t cudnnSetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
                                           int nbDims,
                                           const int dimA[],
                                           const int strideA[]) {
-    if (!tensorDesc || !dimA || !strideA || nbDims < 1 || nbDims > 4)
+    if (!tensorDesc || !dimA || !strideA || nbDims < 1 || nbDims > CUDNN_DIM_MAX)
         return CUDNN_STATUS_BAD_PARAM;
     for (int i = 0; i < nbDims; ++i) {
         if (dimA[i] <= 0 || strideA[i] <= 0) return CUDNN_STATUS_BAD_PARAM;
     }
 
     tensorDesc->dataType = dataType;
-    // Map Nd dims to our 4d representation (pad leading dims with 1)
+    tensorDesc->format = CUDNN_TENSOR_NCHW;
+    tensorDesc->nbDims = nbDims;
+    for (int i = 0; i < CUDNN_DIM_MAX; ++i) {
+        tensorDesc->dims[i] = i < nbDims ? dimA[i] : 0;
+        tensorDesc->strides[i] = i < nbDims ? strideA[i] : 0;
+    }
+    if (nbDims > 4) {
+        // The operations work on a 4d n/c/h/w view. Leave it empty so they
+        // refuse this descriptor instead of computing on the first four dims.
+        tensorDesc->n = tensorDesc->c = tensorDesc->h = tensorDesc->w = 0;
+        tensorDesc->nStride = tensorDesc->cStride = tensorDesc->hStride = tensorDesc->wStride = 0;
+        return CUDNN_STATUS_SUCCESS;
+    }
+    // Ranks 1-4 map onto the 4d view, padding trailing dims with 1.
     tensorDesc->n = nbDims >= 1 ? dimA[0] : 1;
     tensorDesc->c = nbDims >= 2 ? dimA[1] : 1;
     tensorDesc->h = nbDims >= 3 ? dimA[2] : 1;
@@ -2013,17 +2060,16 @@ cudnnStatus_t cudnnGetTensorNdDescriptor(cudnnTensorDescriptor_t tensorDesc,
                                           int* nbDims,
                                           int dimA[],
                                           int strideA[]) {
-    if (!tensorDesc) return CUDNN_STATUS_BAD_PARAM;
-    if (dataType) *dataType = tensorDesc->dataType;
-    if (nbDims) *nbDims = 4;
-    if (dimA && nbDimsRequested >= 1) dimA[0] = tensorDesc->n;
-    if (dimA && nbDimsRequested >= 2) dimA[1] = tensorDesc->c;
-    if (dimA && nbDimsRequested >= 3) dimA[2] = tensorDesc->h;
-    if (dimA && nbDimsRequested >= 4) dimA[3] = tensorDesc->w;
-    if (strideA && nbDimsRequested >= 1) strideA[0] = tensorDesc->nStride;
-    if (strideA && nbDimsRequested >= 2) strideA[1] = tensorDesc->cStride;
-    if (strideA && nbDimsRequested >= 3) strideA[2] = tensorDesc->hStride;
-    if (strideA && nbDimsRequested >= 4) strideA[3] = tensorDesc->wStride;
+    if (!tensorDesc || !dataType || !nbDims || nbDimsRequested < 0 ||
+        (nbDimsRequested > 0 && (!dimA || !strideA)))
+        return CUDNN_STATUS_BAD_PARAM;
+    *dataType = tensorDesc->dataType;
+    *nbDims = tensorDesc->nbDims;
+    const int filled = std::min(nbDimsRequested, tensorDesc->nbDims);
+    for (int i = 0; i < filled; ++i) {
+        dimA[i] = tensorDesc->dims[i];
+        strideA[i] = tensorDesc->strides[i];
+    }
     return CUDNN_STATUS_SUCCESS;
 }
 
@@ -2041,6 +2087,7 @@ cudnnStatus_t cudnnBatchNormalizationForwardTraining(
     void* resultRunningMean, void* resultRunningVariance,
     double epsilon,
     void* resultSaveMean, void* resultSaveInvVariance) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !beta || !xDesc || !x || !yDesc || !y || !bnScale || !bnBias)
         return CUDNN_STATUS_BAD_PARAM;
@@ -2169,6 +2216,7 @@ cudnnStatus_t cudnnBatchNormalizationBackward(
     void* dBnScaleResult, void* dBnBiasResult,
     double epsilon,
     const void* savedMean, const void* savedInvVariance) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alphaDataDiff || !betaDataDiff || !alphaParamDiff || !betaParamDiff ||
         !xDesc || !x || !dyDesc || !dy || !dxDesc || !dx || !bnScale)
@@ -2281,6 +2329,7 @@ cudnnStatus_t cudnnSoftmaxBackward(cudnnHandle_t handle,
                                     cudnnTensorDescriptor_t dyDesc, const void* dy,
                                     const void* beta,
                                     cudnnTensorDescriptor_t dxDesc, void* dx) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!alpha || !yDesc || !y || !dyDesc || !dy || !beta || !dxDesc || !dx)
         return CUDNN_STATUS_BAD_PARAM;
@@ -2392,6 +2441,7 @@ cudnnStatus_t cudnnOpTensor(cudnnHandle_t handle,
                              cudnnTensorDescriptor_t bDesc, const void* B,
                              const void* beta,
                              cudnnTensorDescriptor_t cDesc, void* C) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!opTensorDesc || !alpha1 || !aDesc || !A || !alpha2 || !bDesc || !B ||
         !beta || !cDesc || !C)
@@ -2494,6 +2544,7 @@ cudnnStatus_t cudnnReduceTensor(cudnnHandle_t handle,
                                  cudnnTensorDescriptor_t aDesc, const void* A,
                                  const void* beta,
                                  cudnnTensorDescriptor_t cDesc, void* C) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!reduceTensorDesc || !alpha || !aDesc || !A || !beta || !cDesc || !C)
         return CUDNN_STATUS_BAD_PARAM;
@@ -2960,6 +3011,7 @@ cudnnStatus_t cudnnRNNForwardInference(cudnnHandle_t handle,
                                         cudnnTensorDescriptor_t hyDesc, void* hy,
                                         cudnnTensorDescriptor_t cyDesc, void* cy,
                                         void* workspace, size_t workSpaceSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     try {
         if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
         size_t required_workspace = 0;
@@ -2992,6 +3044,7 @@ cudnnStatus_t cudnnRNNForwardTraining(cudnnHandle_t handle,
                                        cudnnTensorDescriptor_t cyDesc, void* cy,
                                        void* workspace, size_t workSpaceSizeInBytes,
                                        void* reserveSpace, size_t reserveSpaceSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     // Training forward is identical to inference for outputs; reserveSpace is for backward
     try {
         if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
@@ -3270,6 +3323,7 @@ cudnnStatus_t cudnnMultiHeadAttnForward(cudnnHandle_t handle,
                                          size_t weightSizeInBytes, const void* weights,
                                          size_t workSpaceSizeInBytes, void* workSpace,
                                          size_t reserveSpaceSizeInBytes, void* reserveSpace) {
+    CUMETAL_LIBRARY_CALL("cuDNN");
     if (!handle) return CUDNN_STATUS_NOT_INITIALIZED;
     if (!attnDesc || !qDesc || !kDesc || !vDesc || !oDesc ||
         !queries || !keys || !values || !output) {

@@ -593,6 +593,14 @@ add_executable(cumetal_nvml_api_test
     nvml_api_test.cpp
 )
 
+add_executable(cumetal_library_provenance_test
+    library_provenance_test.cpp
+)
+
+add_executable(cumetal_cufft_determinism_test
+    cufft_determinism_test.cpp
+)
+
 add_executable(cumetal_runtime_cupy_surface_test
     runtime_cupy_surface_test.cpp
 )
@@ -1439,6 +1447,16 @@ target_link_libraries(cumetal_cudnn_api_test
 )
 
 target_link_libraries(cumetal_nvml_api_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_library_provenance_test
+    PRIVATE
+        cumetal_runtime
+)
+
+target_link_libraries(cumetal_cufft_determinism_test
     PRIVATE
         cumetal_runtime
 )
@@ -4154,6 +4172,16 @@ add_test(
 add_test(
     NAME functional_nvml_api
     COMMAND cumetal_nvml_api_test
+)
+
+add_test(
+    NAME functional_library_provenance
+    COMMAND cumetal_library_provenance_test
+)
+
+add_test(
+    NAME functional_cufft_determinism
+    COMMAND cumetal_cufft_determinism_test
 )
 
 add_test(

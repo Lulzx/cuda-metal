@@ -2,6 +2,7 @@
 #include "cuda_runtime.h"
 
 #include "metal_backend.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 #include "sparse_kernels_msl.h"
 #include "library_kernel_source.h"
@@ -512,6 +513,7 @@ cusparseStatus_t cusparseDestroySpMat(cusparseSpMatDescr_t spMatDescr) {
 cusparseStatus_t cusparseSpMatSetAttribute(cusparseSpMatDescr_t spMatDescr,
                                            cusparseSpMatAttribute_t attribute,
                                            const void* data, size_t dataSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || data == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (attribute == CUSPARSE_SPMAT_FILL_MODE) {
         if (dataSize != sizeof(cusparseFillMode_t)) return CUSPARSE_STATUS_INVALID_VALUE;
@@ -570,6 +572,7 @@ cusparseStatus_t cusparseDestroyDnVec(cusparseDnVecDescr_t dnVecDescr) {
 }
 
 cusparseStatus_t cusparseDnVecGetValues(cusparseDnVecDescr_t dnVecDescr, void** values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *values = dnVecDescr->values;
     return CUSPARSE_STATUS_SUCCESS;
@@ -584,6 +587,7 @@ cusparseStatus_t cusparseDnVecGetValues(cusparseDnVecDescr_t dnVecDescr, void** 
 // longest_row: see the INVARIANT on it before adding anything that repoints a
 // sparse descriptor's arrays.
 cusparseStatus_t cusparseDnVecSetValues(cusparseDnVecDescr_t dnVecDescr, void* values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     dnVecDescr->values = values;
     return CUSPARSE_STATUS_SUCCESS;
@@ -591,6 +595,7 @@ cusparseStatus_t cusparseDnVecSetValues(cusparseDnVecDescr_t dnVecDescr, void* v
 
 cusparseStatus_t cusparseDnVecGet(cusparseDnVecDescr_t dnVecDescr,
                                    int64_t* size, void** values, cudaDataType* valueType) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (size != nullptr) *size = dnVecDescr->size;
     if (values != nullptr) *values = dnVecDescr->values;
@@ -641,6 +646,7 @@ cusparseStatus_t cusparseSpMV_bufferSize(cusparseHandle_t handle,
                                           cudaDataType computeType,
                                           cusparseSpMVAlg_t alg,
                                           size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !alpha || !matA || !vecX || !beta || !vecY || !bufferSize) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1263,6 +1269,7 @@ bool try_spmv_gather_metal(cudaStream_t stream,
         spmv_note(error.empty() ? "launch failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
     spmv_note_gpu(kernel, mat, axis);
     // Profiling aid. Leaving the launch async is correct and is what makes the
     // GPU path worth having, but it also means a caller's own SpMV timers
@@ -1301,6 +1308,7 @@ cusparseStatus_t cusparseSpMV_preprocess(cusparseHandle_t handle,
                                           cudaDataType computeType,
                                           cusparseSpMVAlg_t alg,
                                           void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !matA || !vecX || !vecY || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1349,6 +1357,7 @@ cusparseStatus_t cusparseSpMV(cusparseHandle_t handle,
                                cudaDataType computeType,
                                cusparseSpMVAlg_t alg,
                                void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !matA || !vecX || !vecY || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1513,6 +1522,7 @@ cusparseStatus_t cusparseSpMM_bufferSize(cusparseHandle_t handle,
                                           cudaDataType computeType,
                                           cusparseSpMMAlg_t alg,
                                           size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !alpha || !matA || !matB || !beta || !matC || !bufferSize) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1552,6 +1562,7 @@ cusparseStatus_t cusparseSpMM(cusparseHandle_t handle,
                                cudaDataType computeType,
                                cusparseSpMMAlg_t alg,
                                void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !matA || !matB || !matC || !alpha || !beta) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1642,6 +1653,7 @@ cusparseStatus_t cusparseScsrmv(cusparseHandle_t handle,
                                  const float* x,
                                  const float* beta,
                                  float* y) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1712,6 +1724,7 @@ cusparseStatus_t cusparseDcsrmv(cusparseHandle_t handle,
                                  const double* x,
                                  const double* beta,
                                  double* y) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !alpha || !beta || !csrValA || !csrRowPtrA || !csrColIndA || !x || !y) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -1777,6 +1790,7 @@ struct cusparseSpSVDescr {
 };
 
 cusparseStatus_t cusparseSpSV_createDescr(cusparseSpSVDescr_t* descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!descr) return CUSPARSE_STATUS_INVALID_VALUE;
     *descr = new (std::nothrow) cusparseSpSVDescr();
     if (*descr == nullptr) return CUSPARSE_STATUS_ALLOC_FAILED;
@@ -1784,6 +1798,7 @@ cusparseStatus_t cusparseSpSV_createDescr(cusparseSpSVDescr_t* descr) {
 }
 
 cusparseStatus_t cusparseSpSV_destroyDescr(cusparseSpSVDescr_t descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     delete descr;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -1793,6 +1808,7 @@ cusparseStatus_t cusparseSpSV_bufferSize(cusparseHandle_t, cusparseOperation_t,
                                           cusparseDnVecDescr_t, cusparseDnVecDescr_t,
                                           cudaDataType, cusparseSpSVAlg_t,
                                           cusparseSpSVDescr_t, size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (bufferSize) *bufferSize = 1;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -1802,6 +1818,7 @@ cusparseStatus_t cusparseSpSV_analysis(cusparseHandle_t, cusparseOperation_t,
                                         cusparseDnVecDescr_t, cusparseDnVecDescr_t,
                                         cudaDataType, cusparseSpSVAlg_t,
                                         cusparseSpSVDescr_t, void*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     // CPU triangular solve needs no pre-analysis
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -1815,6 +1832,7 @@ cusparseStatus_t cusparseSpSV_solve(cusparseHandle_t handle,
                                      cudaDataType computeType,
                                      cusparseSpSVAlg_t,
                                      cusparseSpSVDescr_t) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (!handle || !matA || !vecX || !vecY || !alpha) return CUSPARSE_STATUS_INVALID_VALUE;
     if (matA->format != CUMETAL_SPMAT_CSR) return CUSPARSE_STATUS_MATRIX_TYPE_NOT_SUPPORTED;
     if (computeType != CUDA_R_32F && computeType != CUDA_R_64F)
@@ -3167,6 +3185,7 @@ cusparseStatus_t cusparseDestroySpVec(cusparseSpVecDescr_t spVecDescr) {
 cusparseStatus_t cusparseSpVecGet(cusparseSpVecDescr_t spVecDescr, int64_t* size, int64_t* nnz,
                                   void** indices, void** values, cusparseIndexType_t* idxType,
                                   cusparseIndexBase_t* idxBase, cudaDataType* valueType) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spVecDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (size != nullptr) *size = spVecDescr->size;
     if (nnz != nullptr) *nnz = spVecDescr->nnz;
@@ -3180,18 +3199,21 @@ cusparseStatus_t cusparseSpVecGet(cusparseSpVecDescr_t spVecDescr, int64_t* size
 
 cusparseStatus_t cusparseSpVecGetIndexBase(cusparseSpVecDescr_t spVecDescr,
                                            cusparseIndexBase_t* idxBase) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spVecDescr == nullptr || idxBase == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *idxBase = spVecDescr->idxBase;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSpVecGetValues(cusparseSpVecDescr_t spVecDescr, void** values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spVecDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *values = spVecDescr->values;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSpVecSetValues(cusparseSpVecDescr_t spVecDescr, void* values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spVecDescr == nullptr || (values == nullptr && spVecDescr->nnz > 0)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3205,6 +3227,7 @@ cusparseStatus_t cusparseCooGet(cusparseSpMatDescr_t spMatDescr, int64_t* rows, 
                                 int64_t* nnz, void** cooRowInd, void** cooColInd,
                                 void** cooValues, cusparseIndexType_t* idxType,
                                 cusparseIndexBase_t* idxBase, cudaDataType* valueType) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_COO) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3225,6 +3248,7 @@ cusparseStatus_t cusparseCsrGet(cusparseSpMatDescr_t spMatDescr, int64_t* rows, 
                                 void** csrValues, cusparseIndexType_t* csrRowOffsetsType,
                                 cusparseIndexType_t* csrColIndType, cusparseIndexBase_t* idxBase,
                                 cudaDataType* valueType) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_CSR) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3243,6 +3267,7 @@ cusparseStatus_t cusparseCsrGet(cusparseSpMatDescr_t spMatDescr, int64_t* rows, 
 
 cusparseStatus_t cusparseCsrSetPointers(cusparseSpMatDescr_t spMatDescr, void* csrRowOffsets,
                                         void* csrColInd, void* csrValues) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || spMatDescr->format != CUMETAL_SPMAT_CSR ||
         csrRowOffsets == nullptr ||
         (spMatDescr->nnz > 0 && (csrColInd == nullptr || csrValues == nullptr))) {
@@ -3258,6 +3283,7 @@ cusparseStatus_t cusparseCsrSetPointers(cusparseSpMatDescr_t spMatDescr, void* c
 }
 
 cusparseStatus_t cusparseSpMatGetFormat(cusparseSpMatDescr_t spMatDescr, cusparseFormat_t* format) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || format == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *format = format_of(spMatDescr);
     return CUSPARSE_STATUS_SUCCESS;
@@ -3265,12 +3291,14 @@ cusparseStatus_t cusparseSpMatGetFormat(cusparseSpMatDescr_t spMatDescr, cuspars
 
 cusparseStatus_t cusparseSpMatGetIndexBase(cusparseSpMatDescr_t spMatDescr,
                                            cusparseIndexBase_t* idxBase) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || idxBase == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *idxBase = spMatDescr->idxBase;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSpMatGetValues(cusparseSpMatDescr_t spMatDescr, void** values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *values = spMatDescr->values;
     return CUSPARSE_STATUS_SUCCESS;
@@ -3278,6 +3306,7 @@ cusparseStatus_t cusparseSpMatGetValues(cusparseSpMatDescr_t spMatDescr, void** 
 
 // Values may be rewritten in place; only the sparsity structure is fixed.
 cusparseStatus_t cusparseSpMatSetValues(cusparseSpMatDescr_t spMatDescr, void* values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || (values == nullptr && spMatDescr->nnz > 0)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3287,6 +3316,7 @@ cusparseStatus_t cusparseSpMatSetValues(cusparseSpMatDescr_t spMatDescr, void* v
 
 cusparseStatus_t cusparseSpMatGetSize(cusparseSpMatDescr_t spMatDescr, int64_t* rows,
                                       int64_t* cols, int64_t* nnz) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (rows != nullptr) *rows = spMatDescr->rows;
     if (cols != nullptr) *cols = spMatDescr->cols;
@@ -3296,6 +3326,7 @@ cusparseStatus_t cusparseSpMatGetSize(cusparseSpMatDescr_t spMatDescr, int64_t* 
 
 // Sparse matrices are not batched here, so the count is always one.
 cusparseStatus_t cusparseSpMatGetStridedBatch(cusparseSpMatDescr_t spMatDescr, int* batchCount) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spMatDescr == nullptr || batchCount == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *batchCount = 1;
     return CUSPARSE_STATUS_SUCCESS;
@@ -3304,6 +3335,7 @@ cusparseStatus_t cusparseSpMatGetStridedBatch(cusparseSpMatDescr_t spMatDescr, i
 cusparseStatus_t cusparseDnMatGet(cusparseDnMatDescr_t dnMatDescr, int64_t* rows, int64_t* cols,
                                   int64_t* ld, void** values, cudaDataType* valueType,
                                   cusparseOrder_t* order) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (rows != nullptr) *rows = dnMatDescr->rows;
     if (cols != nullptr) *cols = dnMatDescr->cols;
@@ -3315,12 +3347,14 @@ cusparseStatus_t cusparseDnMatGet(cusparseDnMatDescr_t dnMatDescr, int64_t* rows
 }
 
 cusparseStatus_t cusparseDnMatGetValues(cusparseDnMatDescr_t dnMatDescr, void** values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnMatDescr == nullptr || values == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *values = dnMatDescr->values;
     return CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseDnMatSetValues(cusparseDnMatDescr_t dnMatDescr, void* values) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnMatDescr == nullptr || (values == nullptr && dnMatDescr->rows > 0 && dnMatDescr->cols > 0)) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3330,6 +3364,7 @@ cusparseStatus_t cusparseDnMatSetValues(cusparseDnMatDescr_t dnMatDescr, void* v
 
 cusparseStatus_t cusparseDnMatGetStridedBatch(cusparseDnMatDescr_t dnMatDescr, int* batchCount,
                                               int64_t* batchStride) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnMatDescr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (batchCount != nullptr) *batchCount = dnMatDescr->batchCount;
     if (batchStride != nullptr) *batchStride = dnMatDescr->batchStride;
@@ -3338,6 +3373,7 @@ cusparseStatus_t cusparseDnMatGetStridedBatch(cusparseDnMatDescr_t dnMatDescr, i
 
 cusparseStatus_t cusparseDnMatSetStridedBatch(cusparseDnMatDescr_t dnMatDescr, int batchCount,
                                               int64_t batchStride) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (dnMatDescr == nullptr || batchCount < 1 || batchStride < 0) {
         return CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3370,6 +3406,7 @@ cusparseStatus_t cusparseSpVV_bufferSize(cusparseHandle_t handle, cusparseOperat
                                          cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY,
                                          const void* result, cudaDataType computeType,
                                          size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (bufferSize == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3385,6 +3422,7 @@ cusparseStatus_t cusparseSpVV_bufferSize(cusparseHandle_t handle, cusparseOperat
 cusparseStatus_t cusparseSpVV(cusparseHandle_t handle, cusparseOperation_t opX,
                               cusparseSpVecDescr_t vecX, cusparseDnVecDescr_t vecY, void* result,
                               cudaDataType computeType, void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = spvv_validate(handle, opX, vecX, vecY, result, computeType);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
     synchronize_handle_stream(handle);
@@ -3408,6 +3446,7 @@ cusparseStatus_t cusparseSpVV(cusparseHandle_t handle, cusparseOperation_t opX,
 // x.values[e] = y[x.indices[e]]
 cusparseStatus_t cusparseGather(cusparseHandle_t handle, cusparseDnVecDescr_t vecY,
                                 cusparseSpVecDescr_t vecX) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     if (vecX == nullptr || vecY == nullptr || vecX->size != vecY->size ||
         (vecX->nnz > 0 && (vecX->indices == nullptr || vecX->values == nullptr))) {
@@ -3433,12 +3472,14 @@ cusparseStatus_t cusparseGather(cusparseHandle_t handle, cusparseDnVecDescr_t ve
 struct cusparseSpSMDescr { char reserved = 0; };
 
 cusparseStatus_t cusparseSpSM_createDescr(cusparseSpSMDescr_t* descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (descr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *descr = new (std::nothrow) cusparseSpSMDescr();
     return *descr == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSpSM_destroyDescr(cusparseSpSMDescr_t descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     delete descr;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -3449,6 +3490,7 @@ cusparseStatus_t cusparseSpSM_bufferSize(cusparseHandle_t handle, cusparseOperat
                                          cusparseDnMatDescr_t matC, cudaDataType computeType,
                                          cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr,
                                          size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spsmDescr == nullptr || bufferSize == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3466,6 +3508,7 @@ cusparseStatus_t cusparseSpSM_analysis(cusparseHandle_t handle, cusparseOperatio
                                        cusparseDnMatDescr_t matC, cudaDataType computeType,
                                        cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr,
                                        void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spsmDescr == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3477,6 +3520,7 @@ cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t handle, cusparseOperation_t
                                     cusparseSpMatDescr_t matA, cusparseDnMatDescr_t matB,
                                     cusparseDnMatDescr_t matC, cudaDataType computeType,
                                     cusparseSpSMAlg_t alg, cusparseSpSMDescr_t spsmDescr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (spsmDescr == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3489,12 +3533,14 @@ cusparseStatus_t cusparseSpSM_solve(cusparseHandle_t handle, cusparseOperation_t
 // ── SpGEMM ──────────────────────────────────────────────────────────────────
 
 cusparseStatus_t cusparseSpGEMM_createDescr(cusparseSpGEMMDescr_t* descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (descr == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     *descr = new (std::nothrow) cusparseSpGEMMDescr();
     return *descr == nullptr ? CUSPARSE_STATUS_ALLOC_FAILED : CUSPARSE_STATUS_SUCCESS;
 }
 
 cusparseStatus_t cusparseSpGEMM_destroyDescr(cusparseSpGEMMDescr_t descr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     delete descr;
     return CUSPARSE_STATUS_SUCCESS;
 }
@@ -3507,6 +3553,7 @@ cusparseStatus_t cusparseSpGEMM_workEstimation(
     cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
     cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
     cusparseSpGEMMDescr_t spgemmDescr, size_t* bufferSize1, void* externalBuffer1) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     const cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
                                                     computeType, alg, spgemmDescr);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
@@ -3523,6 +3570,7 @@ cusparseStatus_t cusparseSpGEMM_compute(
     cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
     cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
     cusparseSpGEMMDescr_t spgemmDescr, size_t* bufferSize2, void* externalBuffer2) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
                                               computeType, alg, spgemmDescr);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
@@ -3568,6 +3616,7 @@ cusparseStatus_t cusparseSpGEMM_copy(
     cusparseSpMatDescr_t matA, cusparseSpMatDescr_t matB, const void* beta,
     cusparseSpMatDescr_t matC, cudaDataType computeType, cusparseSpGEMMAlg_t alg,
     cusparseSpGEMMDescr_t spgemmDescr) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     const cusparseStatus_t status = spgemm_validate(handle, opA, opB, alpha, matA, matB, beta, matC,
                                                     computeType, alg, spgemmDescr);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
@@ -3597,6 +3646,7 @@ cusparseStatus_t cusparseSparseToDense_bufferSize(cusparseHandle_t handle,
                                                   cusparseDnMatDescr_t matB,
                                                   cusparseSparseToDenseAlg_t alg,
                                                   size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (bufferSize == nullptr || alg != CUSPARSE_SPARSETODENSE_ALG_DEFAULT) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3610,6 +3660,7 @@ cusparseStatus_t cusparseSparseToDense_bufferSize(cusparseHandle_t handle,
 cusparseStatus_t cusparseSparseToDense(cusparseHandle_t handle, cusparseSpMatDescr_t matA,
                                        cusparseDnMatDescr_t matB, cusparseSparseToDenseAlg_t alg,
                                        void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = dense_sparse_validate(handle, matB, matA);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
     if (alg != CUSPARSE_SPARSETODENSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
@@ -3686,6 +3737,7 @@ cusparseStatus_t cusparseDenseToSparse_bufferSize(cusparseHandle_t handle,
                                                   cusparseSpMatDescr_t matB,
                                                   cusparseDenseToSparseAlg_t alg,
                                                   size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (bufferSize == nullptr || alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3703,6 +3755,7 @@ cusparseStatus_t cusparseDenseToSparse_analysis(cusparseHandle_t handle,
                                                 cusparseSpMatDescr_t matB,
                                                 cusparseDenseToSparseAlg_t alg,
                                                 void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = dense_sparse_validate(handle, matA, matB);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
     if (alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
@@ -3737,6 +3790,7 @@ cusparseStatus_t cusparseDenseToSparse_convert(cusparseHandle_t handle, cusparse
                                                cusparseSpMatDescr_t matB,
                                                cusparseDenseToSparseAlg_t alg,
                                                void* /*externalBuffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = dense_sparse_validate(handle, matA, matB);
     if (status != CUSPARSE_STATUS_SUCCESS) return status;
     if (alg != CUSPARSE_DENSETOSPARSE_ALG_DEFAULT) return CUSPARSE_STATUS_INVALID_VALUE;
@@ -3797,6 +3851,7 @@ cusparseStatus_t cusparseCsr2cscEx2_bufferSize(cusparseHandle_t handle, int m, i
                                                cusparseAction_t copyValues,
                                                cusparseIndexBase_t idxBase,
                                                cusparseCsr2CscAlg_t alg, size_t* bufferSize) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (bufferSize == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -3817,6 +3872,7 @@ cusparseStatus_t cusparseCsr2cscEx2(cusparseHandle_t handle, int m, int n, int n
                                     int* cscRowInd, cudaDataType valType,
                                     cusparseAction_t copyValues, cusparseIndexBase_t idxBase,
                                     cusparseCsr2CscAlg_t alg, void* /*buffer*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     cusparseStatus_t status = csr2csc_validate(handle, m, n, nnz, csrVal, csrRowPtr, csrColInd,
                                                cscVal, cscColPtr, cscRowInd, valType, copyValues,
                                                idxBase, alg);
@@ -3850,6 +3906,7 @@ cusparseStatus_t cusparseCsr2cscEx2(cusparseHandle_t handle, int m, int n, int n
 
 cusparseStatus_t cusparseXcoo2csr(cusparseHandle_t handle, const int* cooRowInd, int nnz, int m,
                                   int* csrSortedRowPtr, cusparseIndexBase_t idxBase) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     if (m < 0 || nnz < 0 || !valid_index_base(idxBase) || csrSortedRowPtr == nullptr ||
         (nnz > 0 && cooRowInd == nullptr)) {
@@ -3870,6 +3927,7 @@ cusparseStatus_t cusparseXcoo2csr(cusparseHandle_t handle, const int* cooRowInd,
 
 cusparseStatus_t cusparseXcsr2coo(cusparseHandle_t handle, const int* csrSortedRowPtr, int nnz,
                                   int m, int* cooRowInd, cusparseIndexBase_t idxBase) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     if (m < 0 || nnz < 0 || !valid_index_base(idxBase) || csrSortedRowPtr == nullptr ||
         (nnz > 0 && cooRowInd == nullptr)) {
@@ -3904,38 +3962,45 @@ static cusparseStatus_t sort_buffer_size(cusparseHandle_t handle, int m, int n, 
 
 cusparseStatus_t cusparseXcoosort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
                                                 const int*, const int*, size_t* pBufferSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
 }
 
 cusparseStatus_t cusparseXcoosortByRow(cusparseHandle_t handle, int m, int n, int nnz,
                                        int* cooRows, int* cooCols, int* P, void*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return coo_sort_impl(handle, m, n, nnz, cooRows, cooCols, P, true);
 }
 
 cusparseStatus_t cusparseXcoosortByColumn(cusparseHandle_t handle, int m, int n, int nnz,
                                           int* cooRows, int* cooCols, int* P, void*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return coo_sort_impl(handle, m, n, nnz, cooRows, cooCols, P, false);
 }
 
 cusparseStatus_t cusparseXcsrsort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
                                                 const int*, const int*, size_t* pBufferSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
 }
 
 cusparseStatus_t cusparseXcsrsort(cusparseHandle_t handle, int m, int n, int nnz,
                                   const cusparseMatDescr_t descrA, const int* csrRowPtr,
                                   int* csrColInd, int* P, void*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return sort_compressed_impl(handle, m, n, nnz, descrA, csrRowPtr, csrColInd, P);
 }
 
 cusparseStatus_t cusparseXcscsort_bufferSizeExt(cusparseHandle_t handle, int m, int n, int nnz,
                                                 const int*, const int*, size_t* pBufferSizeInBytes) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return sort_buffer_size(handle, m, n, nnz, pBufferSizeInBytes);
 }
 
 cusparseStatus_t cusparseXcscsort(cusparseHandle_t handle, int m, int n, int nnz,
                                   const cusparseMatDescr_t descrA, const int* cscColPtr,
                                   int* cscRowInd, int* P, void*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     return sort_compressed_impl(handle, n, m, nnz, descrA, cscColPtr, cscRowInd, P);
 }
 
@@ -3949,6 +4014,7 @@ cusparseStatus_t cusparseXcsrgeam2Nnz(cusparseHandle_t handle, int m, int n,
                                       const int* csrRowPtrB, const int* csrColIndB,
                                       const cusparseMatDescr_t descrC, int* csrRowPtrC,
                                       int* nnzTotalDevHostPtr, void* /*workspace*/) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     if (csrRowPtrC == nullptr || nnzTotalDevHostPtr == nullptr) {
         return handle == nullptr ? CUSPARSE_STATUS_NOT_INITIALIZED : CUSPARSE_STATUS_INVALID_VALUE;
     }
@@ -4007,6 +4073,7 @@ cusparseStatus_t cusparseDestroyBsric02Info(bsric02Info_t info) {
 // one, in the matrix's own index base, with CUSPARSE_STATUS_ZERO_PIVOT.
 cusparseStatus_t cusparseXcsrilu02_zeroPivot(cusparseHandle_t handle, csrilu02Info_t info,
                                              int* position) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     if (info == nullptr || position == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (info->zero_pivot >= 0) {
@@ -4019,6 +4086,7 @@ cusparseStatus_t cusparseXcsrilu02_zeroPivot(cusparseHandle_t handle, csrilu02In
 
 cusparseStatus_t cusparseXcsric02_zeroPivot(cusparseHandle_t handle, csric02Info_t info,
                                             int* position) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     if (info == nullptr || position == nullptr) return CUSPARSE_STATUS_INVALID_VALUE;
     if (info->zero_pivot >= 0) {
@@ -4031,11 +4099,13 @@ cusparseStatus_t cusparseXcsric02_zeroPivot(cusparseHandle_t handle, csric02Info
 
 cusparseStatus_t cusparseXbsrilu02_zeroPivot(cusparseHandle_t handle, bsrilu02Info_t,
                                              int*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     return CUSPARSE_STATUS_NOT_SUPPORTED;
 }
 
 cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info_t, int*) {
+    CUMETAL_LIBRARY_CALL("cuSPARSE");
     SP_NEED_HANDLE(handle);
     return CUSPARSE_STATUS_NOT_SUPPORTED;
 }
@@ -4046,12 +4116,14 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
     cusparseStatus_t cusparse##P##nnz(cusparseHandle_t handle, cusparseDirection_t dirA, int m,   \
                                       int n, const cusparseMatDescr_t descrA, const C* A,        \
                                       int lda, int* nnzPerRowColumn, int* nnzTotalDevHostPtr) {  \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return nnz_dense_impl<C>(handle, dirA, m, n, descrA, A, lda, nnzPerRowColumn,            \
                                  nnzTotalDevHostPtr);                                            \
     }                                                                                            \
     cusparseStatus_t cusparse##P##nnz_compress(                                                  \
         cusparseHandle_t handle, int m, const cusparseMatDescr_t descr, const C* csrSortedValA,  \
         const int* csrSortedRowPtrA, int* nnzPerRow, int* nnzC, C tol) {                         \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return nnz_compress_impl<C>(handle, m, descr, csrSortedValA, csrSortedRowPtrA,           \
                                     nnzPerRow, nnzC, tol);                                       \
     }                                                                                            \
@@ -4060,6 +4132,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         const C* csrSortedValA, const int* csrSortedColIndA, const int* csrSortedRowPtrA,        \
         int nnzA, int* nnzPerRow, C* csrSortedValC, int* csrSortedColIndC,                       \
         int* csrSortedRowPtrC, C tol) {                                                          \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csr2csr_compress_impl<C>(handle, m, n, descrA, csrSortedValA, csrSortedColIndA,   \
                                         csrSortedRowPtrA, nnzA, nnzPerRow, csrSortedValC,        \
                                         csrSortedColIndC, csrSortedRowPtrC, tol);                \
@@ -4071,6 +4144,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         const C* csrSortedValB, const int* csrSortedRowPtrB, const int* csrSortedColIndB,        \
         const cusparseMatDescr_t descrC, C* csrSortedValC, int* csrSortedRowPtrC,                \
         int* csrSortedColIndC, size_t* pBufferSizeInBytes) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return geam2_buffer_size<C>(handle, m, n, alpha, descrA, nnzA, csrSortedValA,            \
                                     csrSortedRowPtrA, csrSortedColIndA, beta, descrB, nnzB,      \
                                     csrSortedValB, csrSortedRowPtrB, csrSortedColIndB, descrC,   \
@@ -4084,6 +4158,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         const C* csrSortedValB, const int* csrSortedRowPtrB, const int* csrSortedColIndB,        \
         const cusparseMatDescr_t descrC, C* csrSortedValC, int* csrSortedRowPtrC,                \
         int* csrSortedColIndC, void*) {                                                          \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return geam2_compute<C>(handle, m, n, alpha, descrA, nnzA, csrSortedValA,                \
                                 csrSortedRowPtrA, csrSortedColIndA, beta, descrB, nnzB,          \
                                 csrSortedValB, csrSortedRowPtrB, csrSortedColIndB, descrC,       \
@@ -4092,12 +4167,14 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
     cusparseStatus_t cusparse##P##csrilu02_numericBoost(cusparseHandle_t handle,                 \
                                                         csrilu02Info_t info, int enable_boost,   \
                                                         double* tol, C* boost_val) {             \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csrilu02_boost_impl<C>(handle, info, enable_boost, tol, boost_val);               \
     }                                                                                            \
     cusparseStatus_t cusparse##P##csrilu02_bufferSize(                                           \
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,              \
         csrilu02Info_t info, int* pBufferSizeInBytes) {                                          \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         const cusparseStatus_t status = incomplete_validate<C>(                                  \
             handle, m, nnz, descrA, csrSortedValA, csrSortedRowPtrA, csrSortedColIndA, info);    \
         if (status != CUSPARSE_STATUS_SUCCESS) return status;                                    \
@@ -4109,6 +4186,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         const C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,        \
         csrilu02Info_t info, cusparseSolvePolicy_t, void*) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csrilu02_analysis_impl<C>(handle, m, nnz, descrA, csrSortedValA,                  \
                                          csrSortedRowPtrA, csrSortedColIndA, info);              \
     }                                                                                            \
@@ -4116,6 +4194,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         C* csrSortedValA_valM, const int* csrSortedRowPtrA, const int* csrSortedColIndA,         \
         csrilu02Info_t info, cusparseSolvePolicy_t, void*) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csrilu02_impl<C>(handle, m, nnz, descrA, csrSortedValA_valM, csrSortedRowPtrA,    \
                                 csrSortedColIndA, info);                                         \
     }                                                                                            \
@@ -4123,6 +4202,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,              \
         csric02Info_t info, int* pBufferSizeInBytes) {                                           \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         const cusparseStatus_t status = incomplete_validate<C>(                                  \
             handle, m, nnz, descrA, csrSortedValA, csrSortedRowPtrA, csrSortedColIndA, info);    \
         if (status != CUSPARSE_STATUS_SUCCESS) return status;                                    \
@@ -4134,6 +4214,7 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         const C* csrSortedValA, const int* csrSortedRowPtrA, const int* csrSortedColIndA,        \
         csric02Info_t info, cusparseSolvePolicy_t, void*) {                                      \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csric02_analysis_impl<C>(handle, m, nnz, descrA, csrSortedValA,                   \
                                         csrSortedRowPtrA, csrSortedColIndA, info);               \
     }                                                                                            \
@@ -4141,100 +4222,118 @@ cusparseStatus_t cusparseXbsric02_zeroPivot(cusparseHandle_t handle, bsric02Info
         cusparseHandle_t handle, int m, int nnz, const cusparseMatDescr_t descrA,                \
         C* csrSortedValA_valM, const int* csrSortedRowPtrA, const int* csrSortedColIndA,         \
         csric02Info_t info, cusparseSolvePolicy_t, void*) {                                      \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return csric02_impl<C>(handle, m, nnz, descrA, csrSortedValA_valM, csrSortedRowPtrA,     \
                                csrSortedColIndA, info);                                          \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsrilu02_numericBoost(cusparseHandle_t handle,                 \
                                                         bsrilu02Info_t, int, double*, C*) {      \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsrilu02_bufferSize(                                           \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
         const int*, const int*, int, bsrilu02Info_t, int*) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsrilu02_analysis(                                             \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
         const int*, const int*, int, bsrilu02Info_t, cusparseSolvePolicy_t, void*) {             \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsrilu02(                                                      \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
         const int*, const int*, int, bsrilu02Info_t, cusparseSolvePolicy_t, void*) {             \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsric02_bufferSize(                                            \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
         const int*, const int*, int, bsric02Info_t, int*) {                                      \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsric02_analysis(                                              \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t,        \
         const C*, const int*, const int*, int, bsric02Info_t, cusparseSolvePolicy_t, void*) {    \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##bsric02(                                                       \
         cusparseHandle_t handle, cusparseDirection_t, int, int, const cusparseMatDescr_t, C*,    \
         const int*, const int*, int, bsric02Info_t, cusparseSolvePolicy_t, void*) {              \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         SP_NEED_HANDLE(handle);                                                                  \
         return CUSPARSE_STATUS_NOT_SUPPORTED;                                                    \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2_bufferSizeExt(                                           \
         cusparseHandle_t handle, int m, int n, const C* dl, const C* d, const C* du,             \
         const C* B, int ldb, size_t* bufferSizeInBytes) {                                        \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_buffer_size<C>(handle, m, n, dl, d, du, B, ldb, bufferSizeInBytes);         \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2(cusparseHandle_t handle, int m, int n, const C* dl,      \
                                         const C* d, const C* du, C* B, int ldb, void*) {         \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_impl<C>(handle, m, n, dl, d, du, B, ldb, true);                             \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2_nopivot_bufferSizeExt(                                   \
         cusparseHandle_t handle, int m, int n, const C* dl, const C* d, const C* du,             \
         const C* B, int ldb, size_t* bufferSizeInBytes) {                                        \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_buffer_size<C>(handle, m, n, dl, d, du, B, ldb, bufferSizeInBytes);         \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2_nopivot(cusparseHandle_t handle, int m, int n,           \
                                                 const C* dl, const C* d, const C* du, C* B,      \
                                                 int ldb, void*) {                                \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_impl<C>(handle, m, n, dl, d, du, B, ldb, false);                            \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2StridedBatch_bufferSizeExt(                               \
         cusparseHandle_t handle, int m, const C* dl, const C* d, const C* du, const C* x,        \
         int batchCount, int batchStride, size_t* bufferSizeInBytes) {                            \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_strided_buffer_size<C>(handle, m, dl, d, du, x, batchCount, batchStride,    \
                                             bufferSizeInBytes);                                  \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsv2StridedBatch(                                             \
         cusparseHandle_t handle, int m, const C* dl, const C* d, const C* du, C* x,              \
         int batchCount, int batchStride, void*) {                                                \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv2_strided_impl<C>(handle, m, dl, d, du, x, batchCount, batchStride);          \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsvInterleavedBatch_bufferSizeExt(                            \
         cusparseHandle_t handle, int algo, int m, const C* dl, const C* d, const C* du,          \
         const C* x, int batchCount, size_t* pBufferSizeInBytes) {                                \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv_interleaved_buffer_size<C>(handle, algo, m, dl, d, du, x, batchCount,        \
                                                pBufferSizeInBytes);                              \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gtsvInterleavedBatch(                                          \
         cusparseHandle_t handle, int algo, int m, C* dl, C* d, C* du, C* x, int batchCount,      \
         void*) {                                                                                 \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gtsv_interleaved_impl<C>(handle, algo, m, dl, d, du, x, batchCount);              \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gpsvInterleavedBatch_bufferSizeExt(                            \
         cusparseHandle_t handle, int algo, int m, const C* ds, const C* dl, const C* d,          \
         const C* du, const C* dw, const C* x, int batchCount, size_t* pBufferSizeInBytes) {      \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gpsv_interleaved_buffer_size<C>(handle, algo, m, ds, dl, d, du, dw, x,            \
                                                batchCount, pBufferSizeInBytes);                  \
     }                                                                                            \
     cusparseStatus_t cusparse##P##gpsvInterleavedBatch(                                          \
         cusparseHandle_t handle, int algo, int m, C* ds, C* dl, C* d, C* du, C* dw, C* x,        \
         int batchCount, void*) {                                                                 \
+        CUMETAL_LIBRARY_CALL("cuSPARSE");                                                        \
         return gpsv_interleaved_impl<C>(handle, algo, m, ds, dl, d, du, dw, x, batchCount);      \
     }
 

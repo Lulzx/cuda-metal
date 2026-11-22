@@ -1,6 +1,7 @@
 #include "cublas_v2.h"
 #include "cuda_bf16.h"
 #include "metal_backend.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 #include "blas1_kernels_msl.h"
 #include "library_kernel_source.h"
@@ -312,6 +313,7 @@ bool blas1_launch_elementwise(const char* op,
         blas1_note(op, error.empty() ? "launch failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
     blas1_note_gpu(kernel, n);
     return true;
 }
@@ -408,6 +410,7 @@ bool blas1_reduce(const char* op,
         blas1_note(op, error.empty() ? "synchronize failed" : error.c_str());
         return false;
     }
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kKernel);
 
     double total = 0.0;
     for (unsigned i = 0; i < groups; ++i) total += partials[i];
@@ -749,6 +752,7 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
                            int incx,
                            float* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -777,6 +781,7 @@ cublasStatus_t cublasSaxpy(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasSscal(cublasHandle_t handle, int n, const float* alpha, float* x, int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -810,6 +815,7 @@ cublasStatus_t cublasScopy(cublasHandle_t handle,
                            int incx,
                            float* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -836,6 +842,7 @@ cublasStatus_t cublasScopy(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasSswap(cublasHandle_t handle, int n, float* x, int incx, float* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -874,6 +881,7 @@ cublasStatus_t cublasDaxpy(cublasHandle_t handle,
                            int incx,
                            double* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -924,6 +932,7 @@ cublasStatus_t cublasDaxpy(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasDscal(cublasHandle_t handle, int n, const double* alpha, double* x, int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -977,6 +986,7 @@ cublasStatus_t cublasDcopy(cublasHandle_t handle,
                            int incx,
                            double* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1005,6 +1015,7 @@ cublasStatus_t cublasDcopy(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasDswap(cublasHandle_t handle, int n, double* x, int incx, double* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1043,6 +1054,7 @@ cublasStatus_t cublasSdot(cublasHandle_t handle,
                           const float* y,
                           int incy,
                           float* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1080,6 +1092,7 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
                           const double* y,
                           int incy,
                           double* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1117,6 +1130,7 @@ cublasStatus_t cublasDdot(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasSasum(cublasHandle_t handle, int n, const float* x, int incx, float* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1155,6 +1169,7 @@ cublasStatus_t cublasDasum(cublasHandle_t handle,
                            const double* x,
                            int incx,
                            double* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1189,6 +1204,7 @@ cublasStatus_t cublasDasum(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasSnrm2(cublasHandle_t handle, int n, const float* x, int incx, float* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1227,6 +1243,7 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
                            const double* x,
                            int incx,
                            double* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1267,6 +1284,7 @@ cublasStatus_t cublasDnrm2(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasIsamax(cublasHandle_t handle, int n, const float* x, int incx, int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1310,6 +1328,7 @@ cublasStatus_t cublasIdamax(cublasHandle_t handle,
                             const double* x,
                             int incx,
                             int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1349,6 +1368,7 @@ cublasStatus_t cublasIdamax(cublasHandle_t handle,
 }
 
 cublasStatus_t cublasIsamin(cublasHandle_t handle, int n, const float* x, int incx, int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1392,6 +1412,7 @@ cublasStatus_t cublasIdamin(cublasHandle_t handle,
                             const double* x,
                             int incx,
                             int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1444,6 +1465,7 @@ cublasStatus_t cublasSgemm(cublasHandle_t handle,
                            const float* beta,
                            float* c,
                            int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1485,6 +1507,7 @@ cublasStatus_t cublasSgemm(cublasHandle_t handle,
     }
 
     std::string error;
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
     const cudaError_t gemm_status = cumetal::metal_backend::gemm_f32(
         transa != CUBLAS_OP_N,
         transb != CUBLAS_OP_N,
@@ -1536,6 +1559,7 @@ cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t handle,
                                          int ldc,
                                          long long int stridec,
                                          int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1578,6 +1602,7 @@ cublasStatus_t cublasSgemmStridedBatched(cublasHandle_t handle,
     }
 
     std::string error;
+    ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
     const cudaError_t gemm_status = cumetal::metal_backend::gemm_strided_batched_f32(
         transa != CUBLAS_OP_N,
         transb != CUBLAS_OP_N,
@@ -1619,6 +1644,7 @@ cublasStatus_t cublasDgemm(cublasHandle_t handle,
                            const double* beta,
                            double* c,
                            int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1684,6 +1710,7 @@ cublasStatus_t cublasDgemmStridedBatched(cublasHandle_t handle,
                                          int ldc,
                                          long long int stridec,
                                          int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1741,6 +1768,7 @@ cublasStatus_t cublasSgemv(cublasHandle_t handle,
                            const float* beta,
                            float* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1805,6 +1833,7 @@ cublasStatus_t cublasDgemv(cublasHandle_t handle,
                            const double* beta,
                            double* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1867,6 +1896,7 @@ cublasStatus_t cublasSger(cublasHandle_t handle,
                           int incy,
                           float* a,
                           int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1912,6 +1942,7 @@ cublasStatus_t cublasDger(cublasHandle_t handle,
                           int incy,
                           double* a,
                           int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -1958,6 +1989,7 @@ cublasStatus_t cublasSsymv(cublasHandle_t handle,
                            const float* beta,
                            float* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -2009,6 +2041,7 @@ cublasStatus_t cublasDsymv(cublasHandle_t handle,
                            const double* beta,
                            double* y,
                            int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) {
         return CUBLAS_STATUS_NOT_INITIALIZED;
     }
@@ -2064,6 +2097,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
                             void* c, cudaDataType_t ctype, int ldc,
                             cublasComputeType_t compute_type,
                             cublasGemmAlgo_t /* algo */) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb))
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -2167,6 +2201,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         }
 
         std::string error;
+        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
         const cudaError_t gemm_status = cumetal::metal_backend::gemm_f16_f32(
             transa != CUBLAS_OP_N, transb != CUBLAS_OP_N, m, n, k,
             alpha_f, a_resolved.buffer, a_resolved.offset, lda,
@@ -2216,6 +2251,7 @@ cublasStatus_t cublasGemmEx(cublasHandle_t handle,
         }
 
         std::string error;
+        ::cumetal::rt::note_library_backend(::cumetal::rt::LibraryBackend::kMps);
         const cudaError_t gemm_status = cumetal::metal_backend::gemm_f16(
             transa != CUBLAS_OP_N, transb != CUBLAS_OP_N, m, n, k,
             alpha_f, a_resolved.buffer, a_resolved.offset, lda,
@@ -2355,6 +2391,7 @@ cublasStatus_t cublasGemmStridedBatchedEx(cublasHandle_t handle,
                                           int batch_count,
                                           cublasComputeType_t compute_type,
                                           cublasGemmAlgo_t algo) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
 
@@ -2421,6 +2458,7 @@ cublasStatus_t cublasHgemm(cublasHandle_t handle,
                            const __half* b, int ldb,
                            const __half* beta,
                            __half* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
     const float falpha = static_cast<float>(*alpha);
@@ -2446,6 +2484,7 @@ cublasStatus_t cublasSgemmBatched(cublasHandle_t handle,
                                   const float* beta,
                                   float* const c_array[], int ldc,
                                   int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb))
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -2491,6 +2530,7 @@ cublasStatus_t cublasDgemmBatched(cublasHandle_t handle,
                                   const double* beta,
                                   double* const c_array[], int ldc,
                                   int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb))
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -2538,6 +2578,7 @@ cublasStatus_t cublasGemmBatchedEx(cublasHandle_t handle,
                                    int batch_count,
                                    cublasComputeType_t compute_type,
                                    cublasGemmAlgo_t algo) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb)) {
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -2605,6 +2646,7 @@ cublasStatus_t cublasSgetrfBatched(cublasHandle_t handle,
                                     int* pivot_array,
                                     int* info_array,
                                     int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return getrf_batched(handle, n, a_array, lda, pivot_array, info_array,
                          batch_count);
 }
@@ -2616,6 +2658,7 @@ cublasStatus_t cublasDgetrfBatched(cublasHandle_t handle,
                                     int* pivot_array,
                                     int* info_array,
                                     int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return getrf_batched(handle, n, a_array, lda, pivot_array, info_array,
                          batch_count);
 }
@@ -2707,6 +2750,7 @@ cublasStatus_t cublasStrsm(cublasHandle_t handle,
                            const float* alpha,
                            const float* a, int lda,
                            float* b, int ldb) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     CUMETAL_TRSM_BODY(float, 0.0f, 1.0f);
 }
 
@@ -2719,6 +2763,7 @@ cublasStatus_t cublasDtrsm(cublasHandle_t handle,
                            const double* alpha,
                            const double* a, int lda,
                            double* b, int ldb) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     CUMETAL_TRSM_BODY(double, 0.0, 1.0);
 }
 
@@ -2732,6 +2777,7 @@ cublasStatus_t cublasStrsmBatched(cublasHandle_t handle,
                                   const float* const a_array[], int lda,
                                   float* const b_array[], int ldb,
                                   int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
     if (alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -2757,6 +2803,7 @@ cublasStatus_t cublasDtrsmBatched(cublasHandle_t handle,
                                   const double* const a_array[], int lda,
                                   double* const b_array[], int ldb,
                                   int batch_count) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (batch_count < 0) return CUBLAS_STATUS_INVALID_VALUE;
     if (alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -2931,6 +2978,7 @@ cublasStatus_t cublasSsyr(cublasHandle_t handle,
                            const float* alpha,
                            const float* x, int incx,
                            float* a, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || x == nullptr || a == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -2959,6 +3007,7 @@ cublasStatus_t cublasDsyr(cublasHandle_t handle,
                            const double* alpha,
                            const double* x, int incx,
                            double* a, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || x == nullptr || a == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -2988,6 +3037,7 @@ cublasStatus_t cublasSsyrk(cublasHandle_t handle,
                             int n, int k,
                             const float* alpha, const float* a, int lda,
                             const float* beta,  float* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3024,6 +3074,7 @@ cublasStatus_t cublasDsyrk(cublasHandle_t handle,
                             int n, int k,
                             const double* alpha, const double* a, int lda,
                             const double* beta,  double* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3063,6 +3114,7 @@ cublasStatus_t cublasSsyr2k(cublasHandle_t handle,
                              const float* b, int ldb,
                              const float* beta,
                              float* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3103,6 +3155,7 @@ cublasStatus_t cublasDsyr2k(cublasHandle_t handle,
                              const double* b, int ldb,
                              const double* beta,
                              double* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3143,6 +3196,7 @@ cublasStatus_t cublasSsyr2(cublasHandle_t handle,
                             const float* x, int incx,
                             const float* y, int incy,
                             float* a, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || x == nullptr || y == nullptr || a == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3171,6 +3225,7 @@ cublasStatus_t cublasDsyr2(cublasHandle_t handle,
                             const double* x, int incx,
                             const double* y, int incy,
                             double* a, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || x == nullptr || y == nullptr || a == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3203,6 +3258,7 @@ cublasStatus_t cublasSsymm(cublasHandle_t handle,
                             const float* b, int ldb,
                             const float* beta,
                             float* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr ||
         beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3247,6 +3303,7 @@ cublasStatus_t cublasDsymm(cublasHandle_t handle,
                             const double* b, int ldb,
                             const double* beta,
                             double* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr ||
         beta == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3291,6 +3348,7 @@ cublasStatus_t cublasStrmv(cublasHandle_t handle,
                             int n,
                             const float* a, int lda,
                             float* x, int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || a == nullptr || x == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3331,6 +3389,7 @@ cublasStatus_t cublasDtrmv(cublasHandle_t handle,
                             int n,
                             const double* a, int lda,
                             double* x, int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || a == nullptr || x == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3378,6 +3437,7 @@ cublasStatus_t cublasStrmm(cublasHandle_t handle,
                             const float* a, int lda,
                             const float* b, int ldb,
                             float* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3431,6 +3491,7 @@ cublasStatus_t cublasDtrmm(cublasHandle_t handle,
                             const double* a, int lda,
                             const double* b, int ldb,
                             double* c, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || alpha == nullptr || a == nullptr || b == nullptr || c == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3512,6 +3573,7 @@ extern "C" {
 cublasStatus_t cublasSrotm(cublasHandle_t handle, int n,
                             float* x, int incx, float* y, int incy,
                             const float* param) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || x == nullptr || y == nullptr || param == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
     if (n <= 0 || incx == 0 || incy == 0) return CUBLAS_STATUS_SUCCESS;
@@ -3522,6 +3584,7 @@ cublasStatus_t cublasSrotm(cublasHandle_t handle, int n,
 cublasStatus_t cublasDrotm(cublasHandle_t handle, int n,
                             double* x, int incx, double* y, int incy,
                             const double* param) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || x == nullptr || y == nullptr || param == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
     if (n <= 0 || incx == 0 || incy == 0) return CUBLAS_STATUS_SUCCESS;
@@ -3630,6 +3693,7 @@ extern "C" {
 cublasStatus_t cublasSrotmg(cublasHandle_t handle,
                              float* d1, float* d2, float* x1, const float* y1,
                              float* param) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || d1 == nullptr || d2 == nullptr || x1 == nullptr
         || y1 == nullptr || param == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3640,6 +3704,7 @@ cublasStatus_t cublasSrotmg(cublasHandle_t handle,
 cublasStatus_t cublasDrotmg(cublasHandle_t handle,
                              double* d1, double* d2, double* x1, const double* y1,
                              double* param) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || d1 == nullptr || d2 == nullptr || x1 == nullptr
         || y1 == nullptr || param == nullptr)
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3655,6 +3720,7 @@ cublasStatus_t cublasSrot(cublasHandle_t handle,
                            float* y, int incy,
                            const float* c,
                            const float* s) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || x == nullptr || y == nullptr || c == nullptr || s == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3677,6 +3743,7 @@ cublasStatus_t cublasDrot(cublasHandle_t handle,
                            double* y, int incy,
                            const double* c,
                            const double* s) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || x == nullptr || y == nullptr || c == nullptr || s == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3700,6 +3767,7 @@ cublasStatus_t cublasDrot(cublasHandle_t handle,
 cublasStatus_t cublasSrotg(cublasHandle_t handle,
                             float* a, float* b,
                             float* c, float* s) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || a == nullptr || b == nullptr || c == nullptr || s == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3730,6 +3798,7 @@ cublasStatus_t cublasSrotg(cublasHandle_t handle,
 cublasStatus_t cublasDrotg(cublasHandle_t handle,
                             double* a, double* b,
                             double* c, double* s) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr || a == nullptr || b == nullptr || c == nullptr || s == nullptr) {
         return CUBLAS_STATUS_INVALID_VALUE;
     }
@@ -3805,6 +3874,7 @@ cublasStatus_t cublasCgemm(cublasHandle_t handle,
                             const cuComplex* B, int ldb,
                             const cuComplex* beta,
                             cuComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb))
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3831,6 +3901,7 @@ cublasStatus_t cublasZgemm(cublasHandle_t handle,
                             const cuDoubleComplex* B, int ldb,
                             const cuDoubleComplex* beta,
                             cuDoubleComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb))
         return CUBLAS_STATUS_INVALID_VALUE;
@@ -3857,6 +3928,7 @@ cublasStatus_t cublasCgemv(cublasHandle_t handle,
                             const cuComplex* x, int incx,
                             const cuComplex* beta,
                             cuComplex* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -3879,6 +3951,7 @@ cublasStatus_t cublasZgemv(cublasHandle_t handle,
                             const cuDoubleComplex* x, int incx,
                             const cuDoubleComplex* beta,
                             cuDoubleComplex* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -3902,6 +3975,7 @@ cublasStatus_t cublasChemv(cublasHandle_t handle, cublasFillMode_t uplo,
                             const cuComplex* x, int incx,
                             const cuComplex* beta,
                             cuComplex* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -3926,6 +4000,7 @@ cublasStatus_t cublasZhemv(cublasHandle_t handle, cublasFillMode_t uplo,
                             const cuDoubleComplex* x, int incx,
                             const cuDoubleComplex* beta,
                             cuDoubleComplex* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -3949,6 +4024,7 @@ cublasStatus_t cublasCher(cublasHandle_t handle, cublasFillMode_t uplo,
                            int n, const float* alpha,
                            const cuComplex* x, int incx,
                            cuComplex* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || n < 0 || alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
     if (n == 0) return CUBLAS_STATUS_SUCCESS;
@@ -3977,6 +4053,7 @@ cublasStatus_t cublasZher(cublasHandle_t handle, cublasFillMode_t uplo,
                            int n, const double* alpha,
                            const cuDoubleComplex* x, int incx,
                            cuDoubleComplex* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || n < 0 || alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
     if (n == 0) return CUBLAS_STATUS_SUCCESS;
@@ -4005,6 +4082,7 @@ cublasStatus_t cublasCher2(cublasHandle_t handle, cublasFillMode_t uplo,
                             const cuComplex* x, int incx,
                             const cuComplex* y, int incy,
                             cuComplex* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || n < 0 || alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
     if (n == 0) return CUBLAS_STATUS_SUCCESS;
@@ -4034,6 +4112,7 @@ cublasStatus_t cublasZher2(cublasHandle_t handle, cublasFillMode_t uplo,
                             const cuDoubleComplex* x, int incx,
                             const cuDoubleComplex* y, int incy,
                             cuDoubleComplex* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || n < 0 || alpha == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
     if (n == 0) return CUBLAS_STATUS_SUCCESS;
@@ -4064,6 +4143,7 @@ cublasStatus_t cublasCherk(cublasHandle_t handle, cublasFillMode_t uplo,
                             int n, int k,
                             const float* alpha, const cuComplex* A, int lda,
                             const float* beta,  cuComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || k < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4102,6 +4182,7 @@ cublasStatus_t cublasZherk(cublasHandle_t handle, cublasFillMode_t uplo,
                             int n, int k,
                             const double* alpha, const cuDoubleComplex* A, int lda,
                             const double* beta,  cuDoubleComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || k < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4142,6 +4223,7 @@ cublasStatus_t cublasCher2k(cublasHandle_t handle, cublasFillMode_t uplo,
                              const cuComplex* A, int lda,
                              const cuComplex* B, int ldb,
                              const float* beta, cuComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || k < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4187,6 +4269,7 @@ cublasStatus_t cublasZher2k(cublasHandle_t handle, cublasFillMode_t uplo,
                              const cuDoubleComplex* A, int lda,
                              const cuDoubleComplex* B, int ldb,
                              const double* beta, cuDoubleComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo) || !is_valid_operation(trans)) return CUBLAS_STATUS_INVALID_VALUE;
     if (n < 0 || k < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4233,6 +4316,7 @@ cublasStatus_t cublasChemm(cublasHandle_t handle, cublasSideMode_t side, cublasF
                             const cuComplex* B, int ldb,
                             const cuComplex* beta,
                             cuComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4267,6 +4351,7 @@ cublasStatus_t cublasZhemm(cublasHandle_t handle, cublasSideMode_t side, cublasF
                             const cuDoubleComplex* B, int ldb,
                             const cuDoubleComplex* beta,
                             cuDoubleComplex* C, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_fill_mode(uplo)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || alpha == nullptr || beta == nullptr) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4305,6 +4390,7 @@ cublasStatus_t cublasCgemmStridedBatched(cublasHandle_t handle,
                                           const cuComplex* beta,
                                           cuComplex* C, int ldc, long long int strideC,
                                           int batchCount) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || k < 0 || batchCount < 0) return CUBLAS_STATUS_INVALID_VALUE;
@@ -4333,6 +4419,7 @@ cublasStatus_t cublasZgemmStridedBatched(cublasHandle_t handle,
                                           const cuDoubleComplex* beta,
                                           cuDoubleComplex* C, int ldc, long long int strideC,
                                           int batchCount) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     if (!is_valid_operation(transa) || !is_valid_operation(transb)) return CUBLAS_STATUS_INVALID_VALUE;
     if (m < 0 || n < 0 || k < 0 || batchCount < 0) return CUBLAS_STATUS_INVALID_VALUE;
@@ -5102,35 +5189,43 @@ extern "C" {
 #define CUMETAL_CX_LEVEL1(P, C, R)                                                                  \
     cublasStatus_t cublas##P##axpy(cublasHandle_t h, int n, const C* alpha, const C* x, int incx,  \
                                    C* y, int incy) {                                                \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return axpy_impl(h, n, alpha, x, incx, y, incy);                                            \
     }                                                                                               \
     cublasStatus_t cublas##P##scal(cublasHandle_t h, int n, const C* alpha, C* x, int incx) {       \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return scal_impl(h, n, alpha, x, incx);                                                     \
     }                                                                                               \
     cublasStatus_t cublas##P##dotu(cublasHandle_t h, int n, const C* x, int incx, const C* y,       \
                                    int incy, C* result) {                                           \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return dot_impl(h, n, x, incx, y, incy, result, false);                                     \
     }                                                                                               \
     cublasStatus_t cublas##P##dotc(cublasHandle_t h, int n, const C* x, int incx, const C* y,       \
                                    int incy, C* result) {                                           \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return dot_impl(h, n, x, incx, y, incy, result, true);                                      \
     }                                                                                               \
     cublasStatus_t cublas##P##geru(cublasHandle_t h, int m, int n, const C* alpha, const C* x,      \
                                    int incx, const C* y, int incy, C* A, int lda) {                 \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return ger_impl(h, m, n, alpha, x, incx, y, incy, A, lda, false);                           \
     }                                                                                               \
     cublasStatus_t cublas##P##gerc(cublasHandle_t h, int m, int n, const C* alpha, const C* x,      \
                                    int incx, const C* y, int incy, C* A, int lda) {                 \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return ger_impl(h, m, n, alpha, x, incx, y, incy, A, lda, true);                            \
     }                                                                                               \
     cublasStatus_t cublas##P##syrk(cublasHandle_t h, cublasFillMode_t uplo,                         \
                                    cublasOperation_t trans, int n, int k, const C* alpha,           \
                                    const C* A, int lda, const C* beta, C* Cm, int ldc) {            \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return csyrk_impl(h, uplo, trans, n, k, alpha, A, lda, beta, Cm, ldc);                      \
     }                                                                                               \
     cublasStatus_t cublas##P##trsm(cublasHandle_t h, cublasSideMode_t side, cublasFillMode_t uplo,  \
                                    cublasOperation_t trans, cublasDiagType_t diag, int m, int n,    \
                                    const C* alpha, const C* A, int lda, C* B, int ldb) {            \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return ctrsm_impl(h, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb);                 \
     }                                                                                               \
     cublasStatus_t cublas##P##trsmBatched(cublasHandle_t h, cublasSideMode_t side,                  \
@@ -5138,6 +5233,7 @@ extern "C" {
                                           cublasDiagType_t diag, int m, int n, const C* alpha,      \
                                           const C* const A[], int lda, C* const B[], int ldb,       \
                                           int batchCount) {                                         \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return trsm_batched_impl(h, side, uplo, trans, diag, m, n, alpha, A, lda, B, ldb,           \
                                  batchCount);                                                       \
     }                                                                                               \
@@ -5146,11 +5242,13 @@ extern "C" {
                                           const C* alpha, const C* const A[], int lda,              \
                                           const C* const B[], int ldb, const C* beta,               \
                                           C* const Cm[], int ldc, int batchCount) {                 \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return gemm_batched_any(h, ta, tb, m, n, k, alpha, A, lda, B, ldb, beta, Cm, ldc,           \
                                 batchCount);                                                        \
     }                                                                                               \
     cublasStatus_t cublas##P##getrfBatched(cublasHandle_t h, int n, C* const A[], int lda,          \
                                            int* piv, int* info, int batchSize) {                    \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return getrf_batched_any(h, n, A, lda, piv, info, batchSize);                               \
     }
 
@@ -5158,20 +5256,24 @@ extern "C" {
     cublasStatus_t cublas##P##geam(cublasHandle_t h, cublasOperation_t ta, cublasOperation_t tb,    \
                                    int m, int n, const T* alpha, const T* A, int lda,               \
                                    const T* beta, const T* B, int ldb, T* Cm, int ldc) {            \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return geam_impl(h, ta, tb, m, n, alpha, A, lda, beta, B, ldb, Cm, ldc);                    \
     }                                                                                               \
     cublasStatus_t cublas##P##dgmm(cublasHandle_t h, cublasSideMode_t mode, int m, int n,           \
                                    const T* A, int lda, const T* x, int incx, T* Cm, int ldc) {     \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return dgmm_impl(h, mode, m, n, A, lda, x, incx, Cm, ldc);                                  \
     }                                                                                               \
     cublasStatus_t cublas##P##getrsBatched(cublasHandle_t h, cublasOperation_t trans, int n,        \
                                            int nrhs, const T* const A[], int lda, const int* ipiv,  \
                                            T* const B[], int ldb, int* info, int batchSize) {       \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return getrs_batched_any(h, trans, n, nrhs, A, lda, ipiv, B, ldb, info, batchSize);         \
     }                                                                                               \
     cublasStatus_t cublas##P##getriBatched(cublasHandle_t h, int n, const T* const A[], int lda,    \
                                            const int* piv, T* const Cm[], int ldc, int* info,       \
                                            int batchSize) {                                         \
+        CUMETAL_LIBRARY_CALL("cuBLAS");                                                             \
         return getri_batched_any(h, n, A, lda, piv, Cm, ldc, info, batchSize);                      \
     }
 
@@ -5186,68 +5288,84 @@ CUMETAL_ANY_LU_AND_EXT(Z, cuDoubleComplex)
 #undef CUMETAL_ANY_LU_AND_EXT
 
 cublasStatus_t cublasIcamax(cublasHandle_t h, int n, const cuComplex* x, int incx, int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return iamaxmin_impl(h, n, x, incx, result, true);
 }
 cublasStatus_t cublasIcamin(cublasHandle_t h, int n, const cuComplex* x, int incx, int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return iamaxmin_impl(h, n, x, incx, result, false);
 }
 cublasStatus_t cublasIzamax(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
                             int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return iamaxmin_impl(h, n, x, incx, result, true);
 }
 cublasStatus_t cublasIzamin(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
                             int* result) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return iamaxmin_impl(h, n, x, incx, result, false);
 }
 
 cublasStatus_t cublasScasum(cublasHandle_t h, int n, const cuComplex* x, int incx, float* r) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return norm_impl(h, n, x, incx, r, 0);
 }
 cublasStatus_t cublasScnrm2(cublasHandle_t h, int n, const cuComplex* x, int incx, float* r) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return norm_impl(h, n, x, incx, r, 1);
 }
 cublasStatus_t cublasDzasum(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
                             double* r) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return norm_impl(h, n, x, incx, r, 0);
 }
 cublasStatus_t cublasDznrm2(cublasHandle_t h, int n, const cuDoubleComplex* x, int incx,
                             double* r) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return norm_impl(h, n, x, incx, r, 1);
 }
 
 cublasStatus_t cublasCsscal(cublasHandle_t h, int n, const float* alpha, cuComplex* x, int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return scal_impl(h, n, alpha, x, incx);
 }
 cublasStatus_t cublasZdscal(cublasHandle_t h, int n, const double* alpha, cuDoubleComplex* x,
                             int incx) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return scal_impl(h, n, alpha, x, incx);
 }
 
 cublasStatus_t cublasSsbmv(cublasHandle_t h, cublasFillMode_t uplo, int n, int k, const float* alpha,
                            const float* A, int lda, const float* x, int incx, const float* beta,
                            float* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return sbmv_impl(h, uplo, n, k, alpha, A, lda, x, incx, beta, y, incy);
 }
 cublasStatus_t cublasDsbmv(cublasHandle_t h, cublasFillMode_t uplo, int n, int k,
                            const double* alpha, const double* A, int lda, const double* x, int incx,
                            const double* beta, double* y, int incy) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return sbmv_impl(h, uplo, n, k, alpha, A, lda, x, incx, beta, y, incy);
 }
 
 cublasStatus_t cublasStpttr(cublasHandle_t h, cublasFillMode_t uplo, int n, const float* AP,
                             float* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return tpttr_impl(h, uplo, n, AP, A, lda);
 }
 cublasStatus_t cublasDtpttr(cublasHandle_t h, cublasFillMode_t uplo, int n, const double* AP,
                             double* A, int lda) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return tpttr_impl(h, uplo, n, AP, A, lda);
 }
 cublasStatus_t cublasStrttp(cublasHandle_t h, cublasFillMode_t uplo, int n, const float* A, int lda,
                             float* AP) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return trttp_impl(h, uplo, n, A, lda, AP);
 }
 cublasStatus_t cublasDtrttp(cublasHandle_t h, cublasFillMode_t uplo, int n, const double* A,
                             int lda, double* AP) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     return trttp_impl(h, uplo, n, A, lda, AP);
 }
 
@@ -5256,6 +5374,7 @@ cublasStatus_t cublasSgemmEx(cublasHandle_t handle, cublasOperation_t transa,
                              const void* A, cudaDataType_t Atype, int lda, const void* B,
                              cudaDataType_t Btype, int ldb, const float* beta, void* C,
                              cudaDataType_t Ctype, int ldc) {
+    CUMETAL_LIBRARY_CALL("cuBLAS");
     if (handle == nullptr) return CUBLAS_STATUS_NOT_INITIALIZED;
     // GemmEx falls through to a zero-filling reader for types it does not know,
     // so refuse anything outside the float formats it converts.

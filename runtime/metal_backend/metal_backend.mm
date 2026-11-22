@@ -1936,6 +1936,32 @@ cudaError_t query_device_properties(DeviceProperties* out_properties, std::strin
     return cudaSuccess;
 }
 
+cudaError_t query_device_memory(DeviceMemoryInfo* out_info, std::string* error_message) {
+    if (out_info == nullptr) {
+        if (error_message != nullptr) {
+            *error_message = "query_device_memory missing output";
+        }
+        return cudaErrorInvalidValue;
+    }
+    if (!ensure_initialized(error_message)) {
+        return cudaErrorInitializationError;
+    }
+    DeviceMemoryInfo info;
+    BackendState& backend = state();
+    {
+        std::lock_guard<std::mutex> lock(backend.mutex);
+        NSString* ns_name = [backend.device name];
+        if (ns_name != nil) {
+            info.name = [ns_name UTF8String];
+        }
+        info.registry_id = [backend.device registryID];
+        info.recommended_working_set_bytes = [backend.device recommendedMaxWorkingSetSize];
+        info.current_allocated_bytes = [backend.device currentAllocatedSize];
+    }
+    *out_info = std::move(info);
+    return cudaSuccess;
+}
+
 cudaError_t prepare_kernel_pipeline(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     std::string* error_message) {

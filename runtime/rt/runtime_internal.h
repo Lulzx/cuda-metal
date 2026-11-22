@@ -1,6 +1,7 @@
 #pragma once
 
 #include "allocation_table.h"
+#include "library_provenance.h"
 #include "cuda_runtime.h"
 #include "metal_backend.h"
 

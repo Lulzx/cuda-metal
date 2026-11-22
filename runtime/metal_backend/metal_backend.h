@@ -94,6 +94,19 @@ struct Fft3dR2CConfig {
 
 cudaError_t initialize(std::string* error_message);
 cudaError_t query_device_properties(DeviceProperties* out_properties, std::string* error_message);
+
+// Raw MTLDevice memory and identity figures, with no host-RAM fallback, for
+// callers such as the NVML shim that must report a missing value as
+// unsupported rather than substitute another number.
+struct DeviceMemoryInfo {
+    std::string name;
+    std::uint64_t registry_id = 0;
+    // MTLDevice.recommendedMaxWorkingSetSize; 0 when Metal reports none.
+    std::uint64_t recommended_working_set_bytes = 0;
+    // MTLDevice.currentAllocatedSize: this process's Metal allocations.
+    std::uint64_t current_allocated_bytes = 0;
+};
+cudaError_t query_device_memory(DeviceMemoryInfo* out_info, std::string* error_message);
 cudaError_t query_kernel_properties(const std::string& metallib_path,
                                     const std::string& kernel_name,
                                     KernelProperties* out_properties,

@@ -1,4 +1,5 @@
 #include "cusolverDn.h"
+#include "library_provenance.h"
 #include "runtime_internal.h"
 #include "cusolverSp.h"
 #include "cusparse.h"
@@ -87,6 +88,7 @@ static bool checked_workspace_product(int m, int n, int* result) {
 
 cusolverStatus_t cusolverDnSgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               float* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!A || lda < std::max(1, m) || !checked_workspace_product(m, n, Lwork))
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -95,6 +97,7 @@ cusolverStatus_t cusolverDnSgetrf_bufferSize(cusolverDnHandle_t handle, int m, i
 
 cusolverStatus_t cusolverDnDgetrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               double* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!A || lda < std::max(1, m) || !checked_workspace_product(m, n, Lwork))
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -107,6 +110,7 @@ cusolverStatus_t cusolverDnDgetrf_bufferSize(cusolverDnHandle_t handle, int m, i
 
 cusolverStatus_t cusolverDnSgeqrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               float* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!A || lda < std::max(1, m) || !checked_workspace_product(m, n, Lwork))
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -115,6 +119,7 @@ cusolverStatus_t cusolverDnSgeqrf_bufferSize(cusolverDnHandle_t handle, int m, i
 
 cusolverStatus_t cusolverDnDgeqrf_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               double* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!A || lda < std::max(1, m) || !checked_workspace_product(m, n, Lwork))
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -124,6 +129,7 @@ cusolverStatus_t cusolverDnDgeqrf_bufferSize(cusolverDnHandle_t handle, int m, i
 cusolverStatus_t cusolverDnSgeqrf(cusolverDnHandle_t handle, int m, int n,
                                    float* A, int lda, float* TAU,
                                    float* Workspace, int Lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || n < 0 || !A || !TAU || !Workspace || !devInfo ||
         lda < std::max(1, m) || Lwork < std::max(1, n))
@@ -139,6 +145,7 @@ cusolverStatus_t cusolverDnSgeqrf(cusolverDnHandle_t handle, int m, int n,
 cusolverStatus_t cusolverDnDgeqrf(cusolverDnHandle_t handle, int m, int n,
                                    double* A, int lda, double* TAU,
                                    double* Workspace, int Lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || n < 0 || !A || !TAU || !Workspace || !devInfo ||
         lda < std::max(1, m) || Lwork < std::max(1, n))
@@ -156,6 +163,7 @@ cusolverStatus_t cusolverDnDgeqrf(cusolverDnHandle_t handle, int m, int n,
 cusolverStatus_t cusolverDnSpotrf_bufferSize(cusolverDnHandle_t handle,
                                               cublasFillMode_t uplo, int n,
                                               float* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || !A || lda < std::max(1, n) || !Lwork)
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -166,6 +174,7 @@ cusolverStatus_t cusolverDnSpotrf_bufferSize(cusolverDnHandle_t handle,
 cusolverStatus_t cusolverDnDpotrf_bufferSize(cusolverDnHandle_t handle,
                                               cublasFillMode_t uplo, int n,
                                               double* A, int lda, int* Lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || !A || lda < std::max(1, n) || !Lwork)
         return CUSOLVER_STATUS_INVALID_VALUE;
@@ -176,6 +185,7 @@ cusolverStatus_t cusolverDnDpotrf_bufferSize(cusolverDnHandle_t handle,
 cusolverStatus_t cusolverDnSpotrf(cusolverDnHandle_t handle, cublasFillMode_t uplo,
                                    int n, float* A, int lda, float* Workspace,
                                    int Lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || !A || !Workspace || !devInfo ||
         lda < std::max(1, n) || Lwork < n)
@@ -192,6 +202,7 @@ cusolverStatus_t cusolverDnSpotrf(cusolverDnHandle_t handle, cublasFillMode_t up
 cusolverStatus_t cusolverDnDpotrf(cusolverDnHandle_t handle, cublasFillMode_t uplo,
                                    int n, double* A, int lda, double* Workspace,
                                    int Lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || !A || !Workspace || !devInfo ||
         lda < std::max(1, n) || Lwork < n)
@@ -210,6 +221,7 @@ cusolverStatus_t cusolverDnDpotrf(cusolverDnHandle_t handle, cublasFillMode_t up
 cusolverStatus_t cusolverDnSpotrs(cusolverDnHandle_t handle, cublasFillMode_t uplo,
                                    int n, int nrhs, const float* A, int lda,
                                    float* B, int ldb, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || nrhs < 0 || !A || !B || !devInfo ||
         lda < std::max(1, n) || ldb < std::max(1, n))
@@ -226,6 +238,7 @@ cusolverStatus_t cusolverDnSpotrs(cusolverDnHandle_t handle, cublasFillMode_t up
 cusolverStatus_t cusolverDnDpotrs(cusolverDnHandle_t handle, cublasFillMode_t uplo,
                                    int n, int nrhs, const double* A, int lda,
                                    double* B, int ldb, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_fill(uplo) || n < 0 || nrhs < 0 || !A || !B || !devInfo ||
         lda < std::max(1, n) || ldb < std::max(1, n))
@@ -246,6 +259,7 @@ cusolverStatus_t cusolverDnSsyevd_bufferSize(cusolverDnHandle_t handle,
                                               cublasFillMode_t uplo, int n,
                                               const float* A, int lda,
                                               const float* W, int* lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     // Query optimal workspace
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) || n < 0 || !A || !W ||
@@ -261,6 +275,7 @@ cusolverStatus_t cusolverDnDsyevd_bufferSize(cusolverDnHandle_t handle,
                                               cublasFillMode_t uplo, int n,
                                               const double* A, int lda,
                                               const double* W, int* lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) || n < 0 || !A || !W ||
         lda < std::max(1, n) || !lwork) return CUSOLVER_STATUS_INVALID_VALUE;
@@ -273,6 +288,7 @@ cusolverStatus_t cusolverDnDsyevd_bufferSize(cusolverDnHandle_t handle,
 cusolverStatus_t cusolverDnSsyevd(cusolverDnHandle_t handle, cusolverEigMode_t jobz,
                                    cublasFillMode_t uplo, int n, float* A, int lda,
                                    float* W, float* work, int lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     const long long required = 1LL + 6LL * n + 2LL * n * n;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) || n < 0 || !A || !W ||
@@ -298,6 +314,7 @@ cusolverStatus_t cusolverDnSsyevd(cusolverDnHandle_t handle, cusolverEigMode_t j
 cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t handle, cusolverEigMode_t jobz,
                                    cublasFillMode_t uplo, int n, double* A, int lda,
                                    double* W, double* work, int lwork, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     const long long required = 1LL + 6LL * n + 2LL * n * n;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) || n < 0 || !A || !W ||
@@ -323,6 +340,7 @@ cusolverStatus_t cusolverDnDsyevd(cusolverDnHandle_t handle, cusolverEigMode_t j
 
 cusolverStatus_t cusolverDnSgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               int* lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || n < 0 || !lwork) return CUSOLVER_STATUS_INVALID_VALUE;
     const long long required = 3LL * std::min(m, n) + 2LL * std::max(m, n);
@@ -333,6 +351,7 @@ cusolverStatus_t cusolverDnSgesvd_bufferSize(cusolverDnHandle_t handle, int m, i
 
 cusolverStatus_t cusolverDnDgesvd_bufferSize(cusolverDnHandle_t handle, int m, int n,
                                               int* lwork) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || n < 0 || !lwork) return CUSOLVER_STATUS_INVALID_VALUE;
     const long long required = 3LL * std::min(m, n) + 2LL * std::max(m, n);
@@ -345,6 +364,7 @@ cusolverStatus_t cusolverDnSgesvd(cusolverDnHandle_t handle, signed char jobu,
                                    signed char jobvt, int m, int n, float* A, int lda,
                                    float* S, float* U, int ldu, float* VT, int ldvt,
                                    float* work, int lwork, float* /*rwork*/, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     char ju = static_cast<char>(jobu);
     char jvt = static_cast<char>(jobvt);
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
@@ -374,6 +394,7 @@ cusolverStatus_t cusolverDnDgesvd(cusolverDnHandle_t handle, signed char jobu,
                                    signed char jobvt, int m, int n, double* A, int lda,
                                    double* S, double* U, int ldu, double* VT, int ldvt,
                                    double* work, int lwork, double* /*rwork*/, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     char ju = static_cast<char>(jobu);
     char jvt = static_cast<char>(jobvt);
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
@@ -494,6 +515,7 @@ cusolverStatus_t cusolverSpScsrlsvchol(cusolverSpHandle_t handle,
                                         const int* csrColInd, const float* b,
                                         float tol, int reorder,
                                         float* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || nnz < 0 || !descrA || !csrVal || !csrRowPtr || !csrColInd ||
         !b || !x || !singularity || !std::isfinite(tol) || tol < 0.0f ||
@@ -547,6 +569,7 @@ cusolverStatus_t cusolverSpDcsrlsvchol(cusolverSpHandle_t handle,
                                         const int* csrColInd, const double* b,
                                         double tol, int reorder,
                                         double* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || nnz < 0 || !descrA || !csrVal || !csrRowPtr || !csrColInd ||
         !b || !x || !singularity || !std::isfinite(tol) || tol < 0.0 ||
@@ -601,6 +624,7 @@ cusolverStatus_t cusolverSpScsrlsvqr(cusolverSpHandle_t handle,
                                       const int* csrColInd, const float* b,
                                       float tol, int reorder,
                                       float* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || nnz < 0 || !descrA || !csrVal || !csrRowPtr || !csrColInd ||
         !b || !x || !singularity || !std::isfinite(tol) || tol < 0.0f ||
@@ -657,6 +681,7 @@ cusolverStatus_t cusolverSpDcsrlsvqr(cusolverSpHandle_t handle,
                                       const int* csrColInd, const double* b,
                                       double tol, int reorder,
                                       double* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (m < 0 || nnz < 0 || !descrA || !csrVal || !csrRowPtr || !csrColInd ||
         !b || !x || !singularity || !std::isfinite(tol) || tol < 0.0 ||
@@ -794,6 +819,7 @@ cusolverStatus_t cusolverDnXsyevd_bufferSize(cusolverDnHandle_t handle,
                                              const void* W, cudaDataType computeType,
                                              size_t* workspaceInBytesOnDevice,
                                              size_t* workspaceInBytesOnHost) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) ||
         !valid_xsyev_types(dataTypeA, dataTypeW, computeType) || n < 0 ||
@@ -824,6 +850,7 @@ cusolverStatus_t cusolverDnXsyevd(cusolverDnHandle_t handle,
                                   size_t workspaceInBytesOnDevice,
                                   void* /*bufferOnHost*/,
                                   size_t /*workspaceInBytesOnHost*/, int* info) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) ||
         !valid_xsyev_types(dataTypeA, dataTypeW, computeType) || n < 0 ||
@@ -869,6 +896,7 @@ cusolverStatus_t cusolverDnXsyevBatched_bufferSize(cusolverDnHandle_t handle,
                                                    int64_t batchSize,
                                                    size_t* workspaceInBytesOnDevice,
                                                    size_t* workspaceInBytesOnHost) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) ||
         !valid_xsyev_types(dataTypeA, dataTypeW, computeType) || n < 0 ||
@@ -899,6 +927,7 @@ cusolverStatus_t cusolverDnXsyevBatched(cusolverDnHandle_t handle,
                                         size_t workspaceInBytesOnDevice,
                                         void* /*bufferOnHost*/,
                                         size_t /*workspaceInBytesOnHost*/, int* info) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!valid_eig_mode(jobz) || !valid_fill(uplo) ||
         !valid_xsyev_types(dataTypeA, dataTypeW, computeType) || n < 0 ||
@@ -967,6 +996,7 @@ cusolverStatus_t cusolverDnDestroySyevjInfo(syevjInfo_t info) {
 }
 
 cusolverStatus_t cusolverDnXsyevjSetTolerance(syevjInfo_t info, double tolerance) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info || !std::isfinite(tolerance) || tolerance < 0.0)
         return CUSOLVER_STATUS_INVALID_VALUE;
     info->tolerance = tolerance;
@@ -974,12 +1004,14 @@ cusolverStatus_t cusolverDnXsyevjSetTolerance(syevjInfo_t info, double tolerance
 }
 
 cusolverStatus_t cusolverDnXsyevjSetMaxSweeps(syevjInfo_t info, int max_sweeps) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info || max_sweeps < 0) return CUSOLVER_STATUS_INVALID_VALUE;
     info->max_sweeps = max_sweeps;
     return CUSOLVER_STATUS_SUCCESS;
 }
 
 cusolverStatus_t cusolverDnXsyevjSetSortEig(syevjInfo_t info, int sort_eig) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info) return CUSOLVER_STATUS_INVALID_VALUE;
     info->sort_eig = sort_eig != 0 ? 1 : 0;
     return CUSOLVER_STATUS_SUCCESS;
@@ -987,6 +1019,7 @@ cusolverStatus_t cusolverDnXsyevjSetSortEig(syevjInfo_t info, int sort_eig) {
 
 cusolverStatus_t cusolverDnXsyevjGetResidual(cusolverDnHandle_t handle,
                                              syevjInfo_t info, double* residual) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!info || !residual) return CUSOLVER_STATUS_INVALID_VALUE;
     *residual = info->residual;
@@ -995,6 +1028,7 @@ cusolverStatus_t cusolverDnXsyevjGetResidual(cusolverDnHandle_t handle,
 
 cusolverStatus_t cusolverDnXsyevjGetSweeps(cusolverDnHandle_t handle,
                                           syevjInfo_t info, int* executed_sweeps) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!info || !executed_sweeps) return CUSOLVER_STATUS_INVALID_VALUE;
     *executed_sweeps = info->executed_sweeps;
@@ -1196,6 +1230,7 @@ cusolverStatus_t cusolverDnSsyevjBatched_bufferSize(cusolverDnHandle_t handle,
                                                     const float* W, int* lwork,
                                                     syevjInfo_t params,
                                                     int batchSize) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return syevj_batched_buffer_size<float>(handle, jobz, uplo, n, A, lda, W,
                                             lwork, params, batchSize);
 }
@@ -1207,6 +1242,7 @@ cusolverStatus_t cusolverDnDsyevjBatched_bufferSize(cusolverDnHandle_t handle,
                                                     const double* W, int* lwork,
                                                     syevjInfo_t params,
                                                     int batchSize) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return syevj_batched_buffer_size<double>(handle, jobz, uplo, n, A, lda, W,
                                              lwork, params, batchSize);
 }
@@ -1217,6 +1253,7 @@ cusolverStatus_t cusolverDnSsyevjBatched(cusolverDnHandle_t handle,
                                         int lda, float* W, float* work,
                                         int lwork, int* devInfo,
                                         syevjInfo_t params, int batchSize) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return syevj_batched<float>(handle, jobz, uplo, n, A, lda, W, work, lwork,
                                 devInfo, params, batchSize);
 }
@@ -1227,6 +1264,7 @@ cusolverStatus_t cusolverDnDsyevjBatched(cusolverDnHandle_t handle,
                                         int lda, double* W, double* work,
                                         int lwork, int* devInfo,
                                         syevjInfo_t params, int batchSize) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return syevj_batched<double>(handle, jobz, uplo, n, A, lda, W, work, lwork,
                                  devInfo, params, batchSize);
 }
@@ -2625,6 +2663,7 @@ cusolverStatus_t cusolverDnDestroyGesvdjInfo(gesvdjInfo_t info) {
 }
 
 cusolverStatus_t cusolverDnXgesvdjSetTolerance(gesvdjInfo_t info, double tolerance) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info || !std::isfinite(tolerance) || tolerance < 0.0)
         return CUSOLVER_STATUS_INVALID_VALUE;
     info->tolerance = tolerance;
@@ -2632,12 +2671,14 @@ cusolverStatus_t cusolverDnXgesvdjSetTolerance(gesvdjInfo_t info, double toleran
 }
 
 cusolverStatus_t cusolverDnXgesvdjSetMaxSweeps(gesvdjInfo_t info, int max_sweeps) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info || max_sweeps < 0) return CUSOLVER_STATUS_INVALID_VALUE;
     info->max_sweeps = max_sweeps;
     return CUSOLVER_STATUS_SUCCESS;
 }
 
 cusolverStatus_t cusolverDnXgesvdjSetSortEig(gesvdjInfo_t info, int sort_svd) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!info) return CUSOLVER_STATUS_INVALID_VALUE;
     info->sort_svd = sort_svd != 0 ? 1 : 0;
     return CUSOLVER_STATUS_SUCCESS;
@@ -2645,6 +2686,7 @@ cusolverStatus_t cusolverDnXgesvdjSetSortEig(gesvdjInfo_t info, int sort_svd) {
 
 cusolverStatus_t cusolverDnXgesvdjGetResidual(cusolverDnHandle_t handle, gesvdjInfo_t info,
                                               double* residual) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!info || !residual) return CUSOLVER_STATUS_INVALID_VALUE;
     *residual = info->residual;
@@ -2653,6 +2695,7 @@ cusolverStatus_t cusolverDnXgesvdjGetResidual(cusolverDnHandle_t handle, gesvdjI
 
 cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInfo_t info,
                                             int* executed_sweeps) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (!handle) return CUSOLVER_STATUS_NOT_INITIALIZED;
     if (!info || !executed_sweeps) return CUSOLVER_STATUS_INVALID_VALUE;
     *executed_sweeps = info->executed_sweeps;
@@ -2663,74 +2706,88 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
     cusolverStatus_t cusolverDn##PFX##ORG##_bufferSize(                                         \
         cusolverDnHandle_t h, int m, int n, int k, const ELEM* A, int lda, const ELEM* tau,     \
         int* lwork) {                                                                           \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_orgqr_bs<ELEM>(h, m, n, k, A, lda, tau, lwork);                               \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##ORG(cusolverDnHandle_t h, int m, int n, int k, ELEM* A,   \
                                           int lda, const ELEM* tau, ELEM* work, int lwork,      \
                                           int* info) {                                          \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_orgqr<ELEM>(h, m, n, k, A, lda, tau, work, lwork, info);                      \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##ORM##_bufferSize(                                         \
         cusolverDnHandle_t h, cublasSideMode_t side, cublasOperation_t trans, int m, int n,     \
         int k, const ELEM* A, int lda, const ELEM* tau, const ELEM* C, int ldc, int* lwork) {   \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_ormqr_bs<ELEM>(h, side, trans, m, n, k, A, lda, tau, C, ldc, lwork);          \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##ORM(                                                      \
         cusolverDnHandle_t h, cublasSideMode_t side, cublasOperation_t trans, int m, int n,     \
         int k, const ELEM* A, int lda, const ELEM* tau, ELEM* C, int ldc, ELEM* work,           \
         int lwork, int* devInfo) {                                                              \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_ormqr<ELEM>(h, side, trans, m, n, k, A, lda, tau, C, ldc, work, lwork,        \
                               devInfo);                                                         \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##potrfBatched(cusolverDnHandle_t h, cublasFillMode_t uplo, \
                                                    int n, ELEM* Aarray[], int lda,              \
                                                    int* infoArray, int batchSize) {             \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_potrf_batched<ELEM>(h, uplo, n, Aarray, lda, infoArray, batchSize);           \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##potrsBatched(cusolverDnHandle_t h, cublasFillMode_t uplo, \
                                                    int n, int nrhs, ELEM* A[], int lda,         \
                                                    ELEM* B[], int ldb, int* d_info,             \
                                                    int batchSize) {                             \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_potrs_batched<ELEM>(h, uplo, n, nrhs, A, lda, B, ldb, d_info, batchSize);     \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##sytrf_bufferSize(cusolverDnHandle_t h, int n, ELEM* A,    \
                                                        int lda, int* lwork) {                   \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_sytrf_bs<ELEM>(h, n, A, lda, lwork);                                          \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##sytrf(cusolverDnHandle_t h, cublasFillMode_t uplo,        \
                                             int n, ELEM* A, int lda, int* ipiv, ELEM* work,     \
                                             int lwork, int* info) {                             \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_sytrf<ELEM>(h, uplo, n, A, lda, ipiv, work, lwork, info);                     \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gebrd_bufferSize(cusolverDnHandle_t h, int m, int n,      \
                                                        int* Lwork) {                            \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_gebrd_bs<ELEM>(h, m, n, Lwork);                                               \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gebrd(cusolverDnHandle_t h, int m, int n, ELEM* A,        \
                                             int lda, REAL* D, REAL* E, ELEM* TAUQ, ELEM* TAUP,  \
                                             ELEM* Work, int Lwork, int* devInfo) {              \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_gebrd<ELEM>(h, m, n, A, lda, D, E, TAUQ, TAUP, Work, Lwork, devInfo);         \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVJ##_bufferSize(                                         \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,             \
         const ELEM* A, int lda, const REAL* W, int* lwork, syevjInfo_t params) {                \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return evj_single_bs<ELEM>(h, jobz, uplo, n, A, lda, W, lwork, params);                 \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVJ(                                                      \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n, ELEM* A,    \
         int lda, REAL* W, ELEM* work, int lwork, int* info, syevjInfo_t params) {               \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return evj_single<ELEM>(h, jobz, uplo, n, A, lda, W, work, lwork, info, params);        \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gesvdj_bufferSize(                                        \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, int econ, int m, int n, const ELEM* A,    \
         int lda, const REAL* S, const ELEM* U, int ldu, const ELEM* V, int ldv, int* lwork,     \
         gesvdjInfo_t params) {                                                                  \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvdj_bs<ELEM>(h, jobz, econ, m, n, A, lda, S, U, ldu, V, ldv, lwork, params);  \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gesvdj(                                                   \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, int econ, int m, int n, ELEM* A,          \
         int lda, REAL* S, ELEM* U, int ldu, ELEM* V, int ldv, ELEM* work, int lwork,            \
         int* info, gesvdjInfo_t params) {                                                       \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvdj_run<ELEM>(h, jobz, econ, m, n, A, lda, S, U, ldu, V, ldv, work, lwork,    \
                                 info, params);                                                  \
     }                                                                                           \
@@ -2738,6 +2795,7 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
         cusolverDnHandle_t h, cusolverEigMode_t jobz, int m, int n, const ELEM* A, int lda,     \
         const REAL* S, const ELEM* U, int ldu, const ELEM* V, int ldv, int* lwork,              \
         gesvdjInfo_t params, int batchSize) {                                                   \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvdj_batched_bs<ELEM>(h, jobz, m, n, A, lda, S, U, ldu, V, ldv, lwork,         \
                                        params, batchSize);                                      \
     }                                                                                           \
@@ -2745,6 +2803,7 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
         cusolverDnHandle_t h, cusolverEigMode_t jobz, int m, int n, ELEM* A, int lda, REAL* S,  \
         ELEM* U, int ldu, ELEM* V, int ldv, ELEM* work, int lwork, int* info,                   \
         gesvdjInfo_t params, int batchSize) {                                                   \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvdj_batched<ELEM>(h, jobz, m, n, A, lda, S, U, ldu, V, ldv, work, lwork,      \
                                     info, params, batchSize);                                   \
     }                                                                                           \
@@ -2753,6 +2812,7 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
         const ELEM* d_A, int lda, long long int strideA, const REAL* d_S,                       \
         long long int strideS, const ELEM* d_U, int ldu, long long int strideU,                 \
         const ELEM* d_V, int ldv, long long int strideV, int* lwork, int batchSize) {           \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvda_bs<ELEM>(h, jobz, rank, m, n, d_A, lda, strideA, d_S, strideS, d_U, ldu,  \
                                strideU, d_V, ldv, strideV, lwork, batchSize);                   \
     }                                                                                           \
@@ -2761,6 +2821,7 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
         const ELEM* d_A, int lda, long long int strideA, REAL* d_S, long long int strideS,      \
         ELEM* d_U, int ldu, long long int strideU, ELEM* d_V, int ldv, long long int strideV,   \
         ELEM* d_work, int lwork, int* d_info, double* h_R_nrmF, int batchSize) {                \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return gesvda_run<ELEM>(h, jobz, rank, m, n, d_A, lda, strideA, d_S, strideS, d_U,      \
                                 ldu, strideU, d_V, ldv, strideV, d_work, lwork, d_info,         \
                                 h_R_nrmF, batchSize);                                           \
@@ -2769,74 +2830,88 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
 #define CUMETAL_DN_COMPLEX_IMPL(PFX, ELEM, REAL, EVD, EVJ)                                      \
     cusolverStatus_t cusolverDn##PFX##getrf_bufferSize(cusolverDnHandle_t h, int m, int n,      \
                                                        ELEM* A, int lda, int* Lwork) {          \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_getrf_bs<ELEM>(h, m, n, A, lda, Lwork);                                       \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##getrf(cusolverDnHandle_t h, int m, int n, ELEM* A,        \
                                             int lda, ELEM* Workspace, int* devIpiv,             \
                                             int* devInfo) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_getrf<ELEM>(h, m, n, A, lda, Workspace, devIpiv, devInfo);                    \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##getrs(cusolverDnHandle_t h, cublasOperation_t trans,      \
                                             int n, int nrhs, const ELEM* A, int lda,            \
                                             const int* devIpiv, ELEM* B, int ldb,               \
                                             int* devInfo) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_getrs<ELEM>(h, trans, n, nrhs, A, lda, devIpiv, B, ldb, devInfo);             \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##geqrf_bufferSize(cusolverDnHandle_t h, int m, int n,      \
                                                        ELEM* A, int lda, int* Lwork) {          \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_geqrf_bs<ELEM>(h, m, n, A, lda, Lwork);                                       \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##geqrf(cusolverDnHandle_t h, int m, int n, ELEM* A,        \
                                             int lda, ELEM* TAU, ELEM* Workspace, int Lwork,     \
                                             int* devInfo) {                                     \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_geqrf<ELEM>(h, m, n, A, lda, TAU, Workspace, Lwork, devInfo);                 \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##potrf_bufferSize(cusolverDnHandle_t h,                    \
                                                        cublasFillMode_t uplo, int n, ELEM* A,   \
                                                        int lda, int* Lwork) {                   \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_potrf_bs<ELEM>(h, uplo, n, A, lda, Lwork);                                    \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##potrf(cusolverDnHandle_t h, cublasFillMode_t uplo,        \
                                             int n, ELEM* A, int lda, ELEM* Workspace,           \
                                             int Lwork, int* devInfo) {                          \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_potrf<ELEM>(h, uplo, n, A, lda, Workspace, Lwork, devInfo);                   \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##potrs(cusolverDnHandle_t h, cublasFillMode_t uplo,        \
                                             int n, int nrhs, const ELEM* A, int lda, ELEM* B,   \
                                             int ldb, int* devInfo) {                            \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_potrs<ELEM>(h, uplo, n, nrhs, A, lda, B, ldb, devInfo);                       \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gesvd_bufferSize(cusolverDnHandle_t h, int m, int n,      \
                                                        int* lwork) {                            \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_gesvd_bs<ELEM>(h, m, n, lwork);                                               \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##gesvd(cusolverDnHandle_t h, signed char jobu,             \
                                             signed char jobvt, int m, int n, ELEM* A, int lda,  \
                                             REAL* S, ELEM* U, int ldu, ELEM* VT, int ldvt,      \
                                             ELEM* work, int lwork, REAL* rwork, int* devInfo) { \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_gesvd<ELEM>(h, jobu, jobvt, m, n, A, lda, S, U, ldu, VT, ldvt, work, lwork,   \
                               rwork, devInfo);                                                  \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVD##_bufferSize(                                         \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,             \
         const ELEM* A, int lda, const REAL* W, int* lwork) {                                    \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_heevd_bs<ELEM>(h, jobz, uplo, n, A, lda, W, lwork);                           \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVD(cusolverDnHandle_t h, cusolverEigMode_t jobz,         \
                                           cublasFillMode_t uplo, int n, ELEM* A, int lda,       \
                                           REAL* W, ELEM* work, int lwork, int* devInfo) {       \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return dn_heevd<ELEM>(h, jobz, uplo, n, A, lda, W, work, lwork, devInfo);               \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVJ##Batched_bufferSize(                                  \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n,             \
         const ELEM* A, int lda, const REAL* W, int* lwork, syevjInfo_t params,                  \
         int batchSize) {                                                                        \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return evj_bs<ELEM>(h, jobz, uplo, n, A, lda, W, lwork, params, batchSize);             \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PFX##EVJ##Batched(                                             \
         cusolverDnHandle_t h, cusolverEigMode_t jobz, cublasFillMode_t uplo, int n, ELEM* A,    \
         int lda, REAL* W, ELEM* work, int lwork, int* info, syevjInfo_t params,                 \
         int batchSize) {                                                                        \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return evj_run<ELEM>(h, jobz, uplo, n, A, lda, W, work, lwork, info, params,            \
                              batchSize, false);                                                 \
     }
@@ -2845,6 +2920,7 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
     cusolverStatus_t cusolverDn##PP##gesv_bufferSize(                                           \
         cusolverDnHandle_t h, int n, int nrhs, ELEM* dA, int ldda, int* dipiv, ELEM* dB,        \
         int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t* lwork_bytes) {                  \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return irs_gesv_bs<ELEM>(h, n, nrhs, dA, ldda, dipiv, dB, lddb, dX, lddx, dWorkspace,   \
                                  lwork_bytes);                                                  \
     }                                                                                           \
@@ -2852,18 +2928,21 @@ cusolverStatus_t cusolverDnXgesvdjGetSweeps(cusolverDnHandle_t handle, gesvdjInf
         cusolverDnHandle_t h, int n, int nrhs, ELEM* dA, int ldda, int* dipiv, ELEM* dB,        \
         int lddb, ELEM* dX, int lddx, void* dWorkspace, size_t lwork_bytes, int* iter,          \
         int* d_info) {                                                                          \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return irs_gesv<ELEM>(h, n, nrhs, dA, ldda, dipiv, dB, lddb, dX, lddx, dWorkspace,      \
                               lwork_bytes, iter, d_info);                                       \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PP##gels_bufferSize(                                           \
         cusolverDnHandle_t h, int m, int n, int nrhs, ELEM* dA, int ldda, ELEM* dB, int lddb,   \
         ELEM* dX, int lddx, void* dWorkspace, size_t* lwork_bytes) {                            \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return irs_gels_bs<ELEM>(h, m, n, nrhs, dA, ldda, dB, lddb, dX, lddx, dWorkspace,       \
                                  lwork_bytes);                                                  \
     }                                                                                           \
     cusolverStatus_t cusolverDn##PP##gels(                                                      \
         cusolverDnHandle_t h, int m, int n, int nrhs, ELEM* dA, int ldda, ELEM* dB, int lddb,   \
         ELEM* dX, int lddx, void* dWorkspace, size_t lwork_bytes, int* iter, int* d_info) {     \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return irs_gels<ELEM>(h, m, n, nrhs, dA, ldda, dB, lddb, dX, lddx, dWorkspace,          \
                               lwork_bytes, iter, d_info);                                       \
     }
@@ -2899,6 +2978,7 @@ CUMETAL_DN_IRS_IMPL(CY, cuComplex)
         cusolverSpHandle_t h, int m, int nnz, const cusparseMatDescr_t descrA,                  \
         const ELEM* csrValA, const int* csrRowPtrA, const int* csrColIndA, ELEM mu0,            \
         const ELEM* x0, int maxite, REAL eps, ELEM* mu, ELEM* x) {                              \
+        CUMETAL_LIBRARY_CALL("cuSOLVER");                                                       \
         return sp_eigvsi<ELEM>(h, m, nnz, descrA, csrValA, csrRowPtrA, csrColIndA, mu0, x0,     \
                                maxite, eps, mu, x);                                             \
     }
@@ -2913,6 +2993,7 @@ cusolverStatus_t cusolverSpCcsrlsvchol(cusolverSpHandle_t h, int m, int nnz,
                                         const cusparseMatDescr_t descrA, const cuComplex* val,
                                         const int* rowPtr, const int* colInd, const cuComplex* b,
                                         float tol, int reorder, cuComplex* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return sp_lsvchol<cuComplex>(h, m, nnz, descrA, val, rowPtr, colInd, b, tol, reorder, x,
                                  singularity);
 }
@@ -2921,6 +3002,7 @@ cusolverStatus_t cusolverSpZcsrlsvchol(cusolverSpHandle_t h, int m, int nnz,
                                         const cuDoubleComplex* val, const int* rowPtr,
                                         const int* colInd, const cuDoubleComplex* b, double tol,
                                         int reorder, cuDoubleComplex* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return sp_lsvchol<cuDoubleComplex>(h, m, nnz, descrA, val, rowPtr, colInd, b, tol, reorder,
                                        x, singularity);
 }
@@ -2928,6 +3010,7 @@ cusolverStatus_t cusolverSpCcsrlsvqr(cusolverSpHandle_t h, int m, int nnz,
                                       const cusparseMatDescr_t descrA, const cuComplex* val,
                                       const int* rowPtr, const int* colInd, const cuComplex* b,
                                       float tol, int reorder, cuComplex* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return sp_lsvqr<cuComplex>(h, m, nnz, descrA, val, rowPtr, colInd, b, tol, reorder, x,
                                singularity);
 }
@@ -2936,6 +3019,7 @@ cusolverStatus_t cusolverSpZcsrlsvqr(cusolverSpHandle_t h, int m, int nnz,
                                       const cuDoubleComplex* val, const int* rowPtr,
                                       const int* colInd, const cuDoubleComplex* b, double tol,
                                       int reorder, cuDoubleComplex* x, int* singularity) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return sp_lsvqr<cuDoubleComplex>(h, m, nnz, descrA, val, rowPtr, colInd, b, tol, reorder, x,
                                      singularity);
 }
@@ -2944,15 +3028,18 @@ cusolverStatus_t cusolverSpZcsrlsvqr(cusolverSpHandle_t h, int m, int nnz,
 // unpivoted LU, and info > 0 is reported through devInfo with SUCCESS.
 cusolverStatus_t cusolverDnSgetrf(cusolverDnHandle_t h, int m, int n, float* A, int lda,
                                    float* Workspace, int* devIpiv, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return dn_getrf<float>(h, m, n, A, lda, Workspace, devIpiv, devInfo);
 }
 cusolverStatus_t cusolverDnDgetrf(cusolverDnHandle_t h, int m, int n, double* A, int lda,
                                    double* Workspace, int* devIpiv, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     return dn_getrf<double>(h, m, n, A, lda, Workspace, devIpiv, devInfo);
 }
 cusolverStatus_t cusolverDnSgetrs(cusolverDnHandle_t h, int trans, int n, int nrhs,
                                    const float* A, int lda, const int* devIpiv, float* B,
                                    int ldb, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (trans < 0 || trans > 2) return h ? CUSOLVER_STATUS_INVALID_VALUE : CUSOLVER_STATUS_NOT_INITIALIZED;
     return dn_getrs<float>(h, static_cast<cublasOperation_t>(trans), n, nrhs, A, lda, devIpiv, B,
                            ldb, devInfo);
@@ -2960,6 +3047,7 @@ cusolverStatus_t cusolverDnSgetrs(cusolverDnHandle_t h, int trans, int n, int nr
 cusolverStatus_t cusolverDnDgetrs(cusolverDnHandle_t h, int trans, int n, int nrhs,
                                    const double* A, int lda, const int* devIpiv, double* B,
                                    int ldb, int* devInfo) {
+    CUMETAL_LIBRARY_CALL("cuSOLVER");
     if (trans < 0 || trans > 2) return h ? CUSOLVER_STATUS_INVALID_VALUE : CUSOLVER_STATUS_NOT_INITIALIZED;
     return dn_getrs<double>(h, static_cast<cublasOperation_t>(trans), n, nrhs, A, lda, devIpiv, B,
                             ldb, devInfo);
