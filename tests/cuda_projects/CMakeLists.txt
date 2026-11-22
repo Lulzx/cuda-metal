@@ -900,6 +900,17 @@ set_tests_properties(functional_cuda_projects_intrinsic_conformance PROPERTIES
     SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
     ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir")
 
+# #218: CUDART_INF / __double_as_longlong libdevice bit casts and a switch
+# jump table (brx.idx) on the typed PTX backend, bit-exact against the host.
+add_test(NAME functional_cuda_projects_typed_ptx_fp64_switch
+    COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
+        ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}
+        typed_ptx_fp64_switch typed_ptx_fp64_switch.cu typed_ptx_fp64_switch
+        "PASS: typed PTX FP64 bit casts and switch jump tables")
+set_tests_properties(functional_cuda_projects_typed_ptx_fp64_switch PROPERTIES
+    SKIP_RETURN_CODE 77 RUN_SERIAL TRUE
+    ENVIRONMENT "CUMETAL_BUILD_DIR=${CMAKE_BINARY_DIR};CUMETAL_PTX_BACKEND=cumetal-ir;CUMETAL_FP64_MODE=fast48")
+
 add_test(NAME functional_cuda_projects_thrust_gpu_sort
     COMMAND bash ${CMAKE_CURRENT_SOURCE_DIR}/run_strict_standalone_cu.sh
         ${CMAKE_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR}

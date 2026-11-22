@@ -119,6 +119,33 @@ All notable changes to CuMetal are documented here. Format follows
   reports no working set returns `NVML_ERROR_NOT_SUPPORTED`. The device name is
   the Metal device's (`Apple M4 Pro`), not the CPU brand string, and the UUID is
   derived from its `registryID`.
+
+- **Typed PTX: `CUDART_INF` and `__double_as_longlong` (#218).** Under
+  `-nocudalib` clang leaves `__nv_longlong_as_double` and
+  `__nv_double_as_longlong` as libdevice calls, and `math_constants.h` spells
+  `CUDART_INF` through the first. The typed PTX importer had no definition, so
+  any kernel using those constants failed to import; they are now a
+  reinterpretation of the 64-bit storage word in every FP64 mode, as on the
+  NVVM path.
+- **Typed PTX: switch jump tables (#218).** clang lowers a dense C++ `switch`
+  to `brx.idx` over a `.branchtargets` table, which the typed importer refused
+  ("ptx.branchtargets has no CuMetal IR normalization"). Each `brx.idx` is now
+  rewritten after parsing into a balanced tree of `setp.lt.u32` + `@p bra`, so
+  every later CFG analysis sees ordinary branches. A predicated `brx.idx`, an
+  unknown table or an empty one is refused. The PTX parser also accepts
+  targets written on the directive's own line or several to a line, which
+  both backends previously refused.
+- **Private record fields across two reference parameters (#218).** A helper
+  that writes through one private record reference and reads a pointer field
+  from another was always refused ("unresolved alias between record
+  parameters"); the proof now accepts it when every call site passes disjoint
+  memory. Large generated modules no longer exhaust the call-effect summary's
+  fixed budget before it starts. See `docs/known-gaps/compiler.md` for the
+  next blocker in generativeqc's one-electron kernels.
+- **Shuffle coverage for `__shfl_sync` with `width < 32` (#210).** The typed
+  PTX `maxLane` already masks `c` with `~segmask` (from the
+  `__shfl_xor_sync` fix); `intrinsic_conformance` now also checks indexed
+  shuffles at every width with sources at, past and across segment ends.
 - **Device `printf` with mixed 32/64-bit arguments.** CUDA's argument tuple
   places each value at its natural alignment, so `printf("%d %f", i, d)` has
   four bytes of padding. The typed NVVM importer refused such calls and the

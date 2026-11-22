@@ -1,7 +1,9 @@
 // CUDA intrinsic semantics that an Apple GPU does not give for free:
-//   * __shfl_{xor,down,up}_sync with width < 32 follow the PTX shfl.sync
-//     segment rules: a butterfly partner in an EARLIER segment is readable,
-//     one past the end of the caller's segment keeps the caller's value.
+//   * __shfl_{xor,down,up}_sync and __shfl_sync with width < 32 follow the
+//     PTX shfl.sync segment rules: a butterfly partner in an EARLIER segment
+//     is readable, one past the end of the caller's segment keeps the
+//     caller's value, and an indexed source wraps into the caller's segment
+//     (maxLane = minLane | (c & ~segmask), #210).
 //   * __syncthreads_count/_and/_or reduce a predicate over the whole block.
 //   * __fmul_rn/__fadd_rn are never contracted into an FMA, while a plain
 //     a * b + c is (nvcc's default --fmad=true), even in the same kernel.
@@ -12,8 +14,21 @@
 #include <cstring>
 #include <vector>
 
+// Indexed-shuffle sources that straddle a segment boundary: the segment's
+// first and last lane, one past its end, the last lane of the warp, and a
+// per-lane source that crosses into the next segment for the last lane.
+__host__ __device__ static unsigned idx_source(unsigned lane, unsigned width, unsigned m) {
+    switch (m) {
+    case 0: return 0u;
+    case 1: return width - 1u;
+    case 2: return width;
+    case 3: return 31u;
+    default: return lane + 1u;
+    }
+}
+
 __global__ void shuffles(const unsigned* in, unsigned* xor_out, unsigned* down_out,
-                         unsigned* up_out) {
+                         unsigned* up_out, unsigned* idx_out) {
     const unsigned gid = blockIdx.x * blockDim.x + threadIdx.x;
     const unsigned v = in[gid];
     const int widths[5] = {32, 16, 8, 4, 2};
@@ -23,6 +38,8 @@ __global__ void shuffles(const unsigned* in, unsigned* xor_out, unsigned* down_o
             xor_out[slot] = __shfl_xor_sync(0xffffffffu, v, 1 << m, widths[w]);
             down_out[slot] = __shfl_down_sync(0xffffffffu, v, 1u << m, widths[w]);
             up_out[slot] = __shfl_up_sync(0xffffffffu, v, 1u << m, widths[w]);
+            idx_out[slot] = __shfl_sync(
+                0xffffffffu, v, (int)idx_source(threadIdx.x & 31u, widths[w], m), widths[w]);
         }
     }
 }
@@ -70,6 +87,7 @@ static unsigned reference_shuffle(const std::vector<unsigned>& in, unsigned warp
                                   unsigned lane, unsigned b, unsigned width, char mode) {
     const unsigned segmask = 32u - width;
     const unsigned cval = mode == 'u' ? 0u : 31u;
+    if (mode == 'i') b = idx_source(lane, width, b);
     const unsigned min_lane = lane & segmask;
     const unsigned max_lane = min_lane | (cval & ~segmask & 31u);
     int j = (int)lane;
@@ -77,6 +95,7 @@ static unsigned reference_shuffle(const std::vector<unsigned>& in, unsigned warp
     if (mode == 'x') { j = (int)(lane ^ b); valid = j <= (int)max_lane; }
     if (mode == 'd') { j = (int)(lane + b); valid = j <= (int)max_lane; }
     if (mode == 'u') { j = (int)lane - (int)b; valid = j >= (int)max_lane; }
+    if (mode == 'i') { j = (int)(min_lane | (b & ~segmask & 31u)); valid = j <= (int)max_lane; }
     return in[warp_base + (valid ? (unsigned)j : lane)];
 }
 
@@ -87,28 +106,31 @@ static int check_shuffles() {
     for (unsigned& v : in) v = lcg(&seed);
     unsigned *d_in = nullptr, *d_out = nullptr;
     if (cudaMalloc(&d_in, n * 4) != cudaSuccess ||
-        cudaMalloc(&d_out, 3 * n * 25 * 4) != cudaSuccess) return 1;
+        cudaMalloc(&d_out, 4 * n * 25 * 4) != cudaSuccess) return 1;
     cudaMemcpy(d_in, in.data(), n * 4, cudaMemcpyHostToDevice);
-    shuffles<<<blocks, threads>>>(d_in, d_out, d_out + n * 25, d_out + 2 * n * 25);
-    std::vector<unsigned> out(3 * n * 25);
+    shuffles<<<blocks, threads>>>(d_in, d_out, d_out + n * 25, d_out + 2 * n * 25,
+                                  d_out + 3 * n * 25);
+    std::vector<unsigned> out(4 * n * 25);
     if (cudaGetLastError() != cudaSuccess || cudaDeviceSynchronize() != cudaSuccess ||
         cudaMemcpy(out.data(), d_out, out.size() * 4, cudaMemcpyDeviceToHost) != cudaSuccess) {
         std::fprintf(stderr, "FAIL: shuffle launch\n");
         return 1;
     }
     const unsigned widths[5] = {32, 16, 8, 4, 2};
-    const char modes[3] = {'x', 'd', 'u'};
-    for (unsigned k = 0; k < 3; ++k) {
+    const char modes[4] = {'x', 'd', 'u', 'i'};
+    for (unsigned k = 0; k < 4; ++k) {
         for (unsigned gid = 0; gid < n; ++gid) {
             for (unsigned w = 0; w < 5; ++w) {
                 for (unsigned m = 0; m < 5; ++m) {
+                    // idx passes the source-table slot; the others a delta/mask.
+                    const unsigned b = modes[k] == 'i' ? m : 1u << m;
                     const unsigned expected = reference_shuffle(in, gid & ~31u, gid & 31u,
-                                                                1u << m, widths[w], modes[k]);
+                                                                b, widths[w], modes[k]);
                     const unsigned actual = out[k * n * 25 + gid * 25 + w * 5 + m];
                     if (actual != expected) {
                         std::fprintf(stderr,
                                      "FAIL: shfl mode=%c lane=%u width=%u b=%u got %08x want %08x\n",
-                                     modes[k], gid & 31u, widths[w], 1u << m, actual, expected);
+                                     modes[k], gid & 31u, widths[w], b, actual, expected);
                         return 1;
                     }
                 }

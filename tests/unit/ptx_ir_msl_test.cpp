@@ -762,6 +762,100 @@ bool test_helper_module_constants() {
 // (COLMAP's PatchMatch picks the best of five normal pointers this way): the
 // 32-bit index is a finite literal set, widened by mul.wide.u32, so the load
 // reads known table cells. An index with an unknown arm stays unresolved.
+// clang lowers a dense C++ switch to a `brx.idx` jump table (#218). The typed
+// importer rewrites it into conditional branches; the table may list targets
+// one per line, several per line, or on the directive's own line.
+bool test_indexed_branch_table() {
+    using namespace cumetal;
+    bool ok = true;
+    const auto module = [](const std::string& dispatch, const std::string& table) {
+        return std::string(R"ptx(
+.version 7.0
+.target sm_80
+.address_size 64
+.func (.param .b32 result) pick(.param .b32 selector)
+{
+	.reg .pred 	%p<2>;
+	.reg .b32 	%r<4>;
+	ld.param.b32 	%r1, [selector];
+	setp.gt.u32 	%p1, %r1, 4;
+	@%p1 bra 	$L__default;
+)ptx") + table + "\n" + dispatch + R"ptx(
+$L__c0:
+	mov.b32 	%r2, 10;
+	bra.uni 	$L__done;
+$L__c1:
+	mov.b32 	%r2, 11;
+	bra.uni 	$L__done;
+$L__c2:
+	mov.b32 	%r2, 12;
+	bra.uni 	$L__done;
+$L__c3:
+	mov.b32 	%r2, 13;
+	bra.uni 	$L__done;
+$L__c4:
+	mov.b32 	%r2, 14;
+	bra.uni 	$L__done;
+$L__default:
+	mov.b32 	%r2, 99;
+$L__done:
+	st.param.b32 	[result], %r2;
+	ret;
+}
+.visible .entry switch_probe(.param .u64 .ptr .global out, .param .u32 selector)
+{
+	.reg .b32 	%r<4>;
+	.reg .b64 	%rd<3>;
+	.param .b32 	argument;
+	.param .b32 	answer;
+	ld.param.u64 	%rd1, [out];
+	ld.param.u32 	%r1, [selector];
+	st.param.b32 	[argument], %r1;
+	call.uni 	(answer), pick, (argument);
+	ld.param.b32 	%r2, [answer];
+	cvta.to.global.u64 	%rd2, %rd1;
+	st.global.u32 	[%rd2], %r2;
+	ret;
+}
+)ptx";
+    };
+    const std::string dispatch = "\tbrx.idx \t%r1, $L_brx_0;";
+    const std::string multiline = "\t$L_brx_0: .branchtargets\n\t\t$L__c0,\n\t\t$L__c1, $L__c2,\n"
+                                  "\t\t$L__c3,\n\t\t$L__c4;";
+    const std::string one_line = "\t$L_brx_0: .branchtargets $L__c0, $L__c1, $L__c2, $L__c3, $L__c4;";
+    for (const auto& [name, table] : {std::pair<std::string, std::string>{"multi-line table", multiline},
+                                      {"single-line table", one_line}}) {
+        const auto compiled = metal::compile_ptx_to_msl(module(dispatch, table));
+        ok &= expect(compiled.ok, name + " brx.idx lowers on the typed backend: " + compiled.error);
+        if (!compiled.ok) continue;
+        for (const char* value : {"10", "11", "12", "13", "14", "99"})
+            ok &= expect(compiled.source.find(value) != std::string::npos,
+                         name + " keeps every switch arm (" + value + ")");
+        unsigned conditional = 0;
+        for (const auto& function : compiled.gpu_ir.functions) {
+            if (function.name != "pick") continue;
+            for (const auto& block : function.blocks)
+                for (const auto& operation : block.operations)
+                    conditional += operation.opcode == ir::OpCode::kCondBranch;
+        }
+        // The range check plus a five-way tree (four comparisons).
+        ok &= expect(conditional == 5, name + " lowers to a comparison tree, got " +
+                                           std::to_string(conditional) + " conditional branches");
+    }
+    const auto refused = [&](const std::string& name, const std::string& source,
+                             const std::string& diagnostic) {
+        const auto compiled = metal::compile_ptx_to_msl(source);
+        return expect(!compiled.ok && compiled.error.find(diagnostic) != std::string::npos,
+                      name + " is refused: " + compiled.error);
+    };
+    ok &= refused("predicated brx.idx",
+                  module("\t@%p1 brx.idx \t%r1, $L_brx_0;", multiline), "predicated brx.idx");
+    ok &= refused("unknown table", module("\tbrx.idx \t%r1, $L_brx_7;", multiline),
+                  "unknown branch-target table");
+    ok &= refused("empty table", module(dispatch, "\t$L_brx_0: .branchtargets;"), "has no targets");
+    return ok;
+}
+
 bool test_selp_indexed_pointer_table() {
     using namespace cumetal;
     bool ok = true;
@@ -2153,6 +2247,7 @@ int main() {
     bool ok = true;
     ok &= test_packed_aggregate_return_words();
     ok &= test_helper_module_constants();
+    ok &= test_indexed_branch_table();
     ok &= test_selp_indexed_pointer_table();
     ok &= test_pure_builtin_call_preserves_pointer_cell();
     ok &= test_unbounded_private_store_guard();
