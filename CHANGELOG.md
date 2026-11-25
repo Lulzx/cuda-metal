@@ -6,6 +6,16 @@ All notable changes to CuMetal are documented here. Format follows
 
 ## [Unreleased]
 
+## [0.9.1] - 2026-11-25
+
+### Fixed
+
+- **Installed `cumetalc` finds its own headers.** The device pass looked for
+  `cuda_runtime.h` in the build's source tree, which Homebrew deletes after
+  installing, so an installed `cumetalc` could not compile any kernel. It now
+  uses the installed `include/` directory. The installed-toolchain test
+  poisons the installed header for device code to prove it is the one in use.
+
 ## [0.9.0] - 2026-11-22
 
 ### Added

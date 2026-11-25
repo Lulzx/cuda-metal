@@ -20,7 +20,7 @@ is split by subsystem.
   lowered since Homebrew LLVM 23 and are recorded as `no-lowering` (2026-11-22). The cooperative CG entry requires
   both its device residual and independent host equation error.
 - Production-metallib source corpus with CUDA Clang 21-23: direct typed IR
-  **57/57**, typed PTX **56/57**, legacy PTX **50/57**.
+  **58/58**, typed PTX **57/58**, legacy PTX **50/58**.
 - Exact in-tree numerical corpus: typed PTX **51/51** and direct native AOT
   **49/49** on Apple M4 Pro with workload specializations disabled (2026-11-08).
 - The named five-kernel Phase 5 release set—vector add, SAXPY, STREAM copy,

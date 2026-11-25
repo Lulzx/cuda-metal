@@ -2,6 +2,7 @@
 
 [Documentation index](../README.md)
 
+- [v0.9.1](v0.9.1.md) — installed `cumetalc` finds its own headers (Homebrew fix)
 - [v0.9.0](v0.9.0.md) — Cuport-Matrix conformance fixes, shared memory past 32 KB,
   `cudaErrorAssert`, silent wrong answers fixed in runtime, driver and compiler
 - [v0.8.0](v0.8.0.md) — wide48 hypot, faster exact division, FP64 independent of

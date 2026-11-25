@@ -13,7 +13,7 @@ producers:
         - "scripts/claimwire_evidence.py"
     on_stale: error
     epochs:
-      current: backend_matrix-ac096cd2
+      current: backend_matrix-9ffa1f8d
 
   cumetal.samples_sweep:
     command: ["scripts/claimwire_evidence.py", "samples-sweep"]
